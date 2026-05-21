@@ -1,0 +1,14 @@
+name: Release (placeholder)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Release workflow placeholder
+        run: |
+          echo "Release workflow lands in M0.0.4."
+          echo "Will: cargo build --release --features embed-web for 5 targets,"
+          echo "       sign artifacts, upload to GitHub Releases."
