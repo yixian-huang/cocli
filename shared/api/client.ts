@@ -10,6 +10,9 @@ import type {
   HistoryResult,
   Message,
   OverflowStatsEntry,
+  Plugin,
+  PluginCapability,
+  PluginRegistration,
   ResponderMode,
   ResponderRole,
   Task,
@@ -30,12 +33,12 @@ let apiKey = ''
 
 export function setApiKey(key: string) {
   apiKey = key
-  localStorage.setItem(storageKey('api-key'), key)
+  localStorage.setItem(storageKey('token'), key)
 }
 
 export function getApiKey(): string {
   if (!apiKey) {
-    apiKey = localStorage.getItem(storageKey('api-key')) || ''
+    apiKey = localStorage.getItem(storageKey('token')) || ''
   }
   return apiKey
 }
@@ -107,7 +110,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
           ...options,
           headers: {
             'Content-Type': 'application/json',
-            'X-API-Key': sentKey,
+            'X-Cocli-Token': sentKey,
             'X-Request-Id': requestId,
             ...options.headers,
           },
@@ -117,7 +120,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
         }
         if (!res.ok) {
           if (res.status >= 500 && attempt < maxRetries) {
-            await sleep(retryDelays[attempt])
+            await sleep(retryDelays[attempt] ?? 1000)
             continue
           }
           const body = await res.text()
@@ -130,7 +133,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       } catch (err) {
         if (err instanceof TypeError && attempt < maxRetries) {
           // Network error (fetch throws TypeError for network failures)
-          await sleep(retryDelays[attempt])
+          await sleep(retryDelays[attempt] ?? 1000)
           continue
         }
         throw err
@@ -144,23 +147,33 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 // Channels
 export const channels = {
-  list: (zoneId: string, opts?: { includeArchived?: boolean }) => {
+  list: (opts?: { includeArchived?: boolean }) => {
     const q = opts?.includeArchived ? '?includeArchived=true' : ''
-    return request<Channel[]>(`/api/zones/${zoneId}/channels${q}`)
+    return request<Channel[]>(`/api/channels${q}`)
   },
-  create: (zoneId: string, name: string, description?: string) => request<Channel>(`/api/zones/${zoneId}/channels`, {
-    method: 'POST',
-    body: JSON.stringify({ name, description }),
-  }),
+  create: (name: string, description?: string) =>
+    request<Channel>(`/api/channels`, {
+      method: 'POST',
+      body: JSON.stringify({ name, description }),
+    }),
   get: (id: string) => request<Channel>(`/api/channels/${id}`),
   update: (id: string, data: { displayName?: string; description?: string }) =>
-    request<Channel>(`/api/channels/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    request<Channel>(`/api/channels/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   delete: (id: string) => request<void>(`/api/channels/${id}`, { method: 'DELETE' }),
-  getMembers: (id: string) => request<{ id: string; memberId: string; memberType: string }[]>(`/api/channels/${id}/members`),
+  getMembers: (id: string) =>
+    request<{ id: string; memberId: string; memberType: string }[]>(
+      `/api/channels/${id}/members`
+    ),
   addMember: (id: string, memberId: string, memberType: string) =>
-    request<void>(`/api/channels/${id}/members`, { method: 'POST', body: JSON.stringify({ memberId, memberType }) }),
+    request<void>(`/api/channels/${id}/members`, {
+      method: 'POST',
+      body: JSON.stringify({ memberId, memberType }),
+    }),
   removeMember: (id: string, memberId: string, memberType: string) =>
-    request<void>(`/api/channels/${id}/members`, { method: 'DELETE', body: JSON.stringify({ memberId, memberType }) }),
+    request<void>(`/api/channels/${id}/members`, {
+      method: 'DELETE',
+      body: JSON.stringify({ memberId, memberType }),
+    }),
   listResponderPolicies: (id: string) =>
     request<ChannelResponderPolicy[]>(`/api/channels/${id}/responder-policies`),
   upsertResponderPolicy: (id: string, agentId: string, role: ResponderRole, priorityWeight = 0) =>
@@ -175,21 +188,41 @@ export const channels = {
       method: 'PUT',
       body: JSON.stringify({ mode }),
     }),
-  archive: (channelId: string, archived: boolean) =>
-    request<{ ok: true; archived: boolean }>(`/api/channels/${channelId}/archive`, {
+  archive: (id: string, archived: boolean) =>
+    request<{ ok: true; archived: boolean }>(`/api/channels/${id}/archive`, {
       method: 'PATCH',
       body: JSON.stringify({ archived }),
     }),
 }
 
-// User prefs
-export const prefs = {
-  get: () => request<{ prefs: Record<string, unknown> }>(`/api/users/me/prefs`),
-  put: (prefs: Record<string, unknown>) =>
-    request<{ ok: true }>(`/api/users/me/prefs`, {
-      method: 'PUT',
-      body: JSON.stringify({ prefs }),
+// Settings (spec §4.1 — replaces SaaS user-prefs)
+export const settings = {
+  get: () => request<Record<string, unknown>>(`/api/settings`),
+  patch: (payload: Record<string, unknown>) =>
+    request<{ ok: true }>(`/api/settings`, {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
     }),
+}
+
+// Version + health (spec §4.1)
+export const version = {
+  get: () => request<{ version: string; commit: string; buildTime?: string }>(`/api/version`),
+}
+
+export const health = {
+  get: () => request<void>(`/api/health`),
+}
+
+// Plugins (spec §4.1 + §4.4)
+export const plugins = {
+  list: () => request<Plugin[]>(`/api/plugins`),
+  register: (name: string, capabilities: PluginCapability[]) =>
+    request<PluginRegistration>(`/api/plugins`, {
+      method: 'POST',
+      body: JSON.stringify({ name, capabilities }),
+    }),
+  revoke: (id: string) => request<void>(`/api/plugins/${id}`, { method: 'DELETE' }),
 }
 
 // Pins
@@ -221,17 +254,18 @@ export const reactions = {
 
 // Search
 export const search = {
-  messages: (zoneId: string, q: string, limit?: number, options?: { signal?: AbortSignal }) => {
+  messages: (q: string, limit?: number, options?: { signal?: AbortSignal }) => {
     const qs = new URLSearchParams({ q })
     if (limit) qs.set('limit', String(limit))
-    return request<{ messages: Message[] }>(`/api/zones/${zoneId}/messages/search?${qs}`, {
+    return request<{ messages: Message[] }>(`/api/messages/search?${qs}`, {
       signal: options?.signal,
     })
   },
 }
 
+// History
 export const history = {
-  list: (zoneId: string, params: HistoryQuery = {}) => {
+  list: (params: HistoryQuery = {}) => {
     const qs = new URLSearchParams()
     if (params.channelId) qs.set('channelId', params.channelId)
     if (params.q) qs.set('q', params.q)
@@ -241,7 +275,7 @@ export const history = {
     if (params.senderId) qs.set('senderId', params.senderId)
     qs.set('page', String(params.page ?? 1))
     qs.set('pageSize', String(params.pageSize ?? 30))
-    return request<HistoryResult>(`/api/zones/${zoneId}/history?${qs.toString()}`)
+    return request<HistoryResult>(`/api/history?${qs.toString()}`)
   },
 }
 
@@ -272,30 +306,29 @@ export const messages = {
 
 // DMs
 export const dm = {
-  list: (zoneId: string) => request<Channel[]>(`/api/zones/${zoneId}/dm`),
-  createOrGet: (zoneId: string, peerName: string, peerType?: string) => request<Channel>(`/api/zones/${zoneId}/dm`, {
-    method: 'POST',
-    body: JSON.stringify({ peerName, peerType }),
-  }),
+  list: () => request<Channel[]>(`/api/dm`),
+  createOrGet: (peerName: string, peerType?: string) =>
+    request<Channel>(`/api/dm`, {
+      method: 'POST',
+      body: JSON.stringify({ peerName, peerType }),
+    }),
 }
 
 // Agents
 export const agents = {
-  list: (zoneId: string) => request<Agent[]>(`/api/zones/${zoneId}/agents`),
-  create: (zoneId: string, data: {
-      name: string;
-      runtime?: string;
-      model?: string;
-      description?: string;
-      machineId?: string;
-      workingRuntime?: string;
-      workingModel?: string;
-      chatOnly?: boolean;
-  }) =>
-    request<Agent>(`/api/zones/${zoneId}/agents`, { method: 'POST', body: JSON.stringify(data) }),
+  list: () => request<Agent[]>(`/api/agents`),
+  create: (data: {
+    name: string
+    runtime?: string
+    model?: string
+    description?: string
+    workingRuntime?: string
+    workingModel?: string
+    chatOnly?: boolean
+  }) => request<Agent>(`/api/agents`, { method: 'POST', body: JSON.stringify(data) }),
   get: (id: string) => request<Agent>(`/api/agents/${id}`),
   update: (id: string, data: Partial<Agent>) =>
-    request<Agent>(`/api/agents/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    request<Agent>(`/api/agents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   start: (id: string) => request<void>(`/api/agents/${id}/start`, { method: 'POST' }),
   stop: (id: string, force?: boolean) =>
     request<void>(`/api/agents/${id}/stop${force ? '?force=true' : ''}`, { method: 'POST' }),
@@ -309,7 +342,7 @@ export const agents = {
   forkThread: (id: string) =>
     request<void>(`/api/agents/${id}/thread/fork`, { method: 'POST' }),
   delete: (id: string) => request<void>(`/api/agents/${id}`, { method: 'DELETE' }),
-  runtimes: (zoneId: string) => request<string[]>(`/api/zones/${zoneId}/agents/runtimes`),
+  runtimes: () => request<string[]>(`/api/agents/runtimes`),
 }
 
 // Attachments
@@ -324,7 +357,7 @@ export const attachments = {
       const res = await fetch(buildUrl('/api/attachments/upload'), {
         method: 'POST',
         headers: {
-          'X-API-Key': sentKey,
+          'X-Cocli-Token': sentKey,
           'X-Request-Id': requestId,
         },
         body: form,
@@ -349,8 +382,7 @@ export const threads = {
     request<Channel>(`/api/channels/${channelId}/messages/${messageId}/thread`, { method: 'POST' }),
   list: (channelId: string) =>
     request<Channel[]>(`/api/channels/${channelId}/threads`),
-  listAll: (zoneId: string) =>
-    request<{ threads: ThreadSummary[] }>(`/api/zones/${zoneId}/threads`),
+  listAll: () => request<{ threads: ThreadSummary[] }>(`/api/threads`),
   setDone: (threadId: string, done: boolean) =>
     request<{ id: string; done: boolean }>(`/api/threads/${threadId}/done`, {
       method: 'PATCH',

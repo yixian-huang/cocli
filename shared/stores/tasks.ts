@@ -1,7 +1,5 @@
 // shared/stores/tasks.ts
-import { create } from 'zustand'
-import { zoneTasks } from '@shared/api/client'
-import type { Task } from '@shared/types'
+import type { Task, TaskStatus } from '@shared/types'
 import { sortForDisplay, type FilterValue, filterToStatus } from './filter'
 
 export interface TasksState {
@@ -10,39 +8,22 @@ export interface TasksState {
   error: string | null
   filter: FilterValue
   setFilter: (f: FilterValue) => void
-  /** Fetch from server. Pure side-effect. */
-  refresh: (zoneId: string) => Promise<void>
   /** Replace one row in-place (used after optimistic mutation). */
   upsertOne: (t: Task) => void
   /** Remove one row by id (used after delete). */
   removeOne: (id: string) => void
 }
 
-export const useTasksStore = create<TasksState>((set, get) => ({
-  rows: [],
-  loading: false,
-  error: null,
-  filter: 'all',
+/** Minimal store factory — consumers wire zustand in their own layer. */
+export function makeInitialState(): Omit<TasksState, 'setFilter' | 'upsertOne' | 'removeOne'> {
+  return { rows: [], loading: false, error: null, filter: 'all' }
+}
 
-  setFilter: (f) => set({ filter: f }),
+/** Filter rows client-side by the active filter value. */
+export function applyFilter(rows: Task[], filter: FilterValue): Task[] {
+  const status: TaskStatus | undefined = filterToStatus(filter)
+  if (!status) return rows
+  return rows.filter((t) => t.status === status)
+}
 
-  refresh: async (zoneId) => {
-    set({ loading: true, error: null })
-    try {
-      const status = filterToStatus(get().filter)
-      const rows = await zoneTasks.list(zoneId, status ? { status } : undefined)
-      set({ rows: sortForDisplay(rows), loading: false })
-    } catch (e) {
-      set({ loading: false, error: (e as Error).message })
-    }
-  },
-
-  upsertOne: (t) => {
-    const rows = get().rows
-    const idx = rows.findIndex((r) => r.id === t.id)
-    const next = idx >= 0 ? [...rows.slice(0, idx), t, ...rows.slice(idx + 1)] : [t, ...rows]
-    set({ rows: sortForDisplay(next) })
-  },
-
-  removeOne: (id) => set({ rows: get().rows.filter((r) => r.id !== id) }),
-}))
+export { sortForDisplay }
