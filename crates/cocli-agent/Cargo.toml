@@ -1,0 +1,30 @@
+[package]
+name = "cocli-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Agent actor (typestate) + dispatch router + delivery queue"
+
+[dependencies]
+cocli-protocol      = { path = "../cocli-protocol" }
+cocli-actor         = { path = "../cocli-actor" }
+cocli-pidfile       = { path = "../cocli-pidfile" }
+cocli-driver-claude = { path = "../cocli-driver-claude" }
+cocli-bridge-config = { path = "../cocli-bridge-config" }
+
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+tracing     = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+uuid        = { workspace = true }
+chrono      = { workspace = true }
+thiserror   = { workspace = true }
+nix         = { workspace = true }
+base64      = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
