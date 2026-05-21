@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense, type ComponentProps } from 'react'
-import { Outlet } from 'react-router-dom'
+import { Outlet, useLocation } from 'react-router-dom'
 import { useChannelStore } from '@/stores/channelStore'
 import { useAgentStore } from '@/stores/agentStore'
 import { useViewStore } from '@/stores/viewStore'
@@ -75,6 +75,8 @@ function AppLayout() {
   const { mode, toggleFamilyMode, canToggleFamilyMode } = useTheme()
   const dark = mode === 'dark'
   const toggleDark = toggleFamilyMode
+  const location = useLocation()
+  const isSettingsRoute = location.pathname.startsWith('/settings/')
   const activeAgentId = useViewStore((s) => s.activeAgentId)
   const clearActiveAgent = useViewStore((s) => s.clearActiveAgent)
   const exitAgentView = useExitAgentView()
@@ -277,7 +279,7 @@ function AppLayout() {
       {/* Main area */}
       <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
         <Outlet />
-        {activeAgentId ? (
+        {isSettingsRoute ? null : activeAgentId ? (
           <>
             <div className="h-12 border-b flex items-center px-3 gap-2 shrink-0 md:hidden">
               <button
