@@ -21,7 +21,7 @@
     "highlight.js": "^11.11.1",
     "i18next": "^26.0.10",
     "i18next-browser-languagedetector": "^8.2.1",
-    "katex": "^0.16.45",
+    "katex": "^0.16.47",
     "lucide-react": "^1.7.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
