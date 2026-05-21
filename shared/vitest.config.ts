@@ -14,5 +14,6 @@ export default defineConfig({
     environment: 'node',
     globals: true,
     include: ['**/*.{test,spec}.?(c|m)[jt]s?(x)'],
+    exclude: ['**/node_modules/**', 'node_modules/**'],
   },
 })
