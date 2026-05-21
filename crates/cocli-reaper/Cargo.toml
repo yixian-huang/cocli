@@ -1,0 +1,25 @@
+[package]
+name = "cocli-reaper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Boot-time orphan agent reaper with Go-parity 5-way ppid logic"
+
+[dependencies]
+cocli-pidfile = { path = "../cocli-pidfile" }
+sysinfo       = { workspace = true }
+nix           = { workspace = true }
+tracing       = { workspace = true }
+# Direct dep so the workspace pin reaches sysinfo's resolver (rayon 1.11+
+# requires rustc 1.80; we're on 1.78).
+rayon         = { workspace = true }
+rayon-core    = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lib]
+doctest = false
