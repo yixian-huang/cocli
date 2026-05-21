@@ -19,7 +19,6 @@ export function HistoryPanel() {
   const channels = useChannelStore((s) => s.channels)
   const dms = useChannelStore((s) => s.dmChannels)
   const agents = useAgentStore((s) => s.agents)
-  const users: { id: string; name: string; displayName?: string }[] = []
   const setWorkspacePanel = useWorkspacePanelStore((s) => s.setPanel)
 
   const items = useHistoryStore((s) => s.items)
@@ -42,12 +41,14 @@ export function HistoryPanel() {
   const canNext = page < totalPages
 
   const senderOptions = useMemo(
-    () =>
-      [
+    () => {
+      const users: { id: string; name: string; displayName?: string }[] = []
+      return [
         ...users.map((u) => ({ id: u.id, label: u.displayName || u.name, type: 'user' as const })),
         ...agents.map((a) => ({ id: a.id, label: a.displayName || a.name, type: 'agent' as const })),
-      ].sort((a, b) => a.label.localeCompare(b.label)),
-    [users, agents],
+      ].sort((a, b) => a.label.localeCompare(b.label))
+    },
+    [agents],
   )
 
   return (

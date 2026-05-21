@@ -25,8 +25,9 @@ function makeChannel(over: Partial<Channel> & Pick<Channel, 'id' | 'name'>): Cha
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function setUser(_role: string) {
-  // Single-tenant: User has no role field; cast as any for test compat
+  // Single-tenant: User has no role field
   useUserStore.setState({
     user: { id: 'u1', name: 'me', displayName: 'Me' } as User,
   })

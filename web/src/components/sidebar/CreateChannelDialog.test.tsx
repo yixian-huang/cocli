@@ -3,7 +3,7 @@ import { fireEvent, render, screen, waitFor, cleanup } from '@testing-library/re
 import { CreateChannelDialog } from './CreateChannelDialog'
 import { useDialogStore, resetDialogStore } from '@/stores/dialogStore'
 import * as client from '@/api/client'
-import type { Channel } from '@/lib/types'
+import type { Channel, Agent } from '@/lib/types'
 import { useAgentStore } from '@/stores/agentStore'
 
 const fakeChannel: Channel = {
@@ -17,10 +17,20 @@ describe('<CreateChannelDialog>', () => {
   beforeEach(() => {
     resetDialogStore()
     vi.spyOn(client.channels, 'list').mockResolvedValue([])
+    const mockAgent: Agent = {
+      id: 'a1',
+      name: 'agent-1',
+      status: 'online',
+      attentionState: 'idle',
+      runtime: 'test-runtime',
+      model: 'test-model',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    }
     useAgentStore.setState({
-      agents: [{ id: 'a1', name: 'agent-1', status: 'online' } as any],
+      agents: [mockAgent],
       loading: false,
-    } as any)
+    })
   })
   afterEach(() => {
     cleanup()

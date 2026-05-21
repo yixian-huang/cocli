@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { useMemoryStore } from '@/stores/memoryStore'
+import type { MemoryTopic } from '@/api/client'
 import { ChannelMemoryPanel } from './ChannelMemoryPanel'
 
 beforeEach(() => {
   useMemoryStore.setState({
-    entries: { 'channel:c1': '- [project_apollo](project_apollo.md) — Apollo plan\n- [reference_links](reference_links.md) — External links\n' } as any,
-    topics: {} as any,
+    entries: { 'channel:c1': '- [project_apollo](project_apollo.md) — Apollo plan\n- [reference_links](reference_links.md) — External links\n' } as unknown as Record<string, string>,
+    topics: {} as unknown as Record<string, MemoryTopic>,
   })
 })
 

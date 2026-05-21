@@ -1,12 +1,13 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import { render, screen, waitFor } from '@testing-library/react'
 import { useMemoryStore } from '@/stores/memoryStore'
+import type { MemoryTopic } from '@/api/client'
 import { MemoryTab } from './MemoryTab'
 
 beforeEach(() => {
   useMemoryStore.setState({
-    entries: { 'agent:a1': '- [user_alice](user_alice.md) — Alice frontend prefs\n- [feedback_bob](feedback_bob.md) — Bob feedback\n' } as any,
-    topics: {} as any,
+    entries: { 'agent:a1': '- [user_alice](user_alice.md) — Alice frontend prefs\n- [feedback_bob](feedback_bob.md) — Bob feedback\n' } as unknown as Record<string, string>,
+    topics: {} as unknown as Record<string, MemoryTopic>,
   })
 })
 

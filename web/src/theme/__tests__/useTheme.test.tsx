@@ -8,7 +8,7 @@ beforeEach(() => {
   document.documentElement.removeAttribute('data-theme')
   document.documentElement.removeAttribute('data-mode')
   document.documentElement.classList.remove('dark')
-  try { localStorage.removeItem('cocli-theme') } catch {}
+  try { localStorage.removeItem('cocli-theme') } catch { /* localStorage may not be available in test env */ }
 })
 
 describe('useTheme', () => {
