@@ -2,7 +2,6 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { renderHook, act } from '@testing-library/react'
 import { useTheme } from '../useTheme'
 import { usePrefsStore, resetPrefsStore } from '@/stores/prefsStore'
-import { useZoneStore } from '@/stores/zoneStore'
 
 beforeEach(() => {
   resetPrefsStore()
@@ -10,7 +9,6 @@ beforeEach(() => {
   document.documentElement.removeAttribute('data-mode')
   document.documentElement.classList.remove('dark')
   try { localStorage.removeItem('cocli-theme') } catch {}
-  useZoneStore.setState({ activeZoneThemeId: null } as Partial<ReturnType<typeof useZoneStore.getState>>)
 })
 
 describe('useTheme', () => {
@@ -21,14 +19,6 @@ describe('useTheme', () => {
     expect(document.documentElement.getAttribute('data-theme')).toBe('sandstone-light')
     expect(document.documentElement.getAttribute('data-mode')).toBe('light')
     expect(document.documentElement.classList.contains('dark')).toBe(false)
-  })
-
-  it('applies zone default when user has no pref', () => {
-    useZoneStore.setState({ activeZoneThemeId: 'carbon-dark' } as Partial<ReturnType<typeof useZoneStore.getState>>)
-    const { result } = renderHook(() => useTheme())
-    expect(result.current.id).toBe('carbon-dark')
-    expect(result.current.mode).toBe('dark')
-    expect(document.documentElement.classList.contains('dark')).toBe(true)
   })
 
   it('setUserTheme writes through prefsStore and updates DOM', () => {

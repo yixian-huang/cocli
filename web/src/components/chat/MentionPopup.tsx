@@ -1,5 +1,4 @@
 import { useEffect, useRef, useMemo } from 'react'
-import { useUserStore } from '@/stores/userStore'
 import { useAgentStore } from '@/stores/agentStore'
 import { useChannelStore } from '@/stores/channelStore'
 import { cn } from '@/lib/utils'
@@ -18,7 +17,7 @@ export interface MentionCandidate {
 }
 
 export function useMentionCandidates(query: string): MentionCandidate[] {
-  const users = useUserStore((s) => s.allUsers)
+  const users: { id: string; name: string; displayName?: string }[] = []
   const agents = useAgentStore((s) => s.agents)
   const activeChannelId = useChannelStore((s) => s.activeChannelId)
   const members = useChannelStore((s) => activeChannelId ? s.membersByChannel[activeChannelId] : undefined)

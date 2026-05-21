@@ -31,7 +31,7 @@ describe('MessageInput send path', () => {
     useMessageStore.setState({ sendMessage })
     useViewStore.setState({ activeAgentId: null, quotedMessage: null })
     useAgentStore.setState({ agents: [], loading: false })
-    useUserStore.setState({ allUsers: [], loading: false, user: null })
+    useUserStore.setState({ loading: false })
   })
 
   afterEach(() => {
@@ -42,7 +42,8 @@ describe('MessageInput send path', () => {
   it('sends content without an urgency argument', async () => {
     render(<MessageInput channelId={channelId} />)
 
-    const textarea = screen.getByPlaceholderText('Write a message... (@ to mention)')
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement
+    if (!textarea) throw new Error('textarea not found')
     fireEvent.change(textarea, { target: { value: 'hello team' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
 

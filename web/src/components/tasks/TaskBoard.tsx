@@ -14,17 +14,17 @@ import { taskStatusVariant, taskStatusLabel } from '@/lib/status'
 const EMPTY_TASKS: Task[] = []
 
 const COLUMNS = [
-  { key: 'todo', label: 'Todo', color: 'bg-surface-tertiary' },
+  { key: 'pending', label: 'Pending', color: 'bg-surface-tertiary' },
+  { key: 'claimed', label: 'Claimed', color: 'bg-info/20' },
   { key: 'in_progress', label: 'In Progress', color: 'bg-info/35' },
-  { key: 'in_review', label: 'In Review', color: 'bg-warning/40' },
-  { key: 'done', label: 'Done', color: 'bg-success/35' },
+  { key: 'completed', label: 'Done', color: 'bg-success/35' },
 ]
 
 function DependencyBadges({ deps, tasks }: { deps: number[]; tasks: Task[] }) {
   if (deps.length === 0) return null
   const blocking = deps.filter((d) => {
     const t = tasks.find((t) => t.taskNumber === d)
-    return t && t.status !== 'done'
+    return t && t.status !== 'completed'
   })
   if (blocking.length === 0) return null
   return (
@@ -282,11 +282,11 @@ function TaskDetail({ task, deps, allTasks, onClose }: { task: Task; deps: numbe
 
   const blockingDeps = deps.filter((d) => {
     const t = allTasks.find((t) => t.taskNumber === d)
-    return t && t.status !== 'done'
+    return t && t.status !== 'completed'
   })
   const resolvedDeps = deps.filter((d) => {
     const t = allTasks.find((t) => t.taskNumber === d)
-    return t && t.status === 'done'
+    return t && t.status === 'completed'
   })
 
   const toggleRun = (runId: string) => {

@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { MessageList } from './MessageList'
 import { useAgentStore } from '@/stores/agentStore'
 import { useChannelStore } from '@/stores/channelStore'
 import { useMessageStore } from '@/stores/messageStore'
 import { useThreadInboxStore } from '@/stores/threadInboxStore'
 import { useViewStore } from '@/stores/viewStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { useUserStore } from '@/stores/userStore'
 import { resetKeyboardShortcutsForTests } from '@/hooks/useKeyboardShortcuts'
 import type { Channel, Message } from '@/lib/types'
@@ -86,8 +86,7 @@ describe('MessageList keyboard navigation', () => {
     })
     useThreadInboxStore.setState({ threads: [], showDone: false, loading: false })
     useViewStore.setState({ activeAgentId: null, quotedMessage: null })
-    useZoneStore.setState({ zones: [], activeZoneId: 'zone-1', loading: false })
-    useUserStore.setState({ user: null, allUsers: [], loading: false })
+    useUserStore.setState({ loading: false })
   })
 
   afterEach(() => {
@@ -96,7 +95,7 @@ describe('MessageList keyboard navigation', () => {
   })
 
   it('highlights the currently selected message as navigation events arrive', async () => {
-    const { container } = render(<MessageList channelId={channel.id} />)
+    const { container } = render(<MemoryRouter><MessageList channelId={channel.id} /></MemoryRouter>)
 
     await act(async () => {
       window.dispatchEvent(new CustomEvent('message-list:navigate', { detail: { direction: 'previous' } }))

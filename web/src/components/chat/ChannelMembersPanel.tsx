@@ -1,4 +1,3 @@
-import { useUserStore } from '@/stores/userStore'
 import { useAgentStore } from '@/stores/agentStore'
 import { channels as channelsApi } from '@/api/client'
 import { toast, toastError } from '@/stores/toastStore'
@@ -18,7 +17,7 @@ interface Props {
 }
 
 export function ChannelMembersPanel({ channelId, members, onMembersChange }: Props) {
-  const allUsers = useUserStore((s) => s.allUsers)
+  const allUsers: { id: string; name: string; role?: string }[] = []
   const agents = useAgentStore((s) => s.agents)
 
   const handleAddMember = async (memberId: string, memberType: string) => {

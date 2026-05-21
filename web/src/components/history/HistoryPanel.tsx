@@ -1,10 +1,8 @@
 import { useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useZoneStore } from '@/stores/zoneStore'
 import { useHistoryStore } from '@/stores/historyStore'
 import { useChannelStore } from '@/stores/channelStore'
 import { useAgentStore } from '@/stores/agentStore'
-import { useUserStore } from '@/stores/userStore'
 import { useWorkspacePanelStore } from '@/stores/workspacePanelStore'
 import { Button, Badge } from '@/components/ui'
 import { CalendarRange, Search, ExternalLink } from 'lucide-react'
@@ -18,12 +16,10 @@ function formatDate(date: string): string {
 
 export function HistoryPanel() {
   const navigate = useNavigate()
-  const activeZoneId = useZoneStore((s) => s.activeZoneId)
-  const activeZoneSlug = useZoneStore((s) => s.activeZoneSlug)
   const channels = useChannelStore((s) => s.channels)
   const dms = useChannelStore((s) => s.dmChannels)
   const agents = useAgentStore((s) => s.agents)
-  const users = useUserStore((s) => s.allUsers)
+  const users: { id: string; name: string; displayName?: string }[] = []
   const setWorkspacePanel = useWorkspacePanelStore((s) => s.setPanel)
 
   const items = useHistoryStore((s) => s.items)
@@ -38,9 +34,8 @@ export function HistoryPanel() {
   const fetch = useHistoryStore((s) => s.fetch)
 
   useEffect(() => {
-    if (!activeZoneId) return
-    fetch(activeZoneId)
-  }, [activeZoneId, fetch, page, pageSize, filters])
+    fetch()
+  }, [fetch, page, pageSize, filters])
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const canPrev = page > 1
@@ -167,7 +162,7 @@ export function HistoryPanel() {
                 className="shrink-0 gap-1"
                 onClick={() => {
                   setWorkspacePanel('chat')
-                  navigate(messagePath({ zoneSlug: activeZoneSlug, channelId: item.channelId, messageId: item.id }))
+                  navigate(messagePath({ zoneSlug: null, channelId: item.channelId, messageId: item.id }))
                   window.dispatchEvent(new CustomEvent('scroll-to-message', { detail: { msgId: item.id } }))
                 }}
               >

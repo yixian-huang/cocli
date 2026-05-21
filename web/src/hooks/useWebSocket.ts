@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { getApiKey } from '@/api/client'
+
 import { useMessageStore } from '@/stores/messageStore'
 import { useChannelStore } from '@/stores/channelStore'
 import { useAgentStore } from '@/stores/agentStore'
@@ -7,12 +7,9 @@ import { useTaskStore } from '@/stores/taskStore'
 import { useWSStore } from '@/stores/wsStore'
 import { usePresenceStore } from '@/stores/presenceStore'
 import { useUserStore } from '@/stores/userStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { defaultTitle, storageKey } from '@/brand'
-import { useDevToolsStore } from '@/stores/devToolsStore'
 import { useSidebarPrefsStore } from '@/stores/sidebarPrefsStore'
-import type { Agent, AgentAttentionState, MachineVersionStatus, Message, PriorityClass, Task, TrajectoryEntry, Turn, WSEvent } from '@/lib/types'
-import { useMachineStatusStore } from '@/stores/machineStatusStore'
+import type { Agent, AgentAttentionState, Message, PriorityClass, Task, TrajectoryEntry, Turn, WSEvent } from '@/lib/types'
 import { toastError } from '@/stores/toastStore'
 import { applyPrefsFromServer } from '@/stores/prefsStore'
 
@@ -31,7 +28,7 @@ type WSEventMap = {
   'thread:update': { id: string; done: boolean }
   'thread:activity': { threadId: string; parentMessageId: string; parentChannelId: string; replyCount: number; lastReply: { senderName: string; content: string; timestamp: string } }
   'agent:stop:error': { agentId: string; error: string }
-  'machine:updated': { machineId: string; hostname: string; daemonVersion: string; versionStatus: MachineVersionStatus }
+  'machine:updated': { machineId: string; hostname: string; daemonVersion: string }
 }
 
 function sendBrowserNotification(msg: Message) {
@@ -58,13 +55,9 @@ export function useWebSocket() {
     let timer: ReturnType<typeof setTimeout>
 
     function connect() {
-      const key = getApiKey()
-      if (!key) return
-
-      const zoneId = useZoneStore.getState().activeZoneId
       useWSStore.getState().setStatus('connecting')
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      const ws = new WebSocket(`${protocol}//${window.location.host}/ws?key=${key}${zoneId ? `&zone=${zoneId}` : ''}`)
+      const ws = new WebSocket(`${protocol}//${window.location.host}/ws`)
       wsRef.current = ws
 
       ws.onopen = () => {
@@ -171,13 +164,6 @@ export function useWebSocket() {
               }
               break
             }
-            case 'machine:updated': {
-              const d = event.data as WSEventMap['machine:updated']
-              if (d.machineId) {
-                useMachineStatusStore.getState().applyMachineUpdated(d)
-              }
-              break
-            }
             case 'user:presence': {
               const d = event.data as WSEventMap['user:presence']
               if (d.userId) {
@@ -249,26 +235,6 @@ export function useWebSocket() {
             }
           }
 
-          // Route agent events to DevTools store
-          const devToolsState = useDevToolsStore.getState()
-          if (devToolsState.isSubscribed) {
-            const devToolsEventTypes = [
-              'agent:status', 'agent:activity', 'agent:turn',
-              'agent:session', 'agent:session:end', 'agent:session:idle',
-              'agent:prompt:info', 'agent:deliver:ack',
-            ]
-            if (devToolsEventTypes.includes(event.type)) {
-              const data = event.data as Record<string, unknown>
-              devToolsState.pushEvent({
-                id: crypto.randomUUID(),
-                timestamp: Date.now(),
-                type: event.type,
-                agentId: (data.agentId as string) || '',
-                channelName: data.channelName as string | undefined,
-                data,
-              })
-            }
-          }
         } catch (err) {
           console.warn('[ws] failed to parse message:', err)
         }
@@ -289,22 +255,9 @@ export function useWebSocket() {
 
     connect()
 
-    // Reconnect when active zone changes
-    let prevZoneId = useZoneStore.getState().activeZoneId
-    const unsubZone = useZoneStore.subscribe((state) => {
-      if (state.activeZoneId !== prevZoneId && mounted) {
-        prevZoneId = state.activeZoneId
-        attemptRef.current = 0
-        clearTimeout(timer)
-        wsRef.current?.close()
-        connect()
-      }
-    })
-
     return () => {
       mounted = false
       clearTimeout(timer)
-      unsubZone()
       wsRef.current?.close()
     }
   }, [])

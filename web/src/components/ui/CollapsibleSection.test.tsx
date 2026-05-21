@@ -6,7 +6,7 @@ import * as client from '@/api/client'
 
 describe('<CollapsibleSection>', () => {
   beforeEach(() => {
-    vi.spyOn(client.prefs, 'put').mockResolvedValue({ ok: true })
+    vi.spyOn(client.settings, 'patch').mockResolvedValue({ ok: true })
     resetPrefsStore()
   })
   afterEach(() => {

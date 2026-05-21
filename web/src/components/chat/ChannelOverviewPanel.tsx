@@ -63,7 +63,7 @@ export function ChannelOverviewPanel({ channelId, channelName, members, onOpenTh
     return acc
   }, {})
   const totalTasks = tasks.length
-  const openTasks = totalTasks - (taskCounts['done'] || 0)
+  const openTasks = totalTasks - (taskCounts['completed'] || 0)
 
   return (
     <div className="space-y-5">
@@ -99,7 +99,7 @@ export function ChannelOverviewPanel({ channelId, channelName, members, onOpenTh
           <p className="text-xs text-muted-foreground">No tasks in this channel</p>
         ) : (
           <div className="space-y-1.5">
-            {(['todo', 'in_progress', 'in_review', 'done'] as const).map((status) => {
+            {(['pending', 'claimed', 'in_progress', 'completed'] as const).map((status) => {
               const count = taskCounts[status] || 0
               const pct = totalTasks > 0 ? (count / totalTasks) * 100 : 0
               return (
@@ -110,10 +110,10 @@ export function ChannelOverviewPanel({ channelId, channelName, members, onOpenTh
                   <div className="flex-1 h-2 rounded-full bg-muted overflow-hidden">
                     <div
                       className={cn('h-full rounded-full transition-all', {
-                        'bg-gray-400': status === 'todo',
+                        'bg-gray-400': status === 'pending',
+                        'bg-info/60': status === 'claimed',
                         'bg-warning': status === 'in_progress',
-                        'bg-info': status === 'in_review',
-                        'bg-success': status === 'done',
+                        'bg-success': status === 'completed',
                       })}
                       style={{ width: `${pct}%` }}
                     />

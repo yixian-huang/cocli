@@ -7,7 +7,7 @@ import * as client from '@/api/client'
 describe('<CreateAgentDialog> dialogStore wiring', () => {
   beforeEach(() => {
     resetDialogStore()
-    vi.spyOn(client.daemons, 'list').mockResolvedValue([])
+    vi.spyOn(client.agents, 'runtimes').mockResolvedValue([])
   })
   afterEach(() => {
     cleanup()

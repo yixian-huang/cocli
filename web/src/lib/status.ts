@@ -135,13 +135,10 @@ export function agentAttentionAnimated(attentionState?: AgentAttentionState): bo
 
 export function taskStatusVariant(status: Task['status']): 'success' | 'warning' | 'info' | 'default' {
   switch (status) {
-    case 'done':
     case 'completed':
       return 'success'
     case 'claimed':
     case 'in_progress': return 'warning'
-    case 'in_review':
-      return 'info'
     case 'failed':
       return 'default'
     default: return 'default'
@@ -150,14 +147,11 @@ export function taskStatusVariant(status: Task['status']): 'success' | 'warning'
 
 export function taskStatusLabel(status: Task['status']): string {
   switch (status) {
-    case 'todo':
     case 'pending':
       return 'Pending'
     case 'claimed':
       return 'Claimed'
     case 'in_progress': return 'In Progress'
-    case 'in_review': return 'In Review'
-    case 'done':
     case 'completed':
       return 'Completed'
     case 'failed':

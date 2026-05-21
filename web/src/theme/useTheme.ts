@@ -8,7 +8,6 @@ import {
   type ThemeDef,
 } from './registry'
 import { usePrefsStore } from '@/stores/prefsStore'
-import { useZoneStore } from '@/stores/zoneStore'
 
 const STORAGE_KEY = 'cocli-theme'
 
@@ -36,9 +35,8 @@ export interface UseThemeResult {
 
 export function useTheme(): UseThemeResult {
   const userPref = usePrefsStore((s) => (s.prefs.ui as { theme?: string } | undefined)?.theme)
-  const zoneTheme = useZoneStore((s) => s.activeZoneThemeId ?? undefined)
 
-  const id = resolveThemeId(userPref, zoneTheme)
+  const id = resolveThemeId(userPref, undefined)
   const def = findTheme(id) ?? THEMES[0]
 
   useEffect(() => {

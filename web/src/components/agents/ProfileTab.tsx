@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useAgentStore } from '@/stores/agentStore'
 import { useViewStore } from '@/stores/viewStore'
 import { agents as agentsApi } from '@/api/client'
@@ -8,8 +8,6 @@ import { agentStatusVariant, agentStatusLabel } from '@/lib/status'
 import { Save, X, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { BRAND } from '@/brand'
-import type { Machine } from '@/lib/types'
-
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
@@ -19,17 +17,11 @@ function formatTokens(n: number): string {
 export function ProfileTab({ agentId }: { agentId: string }) {
   const agent = useAgentStore((s) => s.agents.find((a) => a.id === agentId))
   const fetchAgents = useAgentStore((s) => s.fetchAgents)
-  const [daemon, setDaemon] = useState<(Machine & { connected: boolean }) | null>(null)
   const [editing, setEditing] = useState(false)
   const [editDesc, setEditDesc] = useState('')
   const [editModel, setEditModel] = useState('')
   const [saving, setSaving] = useState(false)
   const [deleting, setDeleting] = useState(false)
-
-  useEffect(() => {
-    // daemons list removed (zone-scoped feature deleted in Phase 1)
-    setDaemon(null)
-  }, [agent?.machineId])
 
   if (!agent) return null
 
@@ -112,18 +104,6 @@ export function ProfileTab({ agentId }: { agentId: string }) {
             </Badge>
           </div>
           <Row label="Session ID" value={agent.sessionId || '—'} mono />
-          <div className="flex items-start gap-3">
-            <span className="text-muted-foreground w-24 shrink-0 text-xs">Daemon</span>
-            {agent.machineId ? (
-              <div className="flex items-center gap-1.5 text-xs">
-                <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${daemon?.connected ? 'bg-green-500' : 'bg-red-500'}`} />
-                <span>{daemon?.hostname || agent.machineId.slice(0, 12)}</span>
-                <span className="text-muted-foreground">({daemon?.connected ? 'online' : 'offline'})</span>
-              </div>
-            ) : (
-              <span className="text-xs text-muted-foreground">Not assigned</span>
-            )}
-          </div>
         </div>
       </section>
 

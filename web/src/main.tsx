@@ -6,17 +6,12 @@ import { router } from './router'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { GlobalLoadingBar } from '@/components/ui'
 import { setUnauthorizedHandler } from '@/api/client'
-import { useUserStore } from '@/stores/userStore'
 import '@/i18n'
 
-// Centralized 401 handler: clear auth state and bounce to /login. Guarded so
-// repeated 401s while already on /login do not push duplicate history entries.
+// Single-tenant OSS: no login page. A 401 means the API key is wrong; nothing
+// to navigate away to. Handler is a no-op to satisfy the client contract.
 setUnauthorizedHandler(() => {
-  if (useUserStore.getState().user === null) return
-  useUserStore.getState().logout()
-  if (window.location.pathname !== '/login') {
-    router.navigate('/login', { replace: true })
-  }
+  // no-op
 })
 
 createRoot(document.getElementById('root')!).render(
