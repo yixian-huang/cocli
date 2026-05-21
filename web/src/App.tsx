@@ -1,13 +1,10 @@
 import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense, type ComponentProps } from 'react'
-import { Outlet, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { useUserStore } from '@/stores/userStore'
+import { Outlet } from 'react-router-dom'
 import { useChannelStore } from '@/stores/channelStore'
 import { useAgentStore } from '@/stores/agentStore'
 import { useViewStore } from '@/stores/viewStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { useWorkspacePanelStore } from '@/stores/workspacePanelStore'
 import { useWebSocket } from '@/hooks/useWebSocket'
-import { LandingPage } from '@/components/LandingPage'
 import { SidebarTabs } from '@/components/sidebar/SidebarTabs'
 import { BrandLogo } from '@/components/BrandLogo'
 import { ChannelHeader } from '@/components/chat/ChannelHeader'
@@ -17,21 +14,14 @@ import { AgentActivity } from '@/components/agents/AgentActivity'
 import { AgentView } from '@/components/agents/AgentView'
 import { ThreadFocusView } from '@/components/chat/ThreadFocusView'
 import { HistoryPanel } from '@/components/history/HistoryPanel'
-import { ZoneMembersPanel } from '@/components/sidebar/ZoneMembersPanel'
-import { ZoneTaskBoard } from '@/components/tasks/ZoneTaskBoard'
-import { WikiBrowser } from '@/components/wiki/WikiBrowser'
-import { ProviderKeysTab } from '@/components/sidebar/ProviderKeysTab'
 
 const TaskBoard = lazy(() => import('@/components/tasks/TaskBoard').then(m => ({ default: m.TaskBoard })))
 const ChannelSettings = lazy(() => import('@/components/chat/ChannelSettings').then(m => ({ default: m.ChannelSettings })))
-import { UserProfile } from '@/components/UserProfile'
 import { ToastContainer } from '@/components/ui/Toast'
 import { ContextMenuPortal } from '@/components/ui/ContextMenu'
 import { CreateChannelDialog } from '@/components/sidebar/CreateChannelDialog'
 import { OpenDMDialog } from '@/components/sidebar/OpenDMDialog'
 import { CreateAgentDialog } from '@/components/agents/CreateAgentDialog'
-import { AddDaemonDialog } from '@/components/sidebar/AddDaemonDialog'
-import { CreateZoneDialog } from '@/components/sidebar/CreateZoneDialog'
 import { ChannelSwitcher, ShortcutsOverlay } from '@/components/ui'
 import { SectionErrorBoundary } from './components/ui/SectionErrorBoundary'
 import { Skeleton } from '@/components/ui/Skeleton'
@@ -40,7 +30,7 @@ import { useExitAgentView, useAgentBackLabel } from '@/hooks/useExitAgentView'
 import { useWSStore } from '@/stores/wsStore'
 import { useThreadStore } from '@/stores/threadStore'
 import { bootstrapPrefs } from '@/stores/prefsStore'
-import { ListTodo, Moon, Sun, LogOut, Menu, X, WifiOff } from 'lucide-react'
+import { ListTodo, Moon, Sun, Menu, X, WifiOff } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import type { Message } from '@/lib/types'
 import { useTranslation } from 'react-i18next'
@@ -73,9 +63,6 @@ function AppLayout() {
       ] satisfies ComponentProps<typeof ShortcutsOverlay>['sections'],
     [t],
   )
-  const location = useLocation()
-  const { zoneSlug } = useParams<{ zoneSlug?: string }>()
-  const navigate = useNavigate()
   const [showTasks, setShowTasks] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showChannelSwitcher, setShowChannelSwitcher] = useState(false)
@@ -84,8 +71,6 @@ function AppLayout() {
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
   const activeId = useChannelStore((s) => s.activeChannelId)
-  const logout = useUserStore((s) => s.logout)
-  const user = useUserStore((s) => s.user)
   const { mode, toggleFamilyMode, canToggleFamilyMode } = useTheme()
   const dark = mode === 'dark'
   const toggleDark = toggleFamilyMode
@@ -93,11 +78,6 @@ function AppLayout() {
   const clearActiveAgent = useViewStore((s) => s.clearActiveAgent)
   const exitAgentView = useExitAgentView()
   const agentBackLabel = useAgentBackLabel()
-
-  const handleLogout = useCallback(() => {
-    logout()
-    navigate('/', { replace: true })
-  }, [logout, navigate])
 
   const wsStatus = useWSStore((s) => s.status)
   const workspacePanel = useWorkspacePanelStore((s) => s.panel)
@@ -142,67 +122,15 @@ function AppLayout() {
     setSidebarOpen(false)
   }, [activeId])
 
-  // Fetch zones on mount, then zone-scoped data when zone changes
-  const fetchZones = useZoneStore((s) => s.fetchZones)
-  const activeZoneId = useZoneStore((s) => s.activeZoneId)
-  const activeZoneSlug = useZoneStore((s) => s.activeZoneSlug)
-  const setActiveZoneSlug = useZoneStore((s) => s.setActiveZoneSlug)
-
   useEffect(() => {
-    fetchZones()
     bootstrapPrefs()
-  }, [fetchZones])
-
-  // URL -> store (when visiting /z/:zoneId)
-  useEffect(() => {
-    if (!zoneSlug) return
-    if (activeZoneSlug !== zoneSlug) {
-      setActiveZoneSlug(zoneSlug)
-    }
-  }, [zoneSlug, activeZoneSlug, setActiveZoneSlug])
-
-  // store -> URL (ensure a zone-scoped URL after login)
-  useEffect(() => {
-    if (!user) return
-    if (!activeZoneSlug) return
-
-    // Only fix up the bare root; keep explicit routes like /devtools, /channel/*, /agent/* intact.
-    if (location.pathname === '/') {
-      navigate(`/z/${activeZoneSlug}`, { replace: true })
-    }
-
-    // Back-compat: old links like /channel/:id[/msg/:msgId] should be zone-scoped.
-    if (location.pathname.startsWith('/channel/')) {
-      navigate(`/z/${activeZoneSlug}${location.pathname}`, { replace: true })
-    }
-
-    // Back-compat: old links like /agent/:id should be zone-scoped.
-    if (location.pathname.startsWith('/agent/')) {
-      navigate(`/z/${activeZoneSlug}${location.pathname}`, { replace: true })
-    }
-
-    // Back-compat: old /devtools paths should be zone-scoped.
-    if (location.pathname.startsWith('/devtools')) {
-      const p = location.pathname
-      if (p.startsWith('/devtools/daemon/')) {
-        const machineId = p.replace('/devtools/daemon/', '')
-        navigate(`/z/${activeZoneSlug}/daemons/${machineId}`, { replace: true })
-      } else {
-        navigate(`/z/${activeZoneSlug}/daemons`, { replace: true })
-      }
-    }
-  }, [user, activeZoneSlug, location.pathname, navigate])
-
-  useEffect(() => {
-    if (!activeZoneId) return
     useChannelStore.getState().fetchChannels()
     useChannelStore.getState().fetchDMs()
     useAgentStore.getState().fetchAgents()
-    useUserStore.getState().fetchUsers()
     import('@/stores/threadInboxStore').then(({ useThreadInboxStore }) => {
       useThreadInboxStore.getState().fetchThreads()
     })
-  }, [activeZoneId])
+  }, [])
 
   const overlayOpen = showChannelSwitcher || showShortcuts || showSettings || sidebarOpen
 
@@ -324,13 +252,6 @@ function AppLayout() {
               {dark ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
             </button>
             <button
-              onClick={handleLogout}
-              className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground"
-              title={t('workspace.nav.logout', { name: user?.name ?? '' })}
-            >
-              <LogOut className="h-3.5 w-3.5" />
-            </button>
-            <button
               onClick={() => setSidebarOpen(false)}
               className="p-1.5 rounded hover:bg-accent transition-colors text-muted-foreground hover:text-foreground md:hidden"
             >
@@ -347,15 +268,12 @@ function AppLayout() {
           <div className="px-3 py-2 flex items-center justify-between gap-2">
             <LanguageSwitcher compact />
           </div>
-          <UserProfile />
         </div>
       </aside>
 
       {/* Main area */}
       <main className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
-        {location.pathname.match(/^\/z\/[^/]+\/(devtools|daemons)(\/|$)/)
-          ? <Outlet />
-          : <div className="hidden"><Outlet /></div>}
+        <Outlet />
         {activeAgentId ? (
           <>
             <div className="h-12 border-b flex items-center px-3 gap-2 shrink-0 md:hidden">
@@ -401,26 +319,6 @@ function AppLayout() {
                 {workspacePanel === 'history' && (
                   <SectionErrorBoundary name="history">
                     <HistoryPanel />
-                  </SectionErrorBoundary>
-                )}
-                {workspacePanel === 'zone_members' && (
-                  <SectionErrorBoundary name="zone_members">
-                    <ZoneMembersPanel />
-                  </SectionErrorBoundary>
-                )}
-                {workspacePanel === 'zone_tasks' && (
-                  <SectionErrorBoundary name="zone_tasks">
-                    <ZoneTaskBoard />
-                  </SectionErrorBoundary>
-                )}
-                {workspacePanel === 'zone_wiki' && (
-                  <SectionErrorBoundary name="zone_wiki">
-                    <WikiBrowser />
-                  </SectionErrorBoundary>
-                )}
-                {workspacePanel === 'zone_credentials' && (
-                  <SectionErrorBoundary name="zone_credentials">
-                    <ProviderKeysTab />
                   </SectionErrorBoundary>
                 )}
               </div>
@@ -516,29 +414,11 @@ function AppLayout() {
       <CreateChannelDialog />
       <OpenDMDialog />
       <CreateAgentDialog />
-      <AddDaemonDialog />
-      <CreateZoneDialog />
     </div>
   )
 }
 
 function App() {
-  const { t } = useTranslation()
-  const user = useUserStore((s) => s.user)
-  const loading = useUserStore((s) => s.loading)
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-screen">
-        <div className="text-content-secondary text-base">{t('common.loading')}</div>
-      </div>
-    )
-  }
-
-  if (!user) {
-    return <LandingPage />
-  }
-
   return <AppLayout />
 }
 
