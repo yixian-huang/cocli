@@ -1,0 +1,13 @@
+* text=auto eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+
+# Lock files
+Cargo.lock -diff
+package-lock.json -diff
