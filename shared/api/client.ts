@@ -1,37 +1,21 @@
 import type {
   Agent,
   AgentActivityEntry,
-  AgentProviderBinding,
   AgentSession,
   BookmarkEntry,
   Channel,
   ChannelResponderModeState,
   ChannelResponderPolicy,
-  CreateCredentialInput,
   HistoryQuery,
   HistoryResult,
-  Invite,
-  Machine,
   Message,
   OverflowStatsEntry,
   ResponderMode,
   ResponderRole,
-  SkillFileEntry,
-  SkillLibraryEntry,
-  SkillLibraryFileMeta,
-  SkillLibraryImportResponse,
-  SkillLibraryReinstallResponse,
-  SkillView,
   Task,
   TaskExecutionTimeline,
-  TenantProviderKey,
   ThreadSummary,
   Turn,
-  UpsertBindingInput,
-  User,
-  Zone,
-  ZoneInvite,
-  ZoneMember,
 } from '@shared/types'
 import { storageKey } from '@shared/brand'
 
@@ -156,115 +140,6 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   } finally {
     bumpInflight(-1)
   }
-}
-
-// Zones
-export const zones = {
-  list: () => request<Zone[]>('/api/zones'),
-  create: (name: string, slug: string) => request<Zone>('/api/zones', {
-    method: 'POST',
-    body: JSON.stringify({ name, slug }),
-  }),
-  get: (zoneId: string) => request<Zone>(`/api/zones/${zoneId}`),
-  update: (zoneId: string, name: string) =>
-    request<{ ok: boolean }>(`/api/zones/${zoneId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ name }),
-    }),
-  delete: (zoneId: string) =>
-    request<{ ok: boolean }>(`/api/zones/${zoneId}`, { method: 'DELETE' }),
-  setTheme: (zoneId: string, themeId: string) =>
-    request<{ themeId: string }>(`/api/zones/${zoneId}/theme`, {
-      method: 'PATCH',
-      body: JSON.stringify({ themeId }),
-    }),
-}
-
-// Zone Members
-export const zoneMembers = {
-  list: (zoneId: string) => request<ZoneMember[]>(`/api/zones/${zoneId}/members`),
-  add: (zoneId: string, userId: string, role?: string) =>
-    request<ZoneMember>(`/api/zones/${zoneId}/members`, {
-      method: 'POST',
-      body: JSON.stringify({ userId, role }),
-    }),
-  updateRole: (zoneId: string, userId: string, role: string) =>
-    request<{ ok: boolean }>(`/api/zones/${zoneId}/members/${userId}`, {
-      method: 'PUT',
-      body: JSON.stringify({ role }),
-    }),
-  updatePermissions: (
-    zoneId: string,
-    userId: string,
-    payload: Partial<Pick<ZoneMember, 'role' | 'canCreateChannel' | 'canCreateAgent' | 'canInviteOthers' | 'hideFromAgents'>>,
-  ) =>
-    request<ZoneMember>(`/api/zones/${zoneId}/members/${userId}/permissions`, {
-      method: 'PATCH',
-      body: JSON.stringify(payload),
-    }),
-  remove: (zoneId: string, userId: string) =>
-    request<{ ok: boolean }>(`/api/zones/${zoneId}/members/${userId}`, { method: 'DELETE' }),
-}
-
-// Zone Daemons
-export const daemons = {
-  list: (zoneId: string) => request<(Machine & { connected: boolean })[]>(`/api/zones/${zoneId}/daemons`),
-  create: (zoneId: string) =>
-    request<{ machine: Machine; apiKey: string; installCommand: string }>(`/api/zones/${zoneId}/daemons`, { method: 'POST' }),
-  installCommands: (zoneId: string, machineId: string) =>
-    request<{ apiKey: string; installCommand: string }>(`/api/zones/${zoneId}/daemons/${machineId}/install`),
-  remove: (zoneId: string, machineId: string) =>
-    request<{ ok: boolean }>(`/api/zones/${zoneId}/daemons/${machineId}`, { method: 'DELETE' }),
-  upgrade: (zoneId: string, machineId: string) =>
-    request<{ status: string }>(`/api/zones/${zoneId}/daemons/${machineId}/upgrade`, { method: 'POST' }),
-}
-
-// Cocli — zone-scoped provider credential pool (PR-A).
-export const chatrsCredentials = {
-  list: (zoneId: string) =>
-    request<TenantProviderKey[]>(`/api/zones/${zoneId}/credentials`),
-  create: (zoneId: string, input: CreateCredentialInput) =>
-    request<TenantProviderKey>(`/api/zones/${zoneId}/credentials`, {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
-  remove: (zoneId: string, name: string) =>
-    request<void>(
-      `/api/zones/${zoneId}/credentials/${encodeURIComponent(name)}`,
-      { method: 'DELETE' },
-    ),
-}
-
-// Cocli — per-agent provider binding (PR-A).
-export const chatrsAgentBinding = {
-  get: (agentId: string) =>
-    request<AgentProviderBinding>(`/api/agents/${agentId}/binding`),
-  upsert: (agentId: string, input: UpsertBindingInput) =>
-    request<AgentProviderBinding>(`/api/agents/${agentId}/binding`, {
-      method: 'PUT',
-      body: JSON.stringify(input),
-    }),
-  remove: (agentId: string) =>
-    request<void>(`/api/agents/${agentId}/binding`, { method: 'DELETE' }),
-  setWriteEnabled: (agentId: string, enabled: boolean) =>
-    request<void>(`/api/agents/${agentId}/binding/write`, {
-      method: 'PATCH',
-      body: JSON.stringify({ enabled }),
-    }),
-}
-
-// Users
-export const users = {
-  me: () => request<User>('/api/users/me'),
-  list: (zoneId: string) => request<User[]>(`/api/zones/${zoneId}/users`),
-  create: (name: string) => request<User>('/api/users', {
-    method: 'POST',
-    body: JSON.stringify({ name }),
-  }),
-  updateProfile: (displayName: string) => request<User>('/api/users/me', {
-    method: 'PUT',
-    body: JSON.stringify({ displayName }),
-  }),
 }
 
 // Channels
@@ -526,28 +401,6 @@ export const tasks = {
     request<TaskExecutionTimeline>(`/api/channels/${channelId}/tasks/${taskNumber}/execution`),
 }
 
-export const zoneTasks = {
-  list: (
-    zoneId: string,
-    params?: {
-      status?: string
-      channelId?: string
-      assignee?: string
-      dependency?: string
-    },
-  ) => {
-    const qs = new URLSearchParams()
-    if (params?.status) qs.set('status', params.status)
-    if (params?.channelId) qs.set('channel', params.channelId)
-    if (params?.assignee) qs.set('assignee', params.assignee)
-    if (params?.dependency) qs.set('dependency', params.dependency)
-    const query = qs.toString()
-    return request<Task[]>(`/api/zones/${zoneId}/tasks${query ? `?${query}` : ''}`)
-  },
-  timeline: (taskId: string) =>
-    request<TaskExecutionTimeline>(`/api/tasks/${taskId}/timeline`),
-}
-
 // Agent Workspace
 export const agentWorkspace = {
   listDir: (agentId: string, path = '/') =>
@@ -557,42 +410,6 @@ export const agentWorkspace = {
   readFile: (agentId: string, path: string) =>
     request<{ content: string; binary: boolean }>(
       `/api/agents/${agentId}/workspace/file?path=${encodeURIComponent(path)}`
-    ),
-}
-
-// Agent Skills (Phase 3 — flag-gated; creator or zone admin only)
-export const agentSkills = {
-  list: (agentId: string) =>
-    request<{ skills: SkillView[] }>(`/api/agents/${agentId}/skills`),
-
-  install: (agentId: string, libraryId: string) =>
-    request<{ installId: string; installPath: string }>(
-      `/api/agents/${agentId}/skills`,
-      { method: 'POST', body: JSON.stringify({ libraryId }) }
-    ),
-
-  uninstall: (agentId: string, installId: string) =>
-    request<{ ok: boolean }>(
-      `/api/agents/${agentId}/skills/${installId}`,
-      { method: 'DELETE' }
-    ),
-
-  listFiles: (agentId: string, installId: string) =>
-    request<{ installPath: string; files: SkillFileEntry[] }>(
-      `/api/agents/${agentId}/skills/${installId}/files`
-    ),
-
-  getFile: (agentId: string, installId: string, relPath: string) =>
-    request<{ content: string; binary: boolean }>(
-      `/api/agents/${agentId}/skills/${installId}/files/${encodeURIComponent(relPath)}`
-    ),
-}
-
-// Runtime compatibility (Phase 3 — flag-gated)
-export const runtimes = {
-  compatibility: () =>
-    request<Record<string, 'supported' | 'uncertain' | 'unsupported' | 'unknown'>>(
-      `/api/runtimes/compatibility`
     ),
 }
 
@@ -660,117 +477,3 @@ export const agentTurns = {
   },
 }
 
-// Auth
-export const auth = {
-  login: (username: string, password: string) =>
-    request<{ apiKey: string; user: User }>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
-    }),
-  signup: (code: string, username: string, email: string, password: string) =>
-    request<{ apiKey: string; user: User }>('/api/auth/signup', {
-      method: 'POST',
-      body: JSON.stringify({ code, username, email, password }),
-    }),
-  checkInvite: (code: string) =>
-    request<{ valid: boolean; expiresAt?: string; remainingUses?: number }>(`/api/auth/invite/${code}`),
-  changePassword: (currentPassword: string, newPassword: string) =>
-    request<{ ok: boolean }>('/api/users/me/password', {
-      method: 'PUT',
-      body: JSON.stringify({ currentPassword, newPassword }),
-    }),
-}
-
-// Invites
-export const invites = {
-  create: (maxUses?: number, expiresIn?: string) =>
-    request<Invite>('/api/invites', {
-      method: 'POST',
-      body: JSON.stringify({ maxUses, expiresIn }),
-    }),
-  list: () => request<{ invites: Invite[] }>('/api/invites'),
-  revoke: (id: string) => request<{ ok: boolean }>(`/api/invites/${id}`, { method: 'DELETE' }),
-}
-
-export const zoneInvites = {
-  list: (zoneId: string) => request<{ invites: ZoneInvite[] }>(`/api/zones/${zoneId}/invites`),
-  create: (
-    zoneId: string,
-    payload: {
-      invitedUsername?: string
-      expiresAt?: string
-      maxUses?: number
-    } = {},
-  ) =>
-    request<ZoneInvite>(`/api/zones/${zoneId}/invites`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    }),
-  revoke: (zoneId: string, inviteId: string) =>
-    request<{ ok: boolean }>(`/api/zones/${zoneId}/invites/${inviteId}/revoke`, {
-      method: 'POST',
-    }),
-}
-
-// Skill Library (zone-scoped; Phase 2 — gated by skills_v2 flag server-side)
-export const zoneSkillLibrary = {
-  list: (zoneId: string) =>
-    request<{ entries: SkillLibraryEntry[] }>(
-      `/api/zones/${zoneId}/skills/library`
-    ),
-  get: (zoneId: string, libraryId: string) =>
-    request<{ entry: SkillLibraryEntry; files: SkillLibraryFileMeta[] }>(
-      `/api/zones/${zoneId}/skills/library/${libraryId}`
-    ),
-  getFile: (zoneId: string, libraryId: string, relPath: string) =>
-    request<{ content: string; binary: boolean; size: number }>(
-      `/api/zones/${zoneId}/skills/library/${libraryId}/files/${encodeURIComponent(relPath)}`
-    ),
-  import: (
-    zoneId: string,
-    body: { url: string; subPath?: string; name?: string },
-    opts?: { signal?: AbortSignal },
-  ) =>
-    request<SkillLibraryImportResponse>(
-      `/api/zones/${zoneId}/skills/library`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: opts?.signal,
-      },
-    ),
-  reinstall: (zoneId: string, libraryId: string) =>
-    request<SkillLibraryReinstallResponse>(
-      `/api/zones/${zoneId}/skills/library/${libraryId}/reinstall`,
-      { method: 'POST' },
-    ),
-  remove: (zoneId: string, libraryId: string) =>
-    request<{ deleted: string }>(
-      `/api/zones/${zoneId}/skills/library/${libraryId}`,
-      { method: 'DELETE' },
-    ),
-}
-
-// Push tokens (mobile-only consumer)
-export const pushTokens = {
-  register: (input: { platform: 'ios' | 'android'; token: string; deviceId: string; appVersion?: string }) =>
-    request<{
-      id: string
-      userId: string
-      platform: 'ios' | 'android'
-      token: string
-      deviceId: string
-      appVersion: string
-      createdAt: string
-      lastSeenAt: string
-      failureCount: number
-    }>('/api/push/tokens', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    }),
-  unregister: (token: string) =>
-    request<{ ok: true }>(`/api/push/tokens/${encodeURIComponent(token)}`, {
-      method: 'DELETE',
-    }),
-}
