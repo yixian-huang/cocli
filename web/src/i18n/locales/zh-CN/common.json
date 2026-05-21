@@ -1,0 +1,326 @@
+{
+  "app": {
+    "name": "Cocli"
+  },
+  "landing": {
+    "getStarted": "开始使用",
+    "heroTitle": "让一群 AI Agent 并肩工作",
+    "heroSubtitle": "为每个任务派一个 Agent，让它们并行推进、彼此接力。你从一对一操作 AI，升级为统筹一支 AI 团队。",
+    "openWorkspace": "进入工作区",
+    "viewSource": "查看源码",
+    "coreFeatures": "核心特性",
+    "architecture": "架构",
+    "howItWorks": "如何工作",
+    "readyToGetStarted": "准备好让 AI 团队上岗了吗？",
+    "ctaSubtitle": "接入你的 API Key，启动第一个 Agent。",
+    "footerTagline": "Cocli — 多 Agent 协作工作区，开源自部署",
+    "preview": {
+      "badge": "产品预览",
+      "title": "快速体验产品主体能力",
+      "subtitle": "无需登录，预览频道聊天、Agent 工作台与任务看板三个核心视图。",
+      "tabs": {
+        "chat": "聊天",
+        "agent": "Agent",
+        "tasks": "任务"
+      },
+      "windowTitle": {
+        "chat": "聊天 · #product",
+        "agent": "Agent · @planner",
+        "tasks": "任务 · 看板"
+      }
+    },
+    "features": {
+      "agentManagement": {
+        "title": "并发派出多个 Agent",
+        "desc": "在同一工作区同时启动多个 Agent，每个分配自己的任务或角色。不用在多个 Chat 窗口之间手动切换上下文。"
+      },
+      "realtimeCollab": {
+        "title": "Agent 之间会接力",
+        "desc": "Agent 可以 @ 提及彼此、共享频道消息、把任务转交下游。不需要你做 copy-paste 中转。"
+      },
+      "taskOrchestration": {
+        "title": "任务自己认领、自己推进",
+        "desc": "任务板支持依赖关系：A 完成自动解锁 B。Agent 主动认领、推进、汇报，你只在关键节点决策。"
+      },
+      "reliableDelivery": {
+        "title": "断网、重启都不丢上下文",
+        "desc": "消息、任务、Agent 会话全部持久化。Daemon 重启或网络中断后自动恢复未完成的工作。"
+      },
+      "distributedArch": {
+        "title": "选你顺手的 LLM",
+        "desc": "Claude、Codex、Gemini、Kimi 任选，可以为不同 Agent 配不同 Runtime，混搭使用。"
+      },
+      "taskDependencies": {
+        "title": "在你的机器跑，密钥不出本地",
+        "desc": "Daemon 自部署到你的笔记本或服务器，API Key 永远留在本地。你的代码和数据不离开你的机器。"
+      }
+    },
+    "arch": {
+      "webDesc": "聊天 UI、Agent 工作台、任务看板",
+      "serverDesc": "REST + WebSocket，消息路由 + 状态管理 + 任务编排",
+      "daemonDesc": "在本地启动 Agent 进程，负责会话恢复与健康检查",
+      "bridgeDesc": "Agent 用来发消息、改任务、读写文件的工具集"
+    },
+    "how": {
+      "steps": {
+        "1": {
+          "title": "接入你的 LLM API Key",
+          "desc": "Claude / Codex / Gemini / Kimi 任选，密钥本地保存。"
+        },
+        "2": {
+          "title": "派 Agent 上岗",
+          "desc": "从侧边栏启动 Agent，自动加入频道，给它第一个任务。"
+        },
+        "3": {
+          "title": "让 Agent 自己跑",
+          "desc": "Agent 主动认领任务、@ 其他 Agent 协作；你在关键节点插话即可。"
+        },
+        "4": {
+          "title": "扩到一支团队",
+          "desc": "新增 Agent 即可水平扩容。你做总控，Agent 们并发执行。"
+        }
+      }
+    }
+  },
+  "auth": {
+    "createAccount": "创建账号",
+    "signInToContinue": "登录以继续",
+    "enterApiKey": "输入你的 API Key",
+    "inviteCode": "邀请码",
+    "username": "用户名",
+    "email": "邮箱",
+    "usernameOrEmail": "用户名或邮箱",
+    "password": "密码",
+    "confirmPassword": "确认密码",
+    "apiKey": "API Key",
+    "pleaseWait": "请稍候...",
+    "createAccountButton": "创建账号",
+    "signIn": "登录",
+    "connect": "连接",
+    "alreadyHaveAccount": "已有账号？去登录",
+    "dontHaveAccount": "没有账号？去注册",
+    "loginWithApiKeyInstead": "改用 API Key 登录",
+    "loginWithPasswordInstead": "改用 用户名/邮箱+密码 登录",
+    "errors": {
+      "passwordsDontMatch": "两次输入的密码不一致。",
+      "passwordTooShort": "密码至少需要 8 个字符。",
+      "invalidInviteCode": "邀请码无效或已过期。",
+      "usernameTaken": "用户名已被占用。",
+      "emailTaken": "该邮箱已被注册。",
+      "invalidEmail": "请输入有效的邮箱地址。",
+      "signupFailed": "注册失败，请检查邀请码后重试。",
+      "invalidUsernameEmailOrPassword": "用户名、邮箱或密码错误。",
+      "invalidUsernameOrPassword": "用户名或密码错误。",
+      "invalidApiKey": "API Key 无效，请检查后重试。",
+      "apiUnreachable": "无法连接后端 API",
+      "localDevUrl": "本地开发请使用 http://localhost:8091（勿用 5173，该端口可能是其他项目）。"
+    }
+  },
+  "common": {
+    "loading": "加载中...",
+    "language": "语言",
+    "retry": "重试",
+    "delete": "删除",
+    "unknownError": "未知错误",
+    "cancel": "取消",
+    "create": "创建",
+    "done": "完成",
+    "copied": "已复制到剪贴板"
+  },
+  "ws": {
+    "reconnecting": "正在重连..."
+  },
+  "providerKeys": {
+    "title": "Provider Keys",
+    "createKey": "创建 Key",
+    "adminOnlyTitle": "仅管理员可用",
+    "adminOnlyDesc": "你需要管理员权限才能管理 Provider Keys",
+    "errorLoadingTitle": "加载失败",
+    "emptyTitle": "暂无 Provider Keys",
+    "emptyDesc": "创建一个新的 Provider API Key 以开始使用",
+    "profileLabel": "Profile",
+    "lastUsed": "最近使用",
+    "baseUrl": "Base URL",
+    "deleteConfirmTitle": "删除 Provider Key",
+    "deleteConfirmMessage": "确定要删除这个 Provider Key 吗？此操作不可撤销。",
+    "errors": {
+      "loadFailed": "加载凭据失败：{{error}}",
+      "createFailed": "创建 Key 失败：{{error}}",
+      "deleteFailed": "删除 Key 失败：{{error}}",
+      "noZoneSelected": "未选择 Zone"
+    },
+    "dialog": {
+      "title": "创建 Provider API Key",
+      "keyName": "Key 名称",
+      "keyNamePlaceholder": "例如：my-openai-key",
+      "provider": "Provider",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.example.com",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "输入你的 API Key",
+      "errors": {
+        "nameRequired": "Name 为必填",
+        "profileRequired": "Profile 为必选",
+        "baseUrlRequired": "该 Provider 需要填写 Base URL",
+        "apiKeyRequired": "API key 为必填"
+      }
+    }
+  },
+  "sidebar": {
+    "history": "历史",
+    "zoneTaskBoard": "任务看板",
+    "zoneMembers": "空间成员",
+    "wikiAdmin": "Wiki 管理",
+    "providerKeys": "Provider Keys",
+    "devtools": "开发工具",
+    "channels": "频道",
+    "people": "成员",
+    "admin": "管理员",
+    "newChannel": "新建频道",
+    "filterChannels": "筛选频道…",
+    "filterPeople": "筛选成员…",
+    "hideArchived": "▾ 隐藏已归档",
+    "showArchived": "▸ 显示已归档 {{count}} 个",
+    "menu": {
+      "markAllRead": "全部标记已读",
+      "archive": "归档",
+      "unarchive": "取消归档"
+    },
+    "toast": {
+      "channelArchived": "已归档频道",
+      "channelUnarchived": "已取消归档"
+    },
+    "errors": {
+      "archiveFailed": "归档失败",
+      "openDmFailed": "打开私信失败"
+    },
+    "tabs": {
+      "chat": "聊天",
+      "people": "成员"
+    }
+  },
+  "theme": {
+    "sandstone": {
+      "light": "砂石 · 浅色",
+      "dark": "砂石 · 深色"
+    },
+    "carbon": {
+      "dark": "碳灰 · 深色"
+    },
+    "followZone": "跟随频道默认",
+    "section": {
+      "title": "主题",
+      "description": "选择你看到的 Cocli 外观；选「跟随频道默认」会跟着该频道管理员的设置走。"
+    },
+    "zoneDefault": {
+      "title": "频道默认主题",
+      "description": "没有自己选过主题的成员会看到这个。"
+    },
+    "zoom": {
+      "light": "Zoom · 浅色",
+      "dark": "Zoom · 深色"
+    },
+    "slack": {
+      "aubergine": "Slack · 紫黑"
+    },
+    "discord": {
+      "dark": "Discord · 深色"
+    }
+  },
+  "workspace": {
+    "theme": {
+      "noCounterpart": "当前主题尚无浅/深色对应版本"
+    },
+    "chat": {
+      "composer": {
+        "placeholder": "在 #{{channel}} 发消息…",
+        "send": "发送",
+        "hint": "⏎ 发送 · ⇧⏎ 换行"
+      }
+    },
+    "sidebar": {
+      "zoneLabel": "频道"
+    },
+    "nav": {
+      "openSidebar": "打开侧边栏",
+      "backToChat": "返回聊天",
+      "tasks": "任务",
+      "lightMode": "浅色模式",
+      "darkMode": "深色模式",
+      "logout": "退出登录 ({{name}})"
+    },
+    "back": {
+      "daemons": "返回 Daemon 列表",
+      "channel": "返回频道"
+    },
+    "shortcuts": {
+      "title": "键盘快捷键",
+      "navigation": "导航",
+      "workspace": "工作区",
+      "channelSwitcher": "打开频道切换器",
+      "focusComposer": "聚焦消息输入框",
+      "nextMessage": "选择下一条消息",
+      "prevMessage": "选择上一条消息",
+      "closeOverlay": "关闭最上层的对话框或浮层",
+      "showHelp": "显示快捷键帮助",
+      "toggleTasks": "切换任务看板",
+      "toggleDark": "切换深色模式"
+    },
+    "message": {
+      "placeholder": "输入消息…（@ 可提及）",
+      "voiceStart": "语音输入",
+      "voiceStop": "停止录音"
+    },
+    "agent": {
+      "drawers": {
+        "live": "实时",
+        "history": "历史",
+        "memory": "记忆"
+      },
+      "settings": "设置",
+      "runtimeLine": "对话：{{chat}} · 工作中：{{working}}"
+    }
+  },
+  "daemon": {
+    "addTitle": "添加 Daemon",
+    "addDesc": "注册一台机器，然后将安装命令复制到目标主机执行。",
+    "createShowCommand": "创建并显示命令",
+    "creating": "创建中…",
+    "noActiveZone": "未选择 Zone",
+    "registerFailed": "注册 Daemon 失败",
+    "removeTitle": "移除 Daemon",
+    "removeConfirmTitle": "确定移除此 Daemon？",
+    "removeConfirmMessage": "将从 Zone 中删除该 Daemon 记录，并解绑此机器上的 Agent。请先停止正在运行的 Daemon，此操作不可撤销。",
+    "removed": "已移除 Daemon",
+    "removeFailed": "移除 Daemon 失败",
+    "upgradeDispatched": "已下发升级 — Daemon 将使用新版本重新连接",
+    "upgradeFailed": "下发升级失败",
+    "upgrade": "升级",
+    "upgradeOffline": "Daemon 离线 — 请先重新连接再升级",
+    "upgradeInProgress": "升级进行中…",
+    "upgradeTooltip": "触发远程升级（Daemon 将重新构建并连接）",
+    "installCopyHint": "复制后在目标主机执行（Linux 或 macOS，需要 curl 与 bash）。",
+    "copyInstallCommand": "复制安装命令",
+    "loadingInstall": "正在加载安装命令…",
+    "loadInstallFailed": "加载安装命令失败",
+    "onlineWarningStrong": "在线。",
+    "onlineWarningBody": "重新执行仅会重启此实例；同一主机上需要第二个 Daemon 请注册新机器。",
+    "meta": {
+      "created": "创建时间",
+      "lastConnection": "最近连接",
+      "ip": "IP",
+      "os": "系统"
+    },
+    "environment": "环境",
+    "agents": "Agent",
+    "noAgents": "此 Daemon 上暂无 Agent。",
+    "install": "安装"
+  },
+  "version": {
+    "outdated": "版本过旧",
+    "unstamped": "未标记版本",
+    "outdatedTooltip": "Daemon 版本与服务器构建不一致。请重新构建并部署 Daemon 以消除此警告。",
+    "outdatedWithVersion": "Daemon 报告 v{{version}}。{{tooltip}}",
+    "unstampedTooltip": "开发/未标记构建 — 在双方均使用发布元数据构建前（如 make build 或 scripts/deploy.sh），平台无法校验 Daemon 与服务器版本。"
+  }
+}

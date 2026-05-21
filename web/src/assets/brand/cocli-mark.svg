@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Cocli mark</title>
+  <desc id="desc">A slender terracotta C held on an ivory tile with a folded page.</desc>
+  <defs>
+    <filter id="paper-lift" x="-10%" y="-10%" width="120%" height="120%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#141413" flood-opacity="0.16"/>
+    </filter>
+    <linearGradient id="mark-fill" x1="260" y1="178" x2="760" y2="846" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d97757"/>
+      <stop offset="0.55" stop-color="#c96442"/>
+      <stop offset="1" stop-color="#b5573a"/>
+    </linearGradient>
+    <linearGradient id="paper-fill" x1="360" y1="260" x2="690" y2="760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf7"/>
+      <stop offset="1" stop-color="#f0eee6"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="112" y="112" width="800" height="800" rx="252" fill="#faf9f5" filter="url(#paper-lift)"/>
+  <rect x="112" y="112" width="800" height="800" rx="252" fill="none" stroke="#141413" stroke-opacity="0.18" stroke-width="24"/>
+
+  <path
+    d="M704 282C656 236 590 208 516 208C348 208 214 342 214 512C214 682 348 816 516 816C591 816 658 788 706 742"
+    fill="none"
+    stroke="#141413"
+    stroke-opacity="0.16"
+    stroke-width="146"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M704 282C656 236 590 208 516 208C348 208 214 342 214 512C214 682 348 816 516 816C591 816 658 788 706 742"
+    fill="none"
+    stroke="url(#mark-fill)"
+    stroke-width="104"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <path
+    d="M506 312H674L752 390V722C752 754 726 780 694 780H506C474 780 448 754 448 722V370C448 338 474 312 506 312Z"
+    fill="url(#paper-fill)"
+    stroke="#b5573a"
+    stroke-width="22"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M674 312V380C674 395 686 407 701 407H752Z"
+    fill="#e8e6dc"
+    stroke="#b5573a"
+    stroke-width="22"
+    stroke-linejoin="round"
+  />
+  <path d="M522 502H680" stroke="#c96442" stroke-opacity="0.48" stroke-width="28" stroke-linecap="round"/>
+  <path d="M522 600H642" stroke="#c96442" stroke-opacity="0.34" stroke-width="28" stroke-linecap="round"/>
+</svg>

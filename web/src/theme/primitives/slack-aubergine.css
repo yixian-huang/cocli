@@ -1,0 +1,38 @@
+/* web/src/theme/primitives/slack-aubergine.css
+ * Slack-inspired aubergine dark theme — iconic purple-black with gold accent.
+ */
+:root[data-theme="slack-aubergine"] {
+  --palette-base-0: #1a0e1b;   /* canvas — deep aubergine void */
+  --palette-base-1: #3f0f40;   /* panel — iconic Slack aubergine */
+  --palette-base-2: #5a2d5c;   /* raised — lighter aubergine hover */
+  --palette-base-3: #4a1f4c;   /* border */
+
+  --palette-fg-1: #f8f8f8;
+  --palette-fg-2: #d9d4dc;
+  --palette-fg-3: #b8b0bc;
+  --palette-fg-4: #8a7f8e;
+
+  --palette-signature: #ecb22e;        /* Slack gold (notification dot / brand) */
+  --palette-signature-hover: #f5c548;
+  --palette-on-signature: #1a0e1b;
+
+  --palette-success: #2bac76;
+  --palette-warning: #ecb22e;
+  --palette-error:   #e01e5a;
+  --palette-info:    #1d9bd1;
+
+  --radius-base: 8px;
+  --font-display: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-signal:  'Inter', system-ui, sans-serif;
+  --font-serif:   'Lora', Georgia, serif;
+
+  --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.5), 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 6px 20px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --signature-glow: 0 0 12px rgba(236, 178, 46, 0.3);
+
+  /* polish — Tier 1 atoms */
+  --elev-rest:       none;
+  --elev-hover:      0 1px 2px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --elev-press:      inset 0 1px 0 rgba(0, 0, 0, 0.5);
+  --card-hover-lift: -1px;
+}

@@ -1,0 +1,102 @@
+/* web/src/theme/semantic.css
+ * Cross-theme semantic layer.
+ * - References the active theme's --palette-* primitives.
+ * - The bottom block defines legacy var aliases so existing components
+ *   (which still use --primary, --card, --background, etc.) keep working
+ *   during the migration. Removed in Phase 3.
+ */
+:root {
+  /* surface */
+  --surface-canvas:  var(--palette-base-0);
+  --surface-panel:   var(--palette-base-1);
+  --surface-raised:  var(--palette-base-2);
+  --surface-sunken:  var(--palette-base-1);
+
+  /* content */
+  --content-primary:   var(--palette-fg-1);
+  --content-secondary: var(--palette-fg-2);
+  --content-muted:     var(--palette-fg-3);
+  --content-subtle:    var(--palette-fg-4);
+
+  /* border */
+  --border-default:   var(--palette-base-3);
+  --border-strong:    var(--palette-fg-4);
+  --border-signature: var(--palette-signature);
+
+  /* accent */
+  --accent-signature:       var(--palette-signature);
+  --accent-signature-hover: var(--palette-signature-hover);
+  --accent-on-signature:    var(--palette-on-signature);
+
+  /* feedback */
+  --feedback-success: var(--palette-success);
+  --feedback-warning: var(--palette-warning);
+  --feedback-error:   var(--palette-error);
+  --feedback-info:    var(--palette-info);
+
+  /* motion */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 280ms;
+  --ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+
+  /* ====================================================================
+   * Legacy alias block (Phase 1 compat — REMOVED IN PHASE 3)
+   * Maps old token names to new semantic chain so unchanged components
+   * follow the active theme automatically.
+   * ==================================================================== */
+  --background: var(--surface-canvas);
+  --foreground: var(--content-primary);
+  --card:       var(--surface-panel);
+  --card-foreground: var(--content-primary);
+  --popover:    var(--surface-panel);
+  --popover-foreground: var(--content-primary);
+  --primary:    var(--accent-signature);
+  --primary-foreground: var(--accent-on-signature);
+  --primary-hover: var(--accent-signature-hover);
+  --secondary:  var(--surface-raised);
+  --secondary-foreground: var(--content-primary);
+  --secondary-hover: var(--surface-raised);
+  --muted:      var(--surface-raised);
+  --muted-foreground: var(--content-muted);
+  --accent:     var(--surface-raised);
+  --accent-foreground: var(--content-primary);
+  --destructive: var(--feedback-error);
+  --destructive-foreground: var(--accent-on-signature);
+  --border:     var(--border-default);
+  --input:      var(--border-default);
+  --ring:       var(--accent-signature);
+  --sidebar-bg: var(--surface-panel);
+  --sidebar-border: var(--border-default);
+  --success:    var(--feedback-success);
+  --warning:    var(--feedback-warning);
+  --error:      var(--feedback-error);
+  --info:       var(--feedback-info);
+  --radius:     var(--radius-base);
+  --ring-shadow: var(--border-default);
+  --shadow-whisper-val: var(--shadow-1);
+  --shadow-dialog-val:  var(--shadow-2);
+
+  --surface-primary:   var(--surface-panel);
+  --surface-secondary: var(--surface-canvas);
+  --surface-tertiary:  var(--surface-raised);
+  --accent-primary:    var(--accent-signature);
+  --accent-secondary:  var(--surface-raised);
+
+  /* ─────── Polish tokens (Tier 1 atoms) ─────── */
+
+  /* Interaction state surfaces — color-mix derives from current theme's foreground */
+  --state-hover-bg:    color-mix(in srgb, var(--content-primary) 6%, transparent);
+  --state-active-bg:   color-mix(in srgb, var(--content-primary) 10%, transparent);
+  --state-press-scale: 0.95;
+
+  /* Motion family — v1 ship Linear-precise as "snap"; --motion-fn is the active alias */
+  --motion-fn-snap: cubic-bezier(0.16, 1, 0.3, 1);
+  --motion-fn:      var(--motion-fn-snap);
+
+  /* Density — v1 ship "comfortable"; future :root[data-density="tight"] etc. can override */
+  --density-padding-x: 0.875rem;
+  --density-padding-y: 0.5rem;
+  --density-row-h:     2.25rem;
+  --density-gap:       0.5rem;
+}

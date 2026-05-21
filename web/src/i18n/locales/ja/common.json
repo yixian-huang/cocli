@@ -1,0 +1,326 @@
+{
+  "app": {
+    "name": "Cocli"
+  },
+  "landing": {
+    "getStarted": "はじめる",
+    "heroTitle": "人間×AI コラボレーション・プラットフォーム",
+    "heroSubtitle": "人間と AI エージェントがリアルタイムチャット、タスク実行、信頼性の高い配送で協働できる共有ワークスペース。",
+    "openWorkspace": "ワークスペースを開く",
+    "viewSource": "ソースを見る",
+    "coreFeatures": "主な機能",
+    "architecture": "アーキテクチャ",
+    "howItWorks": "仕組み",
+    "readyToGetStarted": "始める準備はできましたか？",
+    "ctaSubtitle": "API Key を接続して、AI エージェントとの協働を始めましょう。",
+    "footerTagline": "Cocli — オープンソースの人間×AI 協働",
+    "preview": {
+      "badge": "プロダクトプレビュー",
+      "title": "プロダクトを体験する",
+      "subtitle": "Chat・Agent・Tasks の軽量デモ（ログイン不要）。",
+      "tabs": {
+        "chat": "チャット",
+        "agent": "Agent",
+        "tasks": "タスク"
+      },
+      "windowTitle": {
+        "chat": "チャット · #product",
+        "agent": "Agent · @planner",
+        "tasks": "タスク · ボード"
+      }
+    },
+    "features": {
+      "agentManagement": {
+        "title": "AI エージェント管理",
+        "desc": "AI エージェントをリアルタイムで起動・停止・監視。Claude など複数ランタイムに対応し、セッションの自動復旧もサポートします。"
+      },
+      "realtimeCollab": {
+        "title": "リアルタイム協働",
+        "desc": "チャンネル、DM、スレッドと @mention ルーティング。人間とエージェントが同じワークスペースでやり取りできます。"
+      },
+      "taskOrchestration": {
+        "title": "タスクオーケストレーション",
+        "desc": "依存関係を含めてタスクを作成・割り当て・追跡。エージェントが自律的に作業を引き受け実行します。"
+      },
+      "reliableDelivery": {
+        "title": "信頼性の高いメッセージ配送",
+        "desc": "リトライキュー、オフラインキャッシュ、冪等な重複排除により、メッセージの取りこぼしを防ぎます。"
+      },
+      "distributedArch": {
+        "title": "分散アーキテクチャ",
+        "desc": "Daemon は任意のマシンでエージェントプロセスを実行。Server がルーティングと状態を管理し、水平スケールできます。"
+      },
+      "taskDependencies": {
+        "title": "タスク依存関係",
+        "desc": "サイクル検出付きで依存関係を定義。完了したタスクが下流のタスクを自動で解放します。"
+      }
+    },
+    "arch": {
+      "webDesc": "エージェント状態パネルとタスクボードを備えたリアルタイムチャット UI",
+      "serverDesc": "REST API、WebSocket ハブ、メッセージルーティング、タスク管理",
+      "daemonDesc": "エージェントのライフサイクル管理、ヘルスチェック、セッション復旧",
+      "bridgeDesc": "エージェント用ツール：メッセージ送信、タスク管理、ファイルアップロード"
+    },
+    "how": {
+      "steps": {
+        "1": {
+          "title": "チャンネルを作成",
+          "desc": "プロジェクトやチームのためのワークスペースチャンネルを作成します。"
+        },
+        "2": {
+          "title": "AI エージェントを起動",
+          "desc": "サイドバーからエージェントを起動すると、チャンネルに自動参加します。"
+        },
+        "3": {
+          "title": "協働する",
+          "desc": "メッセージ送信、@mention、タスク作成。エージェントが応答し、作業を引き受け、進捗を報告します。"
+        },
+        "4": {
+          "title": "進捗を追跡",
+          "desc": "エージェント状態、ツール使用状況、タスク完了をリアルタイムに確認します。"
+        }
+      }
+    }
+  },
+  "auth": {
+    "createAccount": "アカウント作成",
+    "signInToContinue": "続行するにはサインインしてください",
+    "enterApiKey": "API Key を入力",
+    "inviteCode": "招待コード",
+    "username": "ユーザー名",
+    "email": "メール",
+    "usernameOrEmail": "ユーザー名またはメール",
+    "password": "パスワード",
+    "confirmPassword": "パスワード（確認）",
+    "apiKey": "API Key",
+    "pleaseWait": "お待ちください…",
+    "createAccountButton": "アカウント作成",
+    "signIn": "サインイン",
+    "connect": "接続",
+    "alreadyHaveAccount": "アカウントをお持ちですか？サインイン",
+    "dontHaveAccount": "アカウントがありませんか？サインアップ",
+    "loginWithApiKeyInstead": "API Key でログイン",
+    "loginWithPasswordInstead": "ユーザー名/メールとパスワードでログイン",
+    "errors": {
+      "passwordsDontMatch": "パスワードが一致しません。",
+      "passwordTooShort": "パスワードは 8 文字以上にしてください。",
+      "invalidInviteCode": "招待コードが無効または期限切れです。",
+      "usernameTaken": "そのユーザー名は既に使用されています。",
+      "emailTaken": "このメールは既に登録されています。",
+      "invalidEmail": "有効なメールアドレスを入力してください。",
+      "signupFailed": "サインアップに失敗しました。招待コードを確認して再試行してください。",
+      "invalidUsernameEmailOrPassword": "ユーザー名、メール、またはパスワードが正しくありません。",
+      "invalidUsernameOrPassword": "ユーザー名またはパスワードが正しくありません。",
+      "invalidApiKey": "API Key が無効です。確認して再試行してください。",
+      "apiUnreachable": "API に接続できません",
+      "localDevUrl": "ローカル開発では http://localhost:8091 を使用してください（:5173 は別アプリの可能性があります）。"
+    }
+  },
+  "common": {
+    "loading": "読み込み中…",
+    "language": "言語",
+    "retry": "再試行",
+    "delete": "削除",
+    "unknownError": "不明なエラー",
+    "cancel": "キャンセル",
+    "create": "作成",
+    "done": "完了",
+    "copied": "クリップボードにコピーしました"
+  },
+  "ws": {
+    "reconnecting": "再接続中…"
+  },
+  "providerKeys": {
+    "title": "プロバイダーキー",
+    "createKey": "キーを作成",
+    "adminOnlyTitle": "管理者のみ",
+    "adminOnlyDesc": "プロバイダーキーを管理するには管理者権限が必要です",
+    "errorLoadingTitle": "読み込みエラー",
+    "emptyTitle": "プロバイダーキーがありません",
+    "emptyDesc": "まずは新しい Provider API Key を作成してください",
+    "profileLabel": "プロファイル",
+    "lastUsed": "最終使用",
+    "baseUrl": "Base URL",
+    "deleteConfirmTitle": "プロバイダーキーを削除",
+    "deleteConfirmMessage": "このキーを削除しますか？この操作は取り消せません。",
+    "errors": {
+      "loadFailed": "認証情報の読み込みに失敗しました: {{error}}",
+      "createFailed": "キーの作成に失敗しました: {{error}}",
+      "deleteFailed": "キーの削除に失敗しました: {{error}}",
+      "noZoneSelected": "ゾーンが選択されていません"
+    },
+    "dialog": {
+      "title": "Provider API Key を作成",
+      "keyName": "キー名",
+      "keyNamePlaceholder": "例: my-openai-key",
+      "provider": "Provider",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.example.com",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "API Key を入力",
+      "errors": {
+        "nameRequired": "キー名は必須です",
+        "profileRequired": "Provider は必須です",
+        "baseUrlRequired": "この Provider には Base URL が必要です",
+        "apiKeyRequired": "API Key は必須です"
+      }
+    }
+  },
+  "sidebar": {
+    "history": "履歴",
+    "zoneTaskBoard": "ゾーンのタスクボード",
+    "zoneMembers": "ゾーンメンバー",
+    "wikiAdmin": "Wiki 管理",
+    "providerKeys": "プロバイダーキー",
+    "devtools": "DevTools",
+    "channels": "チャンネル",
+    "people": "メンバー",
+    "admin": "admin",
+    "newChannel": "新規チャンネル",
+    "filterChannels": "チャンネルを絞り込み…",
+    "filterPeople": "メンバーを絞り込み…",
+    "hideArchived": "▾ アーカイブを隠す",
+    "showArchived": "▸ アーカイブ {{count}} 件を表示",
+    "menu": {
+      "markAllRead": "すべて既読にする",
+      "archive": "アーカイブ",
+      "unarchive": "アーカイブ解除"
+    },
+    "toast": {
+      "channelArchived": "チャンネルをアーカイブしました",
+      "channelUnarchived": "アーカイブを解除しました"
+    },
+    "errors": {
+      "archiveFailed": "アーカイブに失敗しました",
+      "openDmFailed": "DM を開けませんでした"
+    },
+    "tabs": {
+      "chat": "チャット",
+      "people": "メンバー"
+    }
+  },
+  "theme": {
+    "sandstone": {
+      "light": "Sandstone Light",
+      "dark": "Sandstone Dark"
+    },
+    "carbon": {
+      "dark": "Carbon Dark"
+    },
+    "followZone": "ゾーンに従う",
+    "section": {
+      "title": "テーマ",
+      "description": "Cocli の外観を選びます。「ゾーンに従う」を選ぶと、そのゾーンの管理者の設定に従います。"
+    },
+    "zoneDefault": {
+      "title": "このゾーンのデフォルトテーマ",
+      "description": "テーマを選んでいないメンバーにはこれが表示されます。"
+    },
+    "zoom": {
+      "light": "Zoom · ライト",
+      "dark": "Zoom · ダーク"
+    },
+    "slack": {
+      "aubergine": "Slack · オーベルジーヌ"
+    },
+    "discord": {
+      "dark": "Discord · ダーク"
+    }
+  },
+  "workspace": {
+    "theme": {
+      "noCounterpart": "このテーマにはまだライト/ダークの対応版がありません"
+    },
+    "chat": {
+      "composer": {
+        "placeholder": "#{{channel}} にメッセージ…",
+        "send": "送信",
+        "hint": "⏎ 送信 · ⇧⏎ 改行"
+      }
+    },
+    "sidebar": {
+      "zoneLabel": "ゾーン"
+    },
+    "nav": {
+      "openSidebar": "サイドバーを開く",
+      "backToChat": "チャットに戻る",
+      "tasks": "タスク",
+      "lightMode": "ライトモード",
+      "darkMode": "ダークモード",
+      "logout": "ログアウト ({{name}})"
+    },
+    "back": {
+      "daemons": "Daemon 一覧に戻る",
+      "channel": "チャンネルに戻る"
+    },
+    "shortcuts": {
+      "title": "キーボードショートカット",
+      "navigation": "ナビゲーション",
+      "workspace": "ワークスペース",
+      "channelSwitcher": "チャンネル切替を開く",
+      "focusComposer": "メッセージ入力にフォーカス",
+      "nextMessage": "次のメッセージ",
+      "prevMessage": "前のメッセージ",
+      "closeOverlay": "最前面のダイアログ/オーバーレイを閉じる",
+      "showHelp": "このショートカットヘルプを表示",
+      "toggleTasks": "タスクボードの表示切替",
+      "toggleDark": "ダークモード切替"
+    },
+    "message": {
+      "placeholder": "メッセージを入力…（@ でメンション）",
+      "voiceStart": "音声入力",
+      "voiceStop": "録音を停止"
+    },
+    "agent": {
+      "drawers": {
+        "live": "ライブ",
+        "history": "履歴",
+        "memory": "メモリ"
+      },
+      "settings": "設定",
+      "runtimeLine": "チャット: {{chat}} · 作業中: {{working}}"
+    }
+  },
+  "daemon": {
+    "addTitle": "Daemon を追加",
+    "addDesc": "マシンを登録し、インストールコマンドを対象ホストにコピーしてください。",
+    "createShowCommand": "作成してコマンドを表示",
+    "creating": "作成中…",
+    "noActiveZone": "アクティブなゾーンがありません",
+    "registerFailed": "Daemon の登録に失敗しました",
+    "removeTitle": "Daemon を削除",
+    "removeConfirmTitle": "この Daemon を削除しますか？",
+    "removeConfirmMessage": "ゾーンから Daemon レコードを削除し、このマシン上の Agent の紐付けを解除します。実行中の Daemon は先に停止してください。元に戻せません。",
+    "removed": "Daemon を削除しました",
+    "removeFailed": "Daemon の削除に失敗しました",
+    "upgradeDispatched": "アップグレードを送信しました — 新バージョンで再接続します",
+    "upgradeFailed": "アップグレードの送信に失敗しました",
+    "upgrade": "アップグレード",
+    "upgradeOffline": "Daemon オフライン — 再接続してからアップグレード",
+    "upgradeInProgress": "アップグレード中…",
+    "upgradeTooltip": "リモートアップグレード（再ビルド後に再接続）",
+    "installCopyHint": "対象ホストでコピーして実行（Linux/macOS、curl + bash が必要）",
+    "copyInstallCommand": "インストールコマンドをコピー",
+    "loadingInstall": "インストールコマンドを読み込み中…",
+    "loadInstallFailed": "インストールコマンドの読み込みに失敗",
+    "onlineWarningStrong": "オンライン。",
+    "onlineWarningBody": "再実行はこのインスタンスのみ再起動します。同一ホストで 2 台目は別マシンを登録してください。",
+    "meta": {
+      "created": "作成日時",
+      "lastConnection": "最終接続",
+      "ip": "IP",
+      "os": "OS"
+    },
+    "environment": "環境",
+    "agents": "Agent",
+    "noAgents": "この Daemon に Agent はありません。",
+    "install": "インストール"
+  },
+  "version": {
+    "outdated": "要更新",
+    "unstamped": "未スタンプ",
+    "outdatedTooltip": "Daemon のバージョンがサーバーと一致しません。再ビルド・再デプロイしてください。",
+    "outdatedWithVersion": "Daemon は v{{version}} を報告。{{tooltip}}",
+    "unstampedTooltip": "開発/未スタンプビルド — リリースメタデータ付きビルド（make build 等）まで Daemon とサーバーの照合はできません。"
+  }
+}

@@ -1,0 +1,160 @@
+/* web/src/index.css */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Lora:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+@import "tailwindcss";
+@plugin "@tailwindcss/typography";
+
+/* Theme primitives — all themes loaded once, only the active [data-theme] applies */
+@import "./theme/primitives/sandstone-light.css";
+@import "./theme/primitives/sandstone-dark.css";
+@import "./theme/primitives/carbon-dark.css";
+@import "./theme/primitives/zoom-light.css";
+@import "./theme/primitives/zoom-dark.css";
+@import "./theme/primitives/slack-aubergine.css";
+@import "./theme/primitives/discord-dark.css";
+
+/* Semantic layer (cross-theme) + Phase-1 legacy alias bridge */
+@import "./theme/semantic.css";
+
+/* Keep .dark variant working during Phase 1+2 (removed in Phase 3) */
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  /* Existing color-* surface to keep current Tailwind utilities working */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary-hover: var(--primary-hover);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary-hover: var(--secondary-hover);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-sidebar-bg: var(--sidebar-bg);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-error: var(--error);
+  --color-info: var(--info);
+
+  /* New semantic surface — utility classes like `bg-surface-panel`, `text-content-primary` */
+  --color-surface-canvas:  var(--surface-canvas);
+  --color-surface-panel:   var(--surface-panel);
+  --color-surface-raised:  var(--surface-raised);
+  --color-surface-sunken:  var(--surface-sunken);
+  --color-content-primary:   var(--content-primary);
+  --color-content-secondary: var(--content-secondary);
+  --color-content-muted:     var(--content-muted);
+  --color-content-subtle:    var(--content-subtle);
+  --color-border-default:    var(--border-default);
+  --color-border-strong:     var(--border-strong);
+  --color-border-signature:  var(--border-signature);
+  --color-accent-signature:        var(--accent-signature);
+  --color-accent-signature-hover:  var(--accent-signature-hover);
+  --color-accent-on-signature:     var(--accent-on-signature);
+  --color-feedback-success: var(--feedback-success);
+  --color-feedback-warning: var(--feedback-warning);
+  --color-feedback-error:   var(--feedback-error);
+  --color-feedback-info:    var(--feedback-info);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 10px);
+  --radius-base: var(--radius-base);
+
+  --font-serif:   var(--font-serif);
+  --font-sans:    var(--font-display);
+  --font-display: var(--font-display);
+  --font-mono:    var(--font-signal);
+  --font-signal:  var(--font-signal);
+
+  --shadow-ring:    0 0 0 1px var(--ring-shadow);
+  --shadow-whisper: var(--shadow-whisper-val);
+  --shadow-dialog:  var(--shadow-dialog-val);
+  --shadow-signature-glow: var(--signature-glow);
+
+  --duration-fast:   var(--motion-fast);
+  --duration-normal: var(--motion-base);
+  --duration-slow:   var(--motion-slow);
+
+  --animate-signature-breathe: signature-breathe 1800ms cubic-bezier(0.16, 1, 0.3, 1) infinite;
+
+  /* polish — Tier 1 atoms */
+  --shadow-elev-rest:    var(--elev-rest);
+  --shadow-elev-hover:   var(--elev-hover);
+  --shadow-elev-press:   var(--elev-press);
+  --color-state-hover-bg:  var(--state-hover-bg);
+  --color-state-active-bg: var(--state-active-bg);
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html {
+    font-size: 106.25%;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  html, body, #root { width: 100%; height: 100%; }
+  body {
+    @apply bg-background text-foreground;
+    font-family: var(--font-display);
+    line-height: 1.5;
+    margin: 0;
+  }
+  #root {
+    min-height: 100vh;
+    min-height: 100dvh;
+    display: block;
+  }
+  .prose {
+    --tw-prose-body: var(--foreground);
+    --tw-prose-headings: var(--foreground);
+    --tw-prose-links: var(--primary);
+    --tw-prose-code: var(--foreground);
+    --tw-prose-pre-bg: var(--muted);
+    --tw-prose-pre-code: var(--foreground);
+  }
+  .prose :where(code):not(:where(pre *)) {
+    font-family: var(--font-signal);
+    background: var(--muted);
+    padding: 2px 5px;
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+  @keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+  }
+  @keyframes loading-bar {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(400%); }
+  }
+  @keyframes signature-breathe {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.18); opacity: 0.85; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}

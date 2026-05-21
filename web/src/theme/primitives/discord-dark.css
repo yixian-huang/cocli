@@ -1,0 +1,38 @@
+/* web/src/theme/primitives/discord-dark.css
+ * Discord-inspired dark theme — signature blurple accent + cool grey surfaces.
+ */
+:root[data-theme="discord-dark"] {
+  --palette-base-0: #2f3136;   /* canvas (Discord sidebar grey) */
+  --palette-base-1: #36393f;   /* panel (Discord chat area grey) */
+  --palette-base-2: #40444b;   /* raised — hover modifier */
+  --palette-base-3: #4f545c;   /* border */
+
+  --palette-fg-1: #dcddde;     /* text-normal */
+  --palette-fg-2: #b9bbbe;
+  --palette-fg-3: #8e9297;
+  --palette-fg-4: #72767d;     /* text-muted */
+
+  --palette-signature: #5865f2;        /* Discord blurple */
+  --palette-signature-hover: #7984f5;
+  --palette-on-signature: #ffffff;
+
+  --palette-success: #3ba55d;
+  --palette-warning: #faa61a;
+  --palette-error:   #ed4245;
+  --palette-info:    #00afff;          /* Discord link blue */
+
+  --radius-base: 3px;
+  --font-display: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-signal:  'JetBrains Mono', ui-monospace, monospace;
+  --font-serif:   'Lora', Georgia, serif;
+
+  --shadow-1: 0 1px 0 rgba(4, 4, 5, 0.2), 0 1.5px 0 rgba(6, 6, 7, 0.05), 0 2px 0 rgba(4, 4, 5, 0.05);
+  --shadow-2: 0 8px 16px rgba(0, 0, 0, 0.24);
+  --signature-glow: 0 0 10px rgba(88, 101, 242, 0.35);
+
+  /* polish — Tier 1 atoms */
+  --elev-rest:       none;
+  --elev-hover:      0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --elev-press:      inset 0 1px 0 rgba(0, 0, 0, 0.4);
+  --card-hover-lift: -1px;
+}

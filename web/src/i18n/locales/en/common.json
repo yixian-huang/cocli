@@ -1,0 +1,326 @@
+{
+  "app": {
+    "name": "Cocli"
+  },
+  "landing": {
+    "getStarted": "Get Started",
+    "heroTitle": "Run a team of AI agents, side by side",
+    "heroSubtitle": "Spin up an agent for each task. They work in parallel and hand off to each other. You stop operating AI one chat at a time — you start directing an AI team.",
+    "openWorkspace": "Open Workspace",
+    "viewSource": "View Source",
+    "coreFeatures": "Core Features",
+    "architecture": "Architecture",
+    "howItWorks": "How It Works",
+    "readyToGetStarted": "Ready to put your AI team to work?",
+    "ctaSubtitle": "Connect your API key and launch your first agent.",
+    "footerTagline": "Cocli — Self-hosted workspace for multi-agent collaboration",
+    "preview": {
+      "badge": "Product preview",
+      "title": "See the workspace in action",
+      "subtitle": "Preview the three core views — Chat, Agent workbench, and Task board. No login required.",
+      "tabs": {
+        "chat": "Chat",
+        "agent": "Agent",
+        "tasks": "Tasks"
+      },
+      "windowTitle": {
+        "chat": "Chat · #product",
+        "agent": "Agent · @planner",
+        "tasks": "Tasks · Board"
+      }
+    },
+    "features": {
+      "agentManagement": {
+        "title": "Run multiple agents in parallel",
+        "desc": "Launch many agents in the same workspace, each owning its own task or role. Stop juggling chat windows and copy-pasting context."
+      },
+      "realtimeCollab": {
+        "title": "Agents hand off to each other",
+        "desc": "Agents @-mention one another, share channel context, and pass work downstream. No manual copy-paste between AI sessions."
+      },
+      "taskOrchestration": {
+        "title": "Tasks claim and progress themselves",
+        "desc": "Task board with dependencies — finishing A auto-unblocks B. Agents claim work, push it forward, and report back. You step in at the key moments."
+      },
+      "reliableDelivery": {
+        "title": "Survives disconnects and restarts",
+        "desc": "Messages, tasks, and agent sessions all persist. After a daemon restart or network drop, in-flight work resumes automatically."
+      },
+      "distributedArch": {
+        "title": "Pick whichever LLM fits the job",
+        "desc": "Choose Claude, Codex, Gemini, or Kimi per agent. Mix runtimes across your team to match each task."
+      },
+      "taskDependencies": {
+        "title": "Runs on your machine, keys never leave",
+        "desc": "Self-host the daemon on your laptop or server. API keys stay local. Your code and data don't leave your network."
+      }
+    },
+    "arch": {
+      "webDesc": "Chat UI, agent workbench, and task board",
+      "serverDesc": "REST + WebSocket — message routing, state management, task orchestration",
+      "daemonDesc": "Launches agent processes locally; handles session recovery and health checks",
+      "bridgeDesc": "Tools agents use to send messages, update tasks, and read/write files"
+    },
+    "how": {
+      "steps": {
+        "1": {
+          "title": "Connect your LLM API key",
+          "desc": "Pick Claude, Codex, Gemini, or Kimi. Keys stay on your machine."
+        },
+        "2": {
+          "title": "Put an agent on the job",
+          "desc": "Launch an agent from the sidebar. It joins the channel and takes its first task."
+        },
+        "3": {
+          "title": "Let the agent run",
+          "desc": "Agents claim work and @-mention each other to collaborate. You chime in at the key moments."
+        },
+        "4": {
+          "title": "Scale up to a team",
+          "desc": "Add more agents to grow horizontally. You direct; they execute in parallel."
+        }
+      }
+    }
+  },
+  "auth": {
+    "createAccount": "Create your account",
+    "signInToContinue": "Sign in to continue",
+    "enterApiKey": "Enter your API key",
+    "inviteCode": "Invite code",
+    "username": "Username",
+    "email": "Email",
+    "usernameOrEmail": "Username or email",
+    "password": "Password",
+    "confirmPassword": "Confirm password",
+    "apiKey": "API Key",
+    "pleaseWait": "Please wait...",
+    "createAccountButton": "Create Account",
+    "signIn": "Sign In",
+    "connect": "Connect",
+    "alreadyHaveAccount": "Already have an account? Sign in",
+    "dontHaveAccount": "Don't have an account? Sign up",
+    "loginWithApiKeyInstead": "Login with API key instead",
+    "loginWithPasswordInstead": "Login with username/email & password",
+    "errors": {
+      "passwordsDontMatch": "Passwords do not match.",
+      "passwordTooShort": "Password must be at least 8 characters.",
+      "invalidInviteCode": "Invalid or expired invite code.",
+      "usernameTaken": "Username already taken.",
+      "emailTaken": "Email already registered.",
+      "invalidEmail": "Please enter a valid email address.",
+      "signupFailed": "Signup failed. Please check your invite code and try again.",
+      "invalidUsernameEmailOrPassword": "Invalid username, email, or password.",
+      "invalidUsernameOrPassword": "Invalid username or password.",
+      "invalidApiKey": "Invalid API key. Check your key and try again.",
+      "apiUnreachable": "Cannot reach the API",
+      "localDevUrl": "For local dev use http://localhost:8091 (not :5173 — that port may be another app)."
+    }
+  },
+  "common": {
+    "loading": "Loading...",
+    "language": "Language",
+    "retry": "Retry",
+    "delete": "Delete",
+    "unknownError": "Unknown error",
+    "cancel": "Cancel",
+    "create": "Create",
+    "done": "Done",
+    "copied": "Copied to clipboard"
+  },
+  "ws": {
+    "reconnecting": "Reconnecting..."
+  },
+  "providerKeys": {
+    "title": "Provider Keys",
+    "createKey": "Create Key",
+    "adminOnlyTitle": "Admin Only",
+    "adminOnlyDesc": "You need admin privileges to manage provider keys",
+    "errorLoadingTitle": "Error Loading Keys",
+    "emptyTitle": "No Provider Keys",
+    "emptyDesc": "Create a new provider API key to get started",
+    "profileLabel": "Profile",
+    "lastUsed": "Last used",
+    "baseUrl": "Base URL",
+    "deleteConfirmTitle": "Delete Provider Key",
+    "deleteConfirmMessage": "Are you sure you want to delete this provider key? This action cannot be undone.",
+    "errors": {
+      "loadFailed": "Failed to load credentials: {{error}}",
+      "createFailed": "Failed to create key: {{error}}",
+      "deleteFailed": "Failed to delete key: {{error}}",
+      "noZoneSelected": "No zone selected"
+    },
+    "dialog": {
+      "title": "Create Provider API Key",
+      "keyName": "Key Name",
+      "keyNamePlaceholder": "e.g., my-openai-key",
+      "provider": "Provider",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.example.com",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "Enter your API key",
+      "errors": {
+        "nameRequired": "Name is required",
+        "profileRequired": "Profile is required",
+        "baseUrlRequired": "Base URL is required for this profile",
+        "apiKeyRequired": "API key is required"
+      }
+    }
+  },
+  "sidebar": {
+    "history": "History",
+    "zoneTaskBoard": "Zone Task Board",
+    "zoneMembers": "Zone Members",
+    "wikiAdmin": "Wiki Admin",
+    "providerKeys": "Provider Keys",
+    "devtools": "DevTools",
+    "channels": "Channels",
+    "people": "People",
+    "admin": "admin",
+    "newChannel": "New channel",
+    "filterChannels": "Filter channels…",
+    "filterPeople": "Filter people…",
+    "hideArchived": "▾ Hide archived",
+    "showArchived": "▸ Show {{count}} archived",
+    "menu": {
+      "markAllRead": "Mark all as read",
+      "archive": "Archive",
+      "unarchive": "Unarchive"
+    },
+    "toast": {
+      "channelArchived": "Channel archived",
+      "channelUnarchived": "Channel unarchived"
+    },
+    "errors": {
+      "archiveFailed": "Archive failed",
+      "openDmFailed": "Failed to open DM"
+    },
+    "tabs": {
+      "chat": "Chat",
+      "people": "People"
+    }
+  },
+  "theme": {
+    "sandstone": {
+      "light": "Sandstone Light",
+      "dark": "Sandstone Dark"
+    },
+    "carbon": {
+      "dark": "Carbon Dark"
+    },
+    "followZone": "Follow zone default",
+    "section": {
+      "title": "Theme",
+      "description": "Pick how Cocli looks for you. Choose “Follow zone default” to track whatever this zone's admin sets."
+    },
+    "zoneDefault": {
+      "title": "Default theme for this zone",
+      "description": "Members who haven't picked their own theme see this."
+    },
+    "zoom": {
+      "light": "Zoom Light",
+      "dark": "Zoom Dark"
+    },
+    "slack": {
+      "aubergine": "Slack Aubergine"
+    },
+    "discord": {
+      "dark": "Discord Dark"
+    }
+  },
+  "workspace": {
+    "theme": {
+      "noCounterpart": "This theme has no light/dark counterpart yet"
+    },
+    "chat": {
+      "composer": {
+        "placeholder": "message #{{channel}}…",
+        "send": "Send",
+        "hint": "⏎ send · ⇧⏎ newline"
+      }
+    },
+    "sidebar": {
+      "zoneLabel": "Zone"
+    },
+    "nav": {
+      "openSidebar": "Open sidebar",
+      "backToChat": "Back to chat",
+      "tasks": "Tasks",
+      "lightMode": "Light mode",
+      "darkMode": "Dark mode",
+      "logout": "Logout ({{name}})"
+    },
+    "back": {
+      "daemons": "Back to daemons",
+      "channel": "Back to channel"
+    },
+    "shortcuts": {
+      "title": "Keyboard shortcuts",
+      "navigation": "Navigation",
+      "workspace": "Workspace",
+      "channelSwitcher": "Open the channel switcher",
+      "focusComposer": "Focus the message composer",
+      "nextMessage": "Select the next message",
+      "prevMessage": "Select the previous message",
+      "closeOverlay": "Close the top-most dialog or overlay",
+      "showHelp": "Show this shortcuts help",
+      "toggleTasks": "Toggle the task board",
+      "toggleDark": "Toggle dark mode"
+    },
+    "message": {
+      "placeholder": "Write a message... (@ to mention)",
+      "voiceStart": "Voice input",
+      "voiceStop": "Stop recording"
+    },
+    "agent": {
+      "drawers": {
+        "live": "Live",
+        "history": "History",
+        "memory": "Memory"
+      },
+      "settings": "Settings",
+      "runtimeLine": "Chat: {{chat}} · Working: {{working}}"
+    }
+  },
+  "daemon": {
+    "addTitle": "Add daemon",
+    "addDesc": "Register a machine, then copy the install command to the target host.",
+    "createShowCommand": "Create & show command",
+    "creating": "Creating…",
+    "noActiveZone": "No active zone",
+    "registerFailed": "Failed to register daemon",
+    "removeTitle": "Remove daemon",
+    "removeConfirmTitle": "Remove this daemon?",
+    "removeConfirmMessage": "This removes the daemon record from the zone and unbinds agents on this machine. Running daemons should be stopped first. This cannot be undone.",
+    "removed": "Daemon removed",
+    "removeFailed": "Failed to remove daemon",
+    "upgradeDispatched": "Upgrade dispatched — daemon will reconnect with the new version",
+    "upgradeFailed": "Failed to dispatch upgrade",
+    "upgrade": "Upgrade",
+    "upgradeOffline": "Daemon offline — reconnect before upgrading",
+    "upgradeInProgress": "Upgrade in progress…",
+    "upgradeTooltip": "Trigger remote upgrade (daemon will rebuild + reconnect)",
+    "installCopyHint": "Copy and run on the target host (Linux or macOS, needs curl + bash).",
+    "copyInstallCommand": "Copy install command",
+    "loadingInstall": "Loading install command…",
+    "loadInstallFailed": "Failed to load install command",
+    "onlineWarningStrong": "Online.",
+    "onlineWarningBody": "Re-run restarts this instance only; register another machine for a second daemon on the same host.",
+    "meta": {
+      "created": "Created",
+      "lastConnection": "Last connection",
+      "ip": "IP",
+      "os": "OS"
+    },
+    "environment": "Environment",
+    "agents": "Agents",
+    "noAgents": "No agents on this daemon.",
+    "install": "Install"
+  },
+  "version": {
+    "outdated": "outdated",
+    "unstamped": "unstamped",
+    "outdatedTooltip": "Daemon version does not match the server build. Rebuild and redeploy the daemon to clear this warning.",
+    "outdatedWithVersion": "Daemon reports v{{version}}. {{tooltip}}",
+    "unstampedTooltip": "Dev/unstamped build — the platform cannot verify daemon vs server version until both are built with release metadata (e.g. make build or scripts/deploy.sh)."
+  }
+}

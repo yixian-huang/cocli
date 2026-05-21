@@ -1,0 +1,326 @@
+{
+  "app": {
+    "name": "Cocli"
+  },
+  "landing": {
+    "getStarted": "Loslegen",
+    "heroTitle": "Plattform für Mensch‑KI‑Zusammenarbeit",
+    "heroSubtitle": "Ein geteilter Workspace, in dem Menschen und KI‑Agenten über Echtzeit‑Chat, Task‑Ausführung und zuverlässige Zustellung zusammenarbeiten — alles an einem Ort.",
+    "openWorkspace": "Workspace öffnen",
+    "viewSource": "Quellcode ansehen",
+    "coreFeatures": "Kernfunktionen",
+    "architecture": "Architektur",
+    "howItWorks": "So funktioniert’s",
+    "readyToGetStarted": "Bereit loszulegen?",
+    "ctaSubtitle": "Verbinde deinen API‑Key und starte die Zusammenarbeit mit KI‑Agenten.",
+    "footerTagline": "Cocli — Open‑Source Mensch‑KI‑Zusammenarbeit",
+    "preview": {
+      "badge": "Produktvorschau",
+      "title": "Erlebe den Workspace live",
+      "subtitle": "Leichte Demo für Chat, Agenten und Tasks — ohne Login.",
+      "tabs": {
+        "chat": "Chat",
+        "agent": "Agent",
+        "tasks": "Tasks"
+      },
+      "windowTitle": {
+        "chat": "Chat · #product",
+        "agent": "Agent · @planner",
+        "tasks": "Tasks · Board"
+      }
+    },
+    "features": {
+      "agentManagement": {
+        "title": "KI‑Agentenverwaltung",
+        "desc": "KI‑Agenten in Echtzeit starten, stoppen und überwachen. Unterstützung für Claude und andere Runtimes mit automatischer Sitzungswiederherstellung."
+      },
+      "realtimeCollab": {
+        "title": "Echtzeit‑Zusammenarbeit",
+        "desc": "Channels, DMs und Threads mit @mention‑Routing. Menschen und Agenten kommunizieren im selben Workspace."
+      },
+      "taskOrchestration": {
+        "title": "Task‑Orchestrierung",
+        "desc": "Tasks erstellen, zuweisen und verfolgen – inklusive Abhängigkeitsmanagement. Agenten können Arbeit autonom übernehmen und ausführen."
+      },
+      "reliableDelivery": {
+        "title": "Zuverlässige Zustellung",
+        "desc": "Retry‑Queues, Offline‑Cache und idempotente Deduplizierung stellen sicher, dass keine Nachricht verloren geht."
+      },
+      "distributedArch": {
+        "title": "Verteilte Architektur",
+        "desc": "Der Daemon führt Agent‑Prozesse auf jeder Maschine aus. Der Server übernimmt Routing und State. Horizontal skalierbar."
+      },
+      "taskDependencies": {
+        "title": "Task‑Abhängigkeiten",
+        "desc": "Abhängigkeiten mit Zyklus‑Erkennung definieren. Erledigte Tasks entsperren automatisch nachgelagerte Arbeit."
+      }
+    },
+    "arch": {
+      "webDesc": "Echtzeit‑Chat‑UI mit Agent‑Statuspanel und Taskboard",
+      "serverDesc": "REST‑API, WebSocket‑Hub, Nachrichtenrouting, Task‑Management",
+      "daemonDesc": "Agent‑Lifecycle, Health‑Checks, Session‑Recovery",
+      "bridgeDesc": "Tools für Agenten: Nachrichten senden, Tasks verwalten, Dateien hochladen"
+    },
+    "how": {
+      "steps": {
+        "1": {
+          "title": "Einen Channel erstellen",
+          "desc": "Erstelle einen Workspace‑Channel für dein Projekt oder Team."
+        },
+        "2": {
+          "title": "Einen KI‑Agenten starten",
+          "desc": "Starte einen Agenten in der Sidebar. Er tritt dem Channel automatisch bei."
+        },
+        "3": {
+          "title": "Zusammenarbeiten",
+          "desc": "Sende Nachrichten, @mention Agenten und erstelle Tasks. Agenten antworten, übernehmen Arbeit und berichten Fortschritt."
+        },
+        "4": {
+          "title": "Fortschritt verfolgen",
+          "desc": "Status, Tool‑Nutzung und Task‑Abschluss in Echtzeit beobachten."
+        }
+      }
+    }
+  },
+  "auth": {
+    "createAccount": "Konto erstellen",
+    "signInToContinue": "Zum Fortfahren anmelden",
+    "enterApiKey": "API‑Key eingeben",
+    "inviteCode": "Einladungscode",
+    "username": "Benutzername",
+    "email": "E-Mail",
+    "usernameOrEmail": "Benutzername oder E-Mail",
+    "password": "Passwort",
+    "confirmPassword": "Passwort bestätigen",
+    "apiKey": "API Key",
+    "pleaseWait": "Bitte warten…",
+    "createAccountButton": "Konto erstellen",
+    "signIn": "Anmelden",
+    "connect": "Verbinden",
+    "alreadyHaveAccount": "Schon ein Konto? Anmelden",
+    "dontHaveAccount": "Noch kein Konto? Registrieren",
+    "loginWithApiKeyInstead": "Stattdessen mit API‑Key anmelden",
+    "loginWithPasswordInstead": "Stattdessen mit Benutzername/E-Mail & Passwort anmelden",
+    "errors": {
+      "passwordsDontMatch": "Passwörter stimmen nicht überein.",
+      "passwordTooShort": "Das Passwort muss mindestens 8 Zeichen lang sein.",
+      "invalidInviteCode": "Einladungscode ist ungültig oder abgelaufen.",
+      "usernameTaken": "Benutzername ist bereits vergeben.",
+      "emailTaken": "E-Mail ist bereits registriert.",
+      "invalidEmail": "Bitte eine gültige E-Mail-Adresse eingeben.",
+      "signupFailed": "Registrierung fehlgeschlagen. Bitte Einladungscode prüfen und erneut versuchen.",
+      "invalidUsernameEmailOrPassword": "Ungültiger Benutzername, E-Mail oder Passwort.",
+      "invalidUsernameOrPassword": "Ungültiger Benutzername oder Passwort.",
+      "invalidApiKey": "Ungültiger API‑Key. Bitte prüfen und erneut versuchen.",
+      "apiUnreachable": "API nicht erreichbar",
+      "localDevUrl": "Für lokale Entwicklung http://localhost:8091 verwenden (nicht :5173 — dieser Port kann eine andere App sein)."
+    }
+  },
+  "common": {
+    "loading": "Wird geladen…",
+    "language": "Sprache",
+    "retry": "Erneut versuchen",
+    "delete": "Löschen",
+    "unknownError": "Unbekannter Fehler",
+    "cancel": "Abbrechen",
+    "create": "Erstellen",
+    "done": "Fertig",
+    "copied": "In die Zwischenablage kopiert"
+  },
+  "ws": {
+    "reconnecting": "Verbindung wird wiederhergestellt…"
+  },
+  "providerKeys": {
+    "title": "Provider-Schlüssel",
+    "createKey": "Schlüssel erstellen",
+    "adminOnlyTitle": "Nur Admin",
+    "adminOnlyDesc": "Du benötigst Admin-Rechte, um Provider-Schlüssel zu verwalten",
+    "errorLoadingTitle": "Fehler beim Laden",
+    "emptyTitle": "Keine Provider-Schlüssel",
+    "emptyDesc": "Erstelle einen neuen Provider-API-Key, um loszulegen",
+    "profileLabel": "Profil",
+    "lastUsed": "Zuletzt verwendet",
+    "baseUrl": "Base URL",
+    "deleteConfirmTitle": "Provider-Schlüssel löschen",
+    "deleteConfirmMessage": "Möchtest du diesen Schlüssel wirklich löschen? Diese Aktion kann nicht rückgängig gemacht werden.",
+    "errors": {
+      "loadFailed": "Creds konnten nicht geladen werden: {{error}}",
+      "createFailed": "Schlüssel konnte nicht erstellt werden: {{error}}",
+      "deleteFailed": "Schlüssel konnte nicht gelöscht werden: {{error}}",
+      "noZoneSelected": "Keine Zone ausgewählt"
+    },
+    "dialog": {
+      "title": "Provider API-Key erstellen",
+      "keyName": "Schlüsselname",
+      "keyNamePlaceholder": "z. B. mein-openai-key",
+      "provider": "Provider",
+      "baseUrl": "Base URL",
+      "baseUrlPlaceholder": "https://api.beispiel.com",
+      "apiKey": "API Key",
+      "apiKeyPlaceholder": "API-Key eingeben",
+      "errors": {
+        "nameRequired": "Name ist erforderlich",
+        "profileRequired": "Provider ist erforderlich",
+        "baseUrlRequired": "Base URL ist für diesen Provider erforderlich",
+        "apiKeyRequired": "API-Key ist erforderlich"
+      }
+    }
+  },
+  "sidebar": {
+    "history": "Verlauf",
+    "zoneTaskBoard": "Zonen-Taskboard",
+    "zoneMembers": "Zonenmitglieder",
+    "wikiAdmin": "Wiki-Admin",
+    "providerKeys": "Provider-Schlüssel",
+    "devtools": "DevTools",
+    "channels": "Kanäle",
+    "people": "Personen",
+    "admin": "admin",
+    "newChannel": "Neuer Kanal",
+    "filterChannels": "Kanäle filtern…",
+    "filterPeople": "Personen filtern…",
+    "hideArchived": "▾ Archivierte ausblenden",
+    "showArchived": "▸ {{count}} archivierte anzeigen",
+    "menu": {
+      "markAllRead": "Alles als gelesen markieren",
+      "archive": "Archivieren",
+      "unarchive": "Dearchivieren"
+    },
+    "toast": {
+      "channelArchived": "Kanal archiviert",
+      "channelUnarchived": "Kanal dearchiviert"
+    },
+    "errors": {
+      "archiveFailed": "Archivieren fehlgeschlagen",
+      "openDmFailed": "DM konnte nicht geöffnet werden"
+    },
+    "tabs": {
+      "chat": "Chat",
+      "people": "Personen"
+    }
+  },
+  "theme": {
+    "sandstone": {
+      "light": "Sandstone Light",
+      "dark": "Sandstone Dark"
+    },
+    "carbon": {
+      "dark": "Carbon Dark"
+    },
+    "followZone": "Zone folgen",
+    "section": {
+      "title": "Design",
+      "description": "Wähle, wie Cocli für dich aussehen soll. Wähle „Zone folgen“, um die Einstellung des Zonen-Admins zu übernehmen."
+    },
+    "zoneDefault": {
+      "title": "Standard-Design für diese Zone",
+      "description": "Mitglieder ohne eigenes Design sehen dieses."
+    },
+    "zoom": {
+      "light": "Zoom Hell",
+      "dark": "Zoom Dunkel"
+    },
+    "slack": {
+      "aubergine": "Slack Aubergine"
+    },
+    "discord": {
+      "dark": "Discord Dunkel"
+    }
+  },
+  "workspace": {
+    "theme": {
+      "noCounterpart": "Dieses Design hat noch keine helle/dunkle Variante"
+    },
+    "chat": {
+      "composer": {
+        "placeholder": "Nachricht in #{{channel}}…",
+        "send": "Senden",
+        "hint": "⏎ senden · ⇧⏎ neue Zeile"
+      }
+    },
+    "sidebar": {
+      "zoneLabel": "Zone"
+    },
+    "nav": {
+      "openSidebar": "Seitenleiste öffnen",
+      "backToChat": "Zurück zum Chat",
+      "tasks": "Aufgaben",
+      "lightMode": "Hellmodus",
+      "darkMode": "Dunkelmodus",
+      "logout": "Abmelden ({{name}})"
+    },
+    "back": {
+      "daemons": "Zurück zu Daemons",
+      "channel": "Zurück zum Kanal"
+    },
+    "shortcuts": {
+      "title": "Tastenkürzel",
+      "navigation": "Navigation",
+      "workspace": "Arbeitsbereich",
+      "channelSwitcher": "Kanalwechsler öffnen",
+      "focusComposer": "Nachrichteneingabe fokussieren",
+      "nextMessage": "Nächste Nachricht",
+      "prevMessage": "Vorherige Nachricht",
+      "closeOverlay": "Oberstes Dialog/Fenster schließen",
+      "showHelp": "Diese Hilfe anzeigen",
+      "toggleTasks": "Taskboard umschalten",
+      "toggleDark": "Dunkelmodus umschalten"
+    },
+    "message": {
+      "placeholder": "Nachricht schreiben… (@ zum Erwähnen)",
+      "voiceStart": "Spracheingabe",
+      "voiceStop": "Aufnahme stoppen"
+    },
+    "agent": {
+      "drawers": {
+        "live": "Live",
+        "history": "Verlauf",
+        "memory": "Speicher"
+      },
+      "settings": "Einstellungen",
+      "runtimeLine": "Chat: {{chat}} · Arbeit: {{working}}"
+    }
+  },
+  "daemon": {
+    "addTitle": "Daemon hinzufügen",
+    "addDesc": "Maschine registrieren, dann Installationsbefehl auf den Zielhost kopieren.",
+    "createShowCommand": "Erstellen & Befehl anzeigen",
+    "creating": "Wird erstellt…",
+    "noActiveZone": "Keine aktive Zone",
+    "registerFailed": "Daemon-Registrierung fehlgeschlagen",
+    "removeTitle": "Daemon entfernen",
+    "removeConfirmTitle": "Diesen Daemon entfernen?",
+    "removeConfirmMessage": "Entfernt den Daemon-Eintrag aus der Zone und löst Agenten auf dieser Maschine. Laufende Daemons zuerst stoppen. Nicht rückgängig.",
+    "removed": "Daemon entfernt",
+    "removeFailed": "Daemon konnte nicht entfernt werden",
+    "upgradeDispatched": "Upgrade gesendet — Daemon verbindet mit neuer Version neu",
+    "upgradeFailed": "Upgrade konnte nicht ausgelöst werden",
+    "upgrade": "Upgrade",
+    "upgradeOffline": "Daemon offline — zuerst verbinden",
+    "upgradeInProgress": "Upgrade läuft…",
+    "upgradeTooltip": "Remote-Upgrade auslösen (Daemon baut neu und verbindet)",
+    "installCopyHint": "Auf Zielhost kopieren und ausführen (Linux/macOS, curl + bash nötig).",
+    "copyInstallCommand": "Installationsbefehl kopieren",
+    "loadingInstall": "Installationsbefehl wird geladen…",
+    "loadInstallFailed": "Installationsbefehl konnte nicht geladen werden",
+    "onlineWarningStrong": "Online.",
+    "onlineWarningBody": "Erneut ausführen startet nur diese Instanz neu; für einen zweiten Daemon auf demselben Host eine weitere Maschine registrieren.",
+    "meta": {
+      "created": "Erstellt",
+      "lastConnection": "Letzte Verbindung",
+      "ip": "IP",
+      "os": "OS"
+    },
+    "environment": "Umgebung",
+    "agents": "Agenten",
+    "noAgents": "Keine Agenten auf diesem Daemon.",
+    "install": "Installation"
+  },
+  "version": {
+    "outdated": "veraltet",
+    "unstamped": "ohne Version",
+    "outdatedTooltip": "Daemon-Version passt nicht zum Server-Build. Daemon neu bauen und deployen.",
+    "outdatedWithVersion": "Daemon meldet v{{version}}. {{tooltip}}",
+    "unstampedTooltip": "Dev-Build ohne Versionsmetadaten — Plattform kann Daemon vs. Server erst nach Release-Build prüfen (z. B. make build)."
+  }
+}

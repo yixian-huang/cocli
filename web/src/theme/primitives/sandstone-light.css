@@ -1,0 +1,42 @@
+/* web/src/theme/primitives/sandstone-light.css */
+:root[data-theme="sandstone-light"] {
+  /* Surface layers */
+  --palette-base-0: #f5f4ed;   /* canvas */
+  --palette-base-1: #faf9f5;   /* panel/card */
+  --palette-base-2: #eae8e0;   /* raised/hover */
+  --palette-base-3: #e8e6dc;   /* border */
+
+  /* Foreground layers */
+  --palette-fg-1: #141413;
+  --palette-fg-2: #3d3c38;
+  --palette-fg-3: #5c5b54;
+  --palette-fg-4: #5c5b54;
+
+  /* Signature accent */
+  --palette-signature: #c96442;
+  --palette-signature-hover: #b5573a;
+  --palette-on-signature: #faf9f5;
+
+  /* Feedback */
+  --palette-success: #2a9d8f;
+  --palette-warning: #d97706;
+  --palette-error:   #b53333;
+  --palette-info:    #3898ec;
+
+  /* Shape / typography */
+  --radius-base: 10px;
+  --font-display: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-signal:  'JetBrains Mono', ui-monospace, monospace;
+  --font-serif:   'Lora', Georgia, serif;
+
+  /* Shadows */
+  --shadow-1: rgba(0,0,0,0.05) 0px 4px 24px;
+  --shadow-2: rgba(0,0,0,0.08) 0px 8px 32px, rgba(0,0,0,0.04) 0px 2px 8px;
+  --signature-glow: 0 0 0 0 transparent;
+
+  /* polish — Tier 1 atoms */
+  --elev-rest:       none;
+  --elev-hover:      0 0 0 1px var(--palette-base-3);
+  --elev-press:      inset 0 0 0 1px var(--palette-base-3);
+  --card-hover-lift: 0px;
+}

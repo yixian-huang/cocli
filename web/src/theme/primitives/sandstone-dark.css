@@ -1,0 +1,36 @@
+/* web/src/theme/primitives/sandstone-dark.css */
+:root[data-theme="sandstone-dark"] {
+  --palette-base-0: #141413;
+  --palette-base-1: #1e1e1c;
+  --palette-base-2: #252523;
+  --palette-base-3: #30302e;
+
+  --palette-fg-1: #faf9f5;
+  --palette-fg-2: #e8e6dc;
+  --palette-fg-3: #c9c7be;
+  --palette-fg-4: #c9c7be;
+
+  --palette-signature: #d97757;
+  --palette-signature-hover: #e8916e;
+  --palette-on-signature: #faf9f5;
+
+  --palette-success: #2dd4a8;
+  --palette-warning: #f59e0b;
+  --palette-error:   #d94444;
+  --palette-info:    #5ba3f5;
+
+  --radius-base: 10px;
+  --font-display: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-signal:  'JetBrains Mono', ui-monospace, monospace;
+  --font-serif:   'Lora', Georgia, serif;
+
+  --shadow-1: rgba(0,0,0,0.2) 0px 4px 24px;
+  --shadow-2: rgba(0,0,0,0.3) 0px 8px 32px, rgba(0,0,0,0.15) 0px 2px 8px;
+  --signature-glow: 0 0 0 0 transparent;
+
+  /* polish — Tier 1 atoms */
+  --elev-rest:       none;
+  --elev-hover:      0 1px 2px rgba(0,0,0,0.2), 0 0 0 1px rgba(255,255,255,0.03);
+  --elev-press:      inset 0 1px 0 rgba(0,0,0,0.3);
+  --card-hover-lift: -1px;
+}

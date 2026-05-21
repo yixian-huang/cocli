@@ -1,0 +1,38 @@
+/* web/src/theme/primitives/zoom-light.css
+ * Zoom-inspired light theme — clean professional, signature blue accent.
+ */
+:root[data-theme="zoom-light"] {
+  --palette-base-0: #ffffff;   /* canvas — pure white pro */
+  --palette-base-1: #f8f9fb;   /* panel — sidebar / cards */
+  --palette-base-2: #e8ebf1;   /* raised — hover */
+  --palette-base-3: #d8dbe2;   /* border */
+
+  --palette-fg-1: #1a1a1a;
+  --palette-fg-2: #4a4a4a;
+  --palette-fg-3: #6b7280;
+  --palette-fg-4: #9ca3af;
+
+  --palette-signature: #2d8cff;   /* Zoom signature blue */
+  --palette-signature-hover: #1f7be8;
+  --palette-on-signature: #ffffff;
+
+  --palette-success: #10b981;
+  --palette-warning: #f59e0b;
+  --palette-error:   #ef4444;
+  --palette-info:    #3b82f6;
+
+  --radius-base: 6px;
+  --font-display: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-signal:  'Inter', system-ui, sans-serif;
+  --font-serif:   'Lora', Georgia, serif;
+
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-2: 0 4px 12px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.04);
+  --signature-glow: 0 0 0 0 transparent;
+
+  /* polish — Tier 1 atoms (light theme: flat editorial via border) */
+  --elev-rest:       none;
+  --elev-hover:      0 0 0 1px var(--palette-base-3);
+  --elev-press:      inset 0 0 0 1px var(--palette-base-3);
+  --card-hover-lift: 0px;
+}

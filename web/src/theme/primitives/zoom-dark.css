@@ -1,0 +1,38 @@
+/* web/src/theme/primitives/zoom-dark.css
+ * Zoom-inspired dark theme — pro dark with Zoom signature blue accent.
+ */
+:root[data-theme="zoom-dark"] {
+  --palette-base-0: #1f2937;   /* canvas — slate-900 */
+  --palette-base-1: #283142;   /* panel */
+  --palette-base-2: #364257;   /* raised */
+  --palette-base-3: #4a5568;   /* border */
+
+  --palette-fg-1: #f3f4f6;
+  --palette-fg-2: #d1d5db;
+  --palette-fg-3: #9ca3af;
+  --palette-fg-4: #6b7280;
+
+  --palette-signature: #2d8cff;
+  --palette-signature-hover: #4fa0ff;
+  --palette-on-signature: #ffffff;
+
+  --palette-success: #34d399;
+  --palette-warning: #fbbf24;
+  --palette-error:   #f87171;
+  --palette-info:    #60a5fa;
+
+  --radius-base: 6px;
+  --font-display: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-signal:  'Inter', system-ui, sans-serif;
+  --font-serif:   'Lora', Georgia, serif;
+
+  --shadow-1: 0 1px 3px rgba(0, 0, 0, 0.4), 0 1px 2px rgba(0, 0, 0, 0.2);
+  --shadow-2: 0 6px 16px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.3);
+  --signature-glow: 0 0 0 0 transparent;
+
+  /* polish — Tier 1 atoms (dark: subtle shadow) */
+  --elev-rest:       none;
+  --elev-hover:      0 1px 2px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --elev-press:      inset 0 1px 0 rgba(0, 0, 0, 0.4);
+  --card-hover-lift: -1px;
+}
