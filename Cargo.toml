@@ -9,14 +9,15 @@ members = [
     "crates/cocli-bridge-config",
     "crates/cocli-agent",
     "crates/cocli-health",
-    "crates/cocli-store",
-    "crates/cocli-api",
-    "crates/cocli-ws",
-    "crates/cocli-server",
-    "crates/cocli-web",
-    "crates/cocli-plugin",
-    "crates/cocli-plugin-sdk",
-    "bin/cocli",
+    # Section 3+ members — not yet imported:
+    # "crates/cocli-store",
+    # "crates/cocli-api",
+    # "crates/cocli-ws",
+    # "crates/cocli-server",
+    # "crates/cocli-web",
+    # "crates/cocli-plugin",
+    # "crates/cocli-plugin-sdk",
+    # "bin/cocli",
 ]
 
 [workspace.package]
@@ -33,7 +34,7 @@ tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "=1.10.0", features = ["v4", "serde"] }
 async-trait = "0.1"
 thiserror = "1"
 anyhow = "1"
@@ -42,9 +43,15 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 sysinfo = "0.30"
 nix = { version = "0.27", features = ["signal"] }
 dirs = "5"
-clap = { version = "4", features = ["derive", "env"] }
-url = "2"
-tempfile = "3"
+clap = { version = "=4.5.23", features = ["derive", "env"] }
+url = "=2.5.2"
+tempfile = "=3.10.1"
+base64 = "0.22"
+# rayon 1.11+ / rayon-core 1.13+ require rustc 1.80; pin the last lineage
+# that builds on 1.78. Declared as direct deps in cocli-reaper to make
+# this pin reach the resolver (transitive via sysinfo).
+rayon = "=1.10.0"
+rayon-core = "=1.12.1"
 axum = "0.7"
 sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "uuid", "json"] }
 rust-embed = "8"

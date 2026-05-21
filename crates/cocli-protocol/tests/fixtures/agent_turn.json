@@ -1,0 +1,36 @@
+{
+  "type": "agent:turn",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "sessionId": "sess-1",
+  "launchId": "launch-1",
+  "turnNumber": 2,
+  "entries": [
+    {
+      "kind": "text",
+      "text": "I'll help with that.",
+      "ts": 1746234000000
+    },
+    {
+      "kind": "tool_call",
+      "id": "tool-call-1",
+      "text": "Read",
+      "input": {"path": "/tmp/foo"},
+      "ts": 1746234001000
+    },
+    {
+      "kind": "tool_result",
+      "id": "tool-call-1",
+      "result": "file contents",
+      "ts": 1746234002000
+    }
+  ],
+  "inputTokens": 1500,
+  "outputTokens": 350,
+  "costUsd": 0.018,
+  "contextWindow": 200000,
+  "cacheCreationTokens": 0,
+  "cacheReadTokens": 1200,
+  "channelId": "11111111-1111-1111-1111-111111111111",
+  "channelName": "general",
+  "contextUsagePct": 0.75
+}

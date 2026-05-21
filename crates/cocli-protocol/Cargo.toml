@@ -1,0 +1,15 @@
+[package]
+name = "cocli-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Wire protocol types between cocli server and daemon"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+uuid       = { workspace = true }
+chrono     = { workspace = true }

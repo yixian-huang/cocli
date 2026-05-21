@@ -1,0 +1,9 @@
+{
+  "type": "ready",
+  "capabilities": ["agent.start", "agent.deliver"],
+  "runtimes": ["claude"],
+  "runningAgents": [],
+  "hostname": "test-host",
+  "os": "darwin",
+  "daemonVersion": "0.0.1-rs"
+}

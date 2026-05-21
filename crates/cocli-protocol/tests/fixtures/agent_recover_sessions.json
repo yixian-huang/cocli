@@ -1,0 +1,25 @@
+{
+  "type": "agent:recover-sessions",
+  "sessions": [
+    {
+      "agentId": "a872bcba-1234-5678-9abc-def012345678",
+      "config": {
+        "runtime": "claude",
+        "model": "claude-opus-4-7",
+        "serverUrl": "ws://localhost:8080",
+        "name": "test-agent"
+      },
+      "sessionId": "sess-1",
+      "launchId": "launch-1",
+      "turnCount": 3,
+      "sessions": [
+        {
+          "sessionId": "sess-1",
+          "channelId": "11111111-1111-1111-1111-111111111111",
+          "sessionType": "chat",
+          "scope": "channel"
+        }
+      ]
+    }
+  ]
+}

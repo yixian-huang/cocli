@@ -1,0 +1,8 @@
+{
+  "type": "agent:deliver:accepted",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "seq": 1,
+  "attempt": 1,
+  "channelId": "11111111-1111-1111-1111-111111111111",
+  "routeAction": "tierDigest"
+}

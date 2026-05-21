@@ -1,0 +1,5 @@
+{
+  "type": "agent:stop",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "force": false
+}

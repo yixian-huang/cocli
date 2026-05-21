@@ -1,0 +1,14 @@
+{
+  "type": "agent:start",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "config": {
+    "runtime": "claude",
+    "model": "claude-opus-4-7",
+    "serverUrl": "ws://localhost:8080",
+    "name": "test-agent",
+    "displayName": "Test Agent",
+    "description": "Roundtrip fixture"
+  },
+  "launchId": "launch-1",
+  "turnCount": 0
+}

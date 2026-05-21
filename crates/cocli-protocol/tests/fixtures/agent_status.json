@@ -1,0 +1,6 @@
+{
+  "type": "agent:status",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "status": "active",
+  "launchId": "launch-1"
+}

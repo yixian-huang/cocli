@@ -1,0 +1,23 @@
+{
+  "type": "agent:deliver",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "seq": 1,
+  "attempt": 1,
+  "priorityClass": "normal",
+  "deliveryTier": "tierDigest",
+  "routingReason": "human_mention",
+  "message": {
+    "channel_id": "11111111-1111-1111-1111-111111111111",
+    "sender_name": "alice",
+    "sender_type": "user",
+    "content": "hello agent",
+    "channel_name": "general",
+    "channel_type": "channel",
+    "message_id": "msg-1",
+    "timestamp": "2026-05-21T03:30:00Z",
+    "sourceMessageId": "msg-1",
+    "expectedReplyTarget": "channel",
+    "requiresThread": false
+  },
+  "context": []
+}

@@ -1,0 +1,17 @@
+{
+  "type": "agent:activity",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "activity": "working",
+  "attentionState": "working",
+  "detail": "thinking",
+  "trajectory": ["thinking", "tool_call"],
+  "entries": [
+    {
+      "kind": "thinking",
+      "text": "Let me look at the file...",
+      "ts": 1746234000000
+    }
+  ],
+  "channelId": "11111111-1111-1111-1111-111111111111",
+  "channelName": "general"
+}

@@ -1,0 +1,11 @@
+{
+  "type": "agent:session:idle",
+  "agentId": "a872bcba-1234-5678-9abc-def012345678",
+  "channelId": "11111111-1111-1111-1111-111111111111",
+  "channelName": "general",
+  "sessionId": "sess-1",
+  "turnCount": 5,
+  "totalCostUsd": 0.0234,
+  "cacheTtlSeconds": 0,
+  "activeSessions": 1
+}
