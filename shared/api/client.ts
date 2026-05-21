@@ -97,9 +97,13 @@ function sleep(ms: number): Promise<void> {
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const requestId = crypto.randomUUID()
+  if (import.meta.env.VITE_USE_MOCK === 'true') {
+    const { mockHandler } = await import('./mock')
+    return mockHandler<T>(path, options)
+  }
   const maxRetries = 2
   const retryDelays = [1000, 2000]
-  const requestId = crypto.randomUUID()
   const sentKey = getApiKey()
 
   bumpInflight(1)
@@ -348,6 +352,9 @@ export const agents = {
 // Attachments
 export const attachments = {
   upload: async (file: File): Promise<{ id: string; filename: string; url: string }> => {
+    if (import.meta.env.VITE_USE_MOCK === 'true') {
+      return { id: 'mock', filename: file.name, url: 'data:,' }
+    }
     const form = new FormData()
     form.append('file', file)
     const requestId = crypto.randomUUID()

@@ -71,3 +71,12 @@ export default defineConfig([
   },
 ])
 ```
+
+## Backend-less dev (`VITE_USE_MOCK=true`)
+
+Until M0.0.1 ships the Rust backend, run `web/` against the in-process mock:
+
+    cp .env.local.example .env.local   # one-time
+    npm run dev                         # vite reads .env.local automatically
+
+The mock returns a single `#general` channel + stub version/health; every other endpoint returns an empty array or `undefined`. The first-run wizard and `/settings/plugins` operate entirely against zustand stores and don't touch the API client.
