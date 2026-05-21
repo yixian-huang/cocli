@@ -1,11 +1,7 @@
 export interface User {
   id: string
   name: string
-  email?: string
   displayName?: string
-  role: 'admin' | 'member'
-  hasPassword: boolean
-  createdAt: string
 }
 
 export interface Channel {
@@ -84,8 +80,6 @@ export interface Agent {
   priorityClass?: PriorityClass
   preempted?: boolean
   sessionId?: string
-  machineId?: string
-  zoneId: string
   createdAt: string
   updatedAt: string
   activity?: string
@@ -193,9 +187,7 @@ export interface HistoryResult {
   total: number
 }
 
-export type LegacyTaskStatus = 'todo' | 'in_review' | 'done'
-export type ZoneTaskStatus = 'pending' | 'claimed' | 'in_progress' | 'completed' | 'failed'
-export type TaskStatus = LegacyTaskStatus | ZoneTaskStatus
+export type TaskStatus = 'pending' | 'claimed' | 'in_progress' | 'completed' | 'failed'
 
 export interface Task {
   id: string
@@ -316,125 +308,6 @@ export interface ThreadSummary {
   done: boolean
 }
 
-export interface Invite {
-  id: string
-  code: string
-  createdBy: string
-  maxUses: number | null
-  useCount: number
-  expiresAt: string | null
-  createdAt: string
-}
-
-export interface Zone {
-  id: string
-  name: string
-  slug: string
-  themeId: string
-  createdBy?: string
-  createdAt: string
-}
-
-export interface ZoneMember {
-  id: string
-  zoneId: string
-  userId: string
-  role: 'admin' | 'member'
-  joinedAt: string
-  userName?: string
-  userDisplayName?: string
-  canCreateChannel?: boolean
-  canCreateAgent?: boolean
-  canInviteOthers?: boolean
-  hideFromAgents?: boolean
-}
-
-export interface ZoneInvite {
-  id: string
-  zoneId: string
-  code: string
-  invitedUsername?: string
-  createdBy?: string
-  status: 'active' | 'revoked' | 'used'
-  expiresAt?: string
-  usedBy?: string
-  usedAt?: string
-  createdAt: string
-  maxUses?: number
-  useCount?: number
-}
-
-// Cocli — provider credentials and per-agent binding (PR-A).
-
-export interface TenantProviderKey {
-  id: string
-  zoneId: string
-  name: string
-  profileName: string
-  baseUrl?: string
-  metadata: Record<string, unknown>
-  createdBy?: string
-  createdAt: string
-  lastUsedAt?: string
-  // encryptedKey is intentionally omitted — server `json:"-"` strips it.
-}
-
-export interface CreateCredentialInput {
-  name: string
-  profileName: string
-  baseUrl?: string
-  key: string  // plaintext; server seals via AES-GCM before insert
-  metadata?: Record<string, unknown>
-}
-
-export interface AgentProviderBinding {
-  agentId: string
-  profileName: string
-  model: string
-  apiMode: 'chat_completions' | 'anthropic_messages'
-  keyId: string
-  transportVersion: number
-  writeEnabled: boolean
-  createdAt: string
-  updatedAt: string
-}
-
-export interface UpsertBindingInput {
-  profileName: string
-  model: string
-  apiMode: 'chat_completions' | 'anthropic_messages'
-  keyName: string
-  writeEnabled?: boolean
-}
-
-export type MachineVersionStatus = 'current' | 'outdated' | 'unknown'
-
-export interface Machine {
-  id: string
-  hostname?: string
-  os?: string
-  daemonVersion?: string
-  // Soft-warn verdict computed at machine ready by the server,
-  // comparing the daemon's reported version against the server's own
-  // stamp. See internal/version.CompareDaemon for the rules. Pushed
-  // live via the "machine:updated" WS event.
-  versionStatus: MachineVersionStatus
-  status: 'online' | 'offline'
-  runtimes?: string[]
-  environment?: {
-    cpu?: string
-    memory?: string
-    disk_free?: string
-    languages?: string[]
-    tools?: string[]
-  }
-  models?: Record<string, { id: string; label: string }[]>
-  zoneId: string
-  connected?: boolean
-  lastIp?: string
-  lastSeen?: string
-  createdAt: string
-}
 
 export interface ChannelResponderPolicy {
   channelId: string
@@ -456,63 +329,18 @@ export interface WSEvent {
   data?: unknown
 }
 
-// Skill Library (Phase 2)
-export interface SkillLibraryEntry {
+// Plugins (cocli OSS spec §4.1 + §4.4)
+export type PluginCapability = 'inbound-bridge' | 'outbound-bridge'
+
+export interface Plugin {
   id: string
-  zoneId: string
   name: string
-  displayName?: string
-  description?: string
-  userInvocable: boolean
-  sourceKind: 'git' | 'http' | 'local'
-  sourceUrl: string
-  sourceSubpath?: string
-  sourceRef?: string // commit SHA or tag
-  totalBytes: number
-  fileCount: number
-  importedBy: string
-  importedAt: string
-  updatedAt: string
-  inUseCount?: number // populated by handler when list is enriched; otherwise 0
+  capabilities: PluginCapability[]
+  createdAt: string
+  lastSeenAt: string | null
 }
 
-export interface SkillLibraryFileMeta {
-  relPath: string
-  size: number
-  mode: number
-}
-
-export interface SkillLibraryImportResponse {
-  library_id: string
-  files: number
-  size: number
-}
-
-export interface SkillLibraryReinstallResponse {
-  updated: boolean
-  source_ref?: string
-}
-
-// Agent Skill Install (Phase 3)
-// State is one of "managed" | "external" | "broken"
-export interface SkillView {
-  name: string
-  displayName?: string
-  description?: string
-  userInvocable: boolean
-  type: string
-  path?: string
-  installPath?: string
-  state: 'managed' | 'external' | 'broken'
-  installId?: string
-  libraryId?: string
-  sourceUrl?: string
-  sourceRef?: string
-}
-
-// SkillFileEntry matches protocol.FileTreeEntry returned by ListInstalledSkillFiles
-export interface SkillFileEntry {
-  name: string
-  isDir: boolean
-  size?: number
+export interface PluginRegistration {
+  plugin: Plugin
+  token: string  // plaintext; server returns ONCE per spec §4.4
 }
