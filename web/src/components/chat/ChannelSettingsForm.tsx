@@ -75,7 +75,7 @@ export function ChannelSettingsForm({ channel, channelId }: Props) {
                 className="flex-1"
                 onClick={() => {
                   const url = exportData.messagesUrl(channelId, fmt)
-                  fetch(url, { headers: { 'X-API-Key': getApiKey() } })
+                  fetch(url, { headers: { 'X-Cocli-Token': getApiKey() } })
                     .then((r) => r.blob())
                     .then((b) => {
                       const a = document.createElement('a')
@@ -93,7 +93,7 @@ export function ChannelSettingsForm({ channel, channelId }: Props) {
                 className="flex-1"
                 onClick={() => {
                   const url = exportData.tasksUrl(channelId, fmt)
-                  fetch(url, { headers: { 'X-API-Key': getApiKey() } })
+                  fetch(url, { headers: { 'X-Cocli-Token': getApiKey() } })
                     .then((r) => r.blob())
                     .then((b) => {
                       const a = document.createElement('a')

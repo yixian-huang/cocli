@@ -22,6 +22,11 @@ export default defineConfig({
       'src/**/*.{test,spec}.?(c|m)[jt]s?(x)',
       '../shared/**/*.{test,spec}.?(c|m)[jt]s?(x)',
     ],
+    exclude: [
+      '**/node_modules/**',
+      'node_modules/**',
+      '../shared/node_modules/**',
+    ],
   },
   server: {
     // 5173 is often taken by other Vite apps on the same machine.
