@@ -25,8 +25,8 @@ interface WizardState {
   finish: () => void
 }
 
-const KEY_COMPLETE = 'cocli-first-run-complete'
-const KEY_STATE = 'cocli-wizard-state'
+const KEY_COMPLETE = 'first-run-complete'
+const KEY_STATE = 'wizard-state'
 
 function persistState(state: Pick<WizardState, 'step' | 'claudePath' | 'draftAgent'>) {
   localStorage.setItem(

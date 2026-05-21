@@ -3,8 +3,8 @@ import { useWizardStore } from './wizardStore'
 import { useAgentStore } from './agentStore'
 import { storageKey } from '@shared/brand'
 
-const KEY_COMPLETE = storageKey('cocli-first-run-complete')
-const KEY_STATE = storageKey('cocli-wizard-state')
+const KEY_COMPLETE = storageKey('first-run-complete')
+const KEY_STATE = storageKey('wizard-state')
 
 beforeEach(() => {
   localStorage.clear()

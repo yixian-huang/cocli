@@ -2,7 +2,7 @@ import { describe, expect, it, beforeEach } from 'vitest'
 import { usePluginsStore } from './pluginsStore'
 import { storageKey } from '@shared/brand'
 
-const KEY = storageKey('cocli-plugins')
+const KEY = storageKey('plugins')
 
 beforeEach(() => {
   localStorage.clear()

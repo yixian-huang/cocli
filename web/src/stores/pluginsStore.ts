@@ -10,7 +10,7 @@ interface PluginsState {
   revoke: (id: string) => Promise<void>
 }
 
-const KEY = 'cocli-plugins'
+const KEY = 'plugins'
 
 function load(): Plugin[] {
   const raw = localStorage.getItem(storageKey(KEY))
