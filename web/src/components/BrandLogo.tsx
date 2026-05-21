@@ -1,33 +1,29 @@
-import { BRAND } from '@/brand'
-import cocliIconUrl from '@/assets/brand/cocli-mark.svg'
 import { cn } from '@/lib/utils'
 
-interface BrandLogoProps {
-  className?: string
-  iconClassName?: string
-  textClassName?: string
-  showText?: boolean
+type Size = 'sm' | 'md' | 'lg'
+
+const sizeMap: Record<Size, string> = {
+  sm: 'text-sm',
+  md: 'text-base',
+  lg: 'text-lg',
 }
 
 export function BrandLogo({
-  className,
-  iconClassName,
+  size = 'md',
   textClassName,
-  showText = true,
-}: BrandLogoProps) {
+}: {
+  size?: Size
+  textClassName?: string
+}) {
   return (
-    <div className={cn('inline-flex items-center gap-2', className)}>
-      <img
-        src={cocliIconUrl}
-        alt=""
-        aria-hidden="true"
-        className={cn('h-7 w-7 shrink-0 object-contain', iconClassName)}
-      />
-      {showText && (
-        <span className={cn('font-serif font-medium text-foreground', textClassName)}>
-          {BRAND.displayName}
-        </span>
+    <span
+      className={cn(
+        'font-sans font-medium tracking-tight text-foreground select-none',
+        sizeMap[size],
+        textClassName,
       )}
-    </div>
+    >
+      cocli
+    </span>
   )
 }
