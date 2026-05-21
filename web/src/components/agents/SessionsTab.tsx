@@ -7,7 +7,6 @@ import { Badge } from '@/components/ui'
 import { Clock, Zap, DollarSign, RotateCcw, AlertCircle, Square, Loader2, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
 import { ContextBar } from './ContextBar'
 import { useWorkspacePanelStore } from '@/stores/workspacePanelStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { messagePath } from '@/lib/paths'
 
 function formatTokens(n: number): string {
@@ -131,7 +130,6 @@ function TurnRow({
 
 export function SessionsTab({ agentId }: { agentId: string }) {
   const navigate = useNavigate()
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
   const setWorkspacePanel = useWorkspacePanelStore((s) => s.setPanel)
   const [chatSessions, setChatSessions] = useState<AgentSession[]>([])
   const [loading, setLoading] = useState(true)
@@ -331,7 +329,7 @@ export function SessionsTab({ agentId }: { agentId: string }) {
                               onJump={(targetTurn) => {
                                 if (!targetTurn.messageRef) return
                                 setWorkspacePanel('chat')
-                                navigate(messagePath({ zoneSlug, channelId: targetTurn.messageRef.channelId, messageId: targetTurn.messageRef.messageId }))
+                                navigate(messagePath({ channelId: targetTurn.messageRef.channelId, messageId: targetTurn.messageRef.messageId }))
                                 window.dispatchEvent(new CustomEvent('scroll-to-message', { detail: { msgId: targetTurn.messageRef.messageId } }))
                               }}
                             />

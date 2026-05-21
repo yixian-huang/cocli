@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, type KeyboardEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Hash, MessageCircle, Search } from 'lucide-react'
 import { useChannelStore } from '@/stores/channelStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { useWorkspacePanelStore } from '@/stores/workspacePanelStore'
 import { cn } from '@/lib/utils'
 import type { Channel } from '@/lib/types'
@@ -63,7 +62,6 @@ export function ChannelSwitcher({ open, onClose }: ChannelSwitcherProps) {
   const activeChannelId = useChannelStore((state) => state.activeChannelId)
   const setActiveChannel = useChannelStore((state) => state.setActiveChannel)
   const setPanel = useWorkspacePanelStore((state) => state.setPanel)
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
 
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
@@ -87,7 +85,7 @@ export function ChannelSwitcher({ open, onClose }: ChannelSwitcherProps) {
   const handleSelect = (channel: Channel) => {
     setPanel('chat')
     setActiveChannel(channel.id)
-    navigate(channelPath({ zoneSlug, channelId: channel.id }))
+    navigate(channelPath({ channelId: channel.id }))
     onClose()
   }
 

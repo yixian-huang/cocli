@@ -1,8 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useAgentStore } from '@/stores/agentStore'
 import { useViewStore } from '@/stores/viewStore'
-import { agents as agentsApi, daemons as daemonsApi } from '@/api/client'
-import { useZoneStore } from '@/stores/zoneStore'
+import { agents as agentsApi } from '@/api/client'
 import { toast, toastError } from '@/stores/toastStore'
 import { Button, Textarea, Badge } from '@/components/ui'
 import { agentStatusVariant, agentStatusLabel } from '@/lib/status'
@@ -10,7 +9,6 @@ import { Save, X, Trash2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { BRAND } from '@/brand'
 import type { Machine } from '@/lib/types'
-import { VersionStatusBadge } from '@/components/agents/VersionStatusBadge'
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
@@ -21,7 +19,6 @@ function formatTokens(n: number): string {
 export function ProfileTab({ agentId }: { agentId: string }) {
   const agent = useAgentStore((s) => s.agents.find((a) => a.id === agentId))
   const fetchAgents = useAgentStore((s) => s.fetchAgents)
-  const activeZoneId = useZoneStore((s) => s.activeZoneId)
   const [daemon, setDaemon] = useState<(Machine & { connected: boolean }) | null>(null)
   const [editing, setEditing] = useState(false)
   const [editDesc, setEditDesc] = useState('')
@@ -30,15 +27,9 @@ export function ProfileTab({ agentId }: { agentId: string }) {
   const [deleting, setDeleting] = useState(false)
 
   useEffect(() => {
-    if (!agent?.machineId || !activeZoneId) { setDaemon(null); return }
-    let cancelled = false
-    daemonsApi.list(activeZoneId).then((machines) => {
-      if (!cancelled) {
-        setDaemon(machines.find((m) => m.id === agent.machineId) || null)
-      }
-    }).catch(() => {})
-    return () => { cancelled = true }
-  }, [agent?.machineId, activeZoneId])
+    // daemons list removed (zone-scoped feature deleted in Phase 1)
+    setDaemon(null)
+  }, [agent?.machineId])
 
   if (!agent) return null
 
@@ -128,13 +119,6 @@ export function ProfileTab({ agentId }: { agentId: string }) {
                 <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${daemon?.connected ? 'bg-green-500' : 'bg-red-500'}`} />
                 <span>{daemon?.hostname || agent.machineId.slice(0, 12)}</span>
                 <span className="text-muted-foreground">({daemon?.connected ? 'online' : 'offline'})</span>
-                {daemon && (
-                  <VersionStatusBadge
-                    machineId={daemon.id}
-                    initialStatus={daemon.versionStatus}
-                    initialDaemonVersion={daemon.daemonVersion}
-                  />
-                )}
               </div>
             ) : (
               <span className="text-xs text-muted-foreground">Not assigned</span>

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { AgentPanel } from './AgentPanel'
 import { AgentView } from '@/components/agents/AgentView'
 import { useAgentStore } from '@/stores/agentStore'
@@ -16,20 +17,17 @@ const makeAgent = (runtime: string): Agent => ({
   runtime,
   model: 'gpt-5.4',
   status: 'working',
-  zoneId: 'zone-test',
   createdAt: now,
   updatedAt: now,
 })
 
-const setCurrentUser = (role: User['role']) => {
+// In single-tenant mode User has no role; use 'any' cast for test setup
+const setCurrentUser = (_role: string) => {
   useUserStore.setState({
     user: {
-      id: `${role}-id`,
-      name: `${role}-user`,
-      role,
-      hasPassword: true,
-      createdAt: now,
-    },
+      id: `${_role}-id`,
+      name: `${_role}-user`,
+    } as User,
   })
 }
 
@@ -86,13 +84,14 @@ describe('AgentPanel runtime turn control gating', () => {
     expect(cancelTurnButton.closest('span')).toHaveAttribute('title', expect.stringContaining('Unsupported'))
   })
 
-  it('hides turn controls for non-admin users', () => {
+  it('shows turn controls for all users in single-tenant mode', () => {
+    // In single-tenant mode isAdmin is always true; turn controls always visible for supported runtimes
     setCurrentUser('member')
     render(<AgentPanel agent={makeAgent('codex')} />)
 
-    expect(screen.queryByRole('button', { name: 'Send' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Cancel turn' })).not.toBeInTheDocument()
-    expect(screen.queryByPlaceholderText('Steer...')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel turn' })).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Steer...')).toBeInTheDocument()
   })
 
   it('renders semantic badges for overflow and rate-limited attention states', () => {
@@ -185,9 +184,9 @@ describe('AgentView overflow tab (via Settings)', () => {
       text: async () => '[]',
     })
 
-    render(<AgentView />)
+    render(<MemoryRouter><AgentView /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }))
-    fireEvent.click(screen.getByRole('button', { name: /^overflow$/i }))
+    fireEvent.click(screen.getByRole('tab', { name: /^overflow$/i }))
 
     expect(await screen.findByText('Current Backstop')).toBeInTheDocument()
     expect(screen.getByText('91%')).toBeInTheDocument()
@@ -198,7 +197,8 @@ describe('AgentView overflow tab (via Settings)', () => {
     expect(fetchMock).toHaveBeenCalled()
   })
 
-  it('hides the Overflow sub-tab for non-admin users in Settings', () => {
+  it('shows Overflow sub-tab for all users in single-tenant mode', () => {
+    // In single-tenant mode isAdmin is always true; Overflow tab always visible
     setCurrentUser('member')
     const agent = {
       ...makeAgent('codex'),
@@ -213,10 +213,10 @@ describe('AgentView overflow tab (via Settings)', () => {
       activeDrawer: null,
     })
 
-    render(<AgentView />)
+    render(<MemoryRouter><AgentView /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }))
 
-    expect(screen.queryByRole('button', { name: /^overflow$/i })).not.toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /^overflow$/i })).toBeInTheDocument()
   })
 
   it('Esc in Settings returns to main mode', () => {
@@ -230,7 +230,7 @@ describe('AgentView overflow tab (via Settings)', () => {
       activeDrawer: null,
     })
 
-    render(<AgentView />)
+    render(<MemoryRouter><AgentView /></MemoryRouter>)
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }))
     expect(useViewStore.getState().getSubview(agent.id)).toBe('settings')
 
@@ -275,11 +275,12 @@ describe('AgentView new header', () => {
       agentSubview: {},
       activeDrawer: null,
     })
-    render(<AgentView />)
+    render(<MemoryRouter><AgentView /></MemoryRouter>)
 
-    expect(screen.getByRole('button', { name: /open live/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /open history/i })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /open memory/i })).toBeInTheDocument()
+    // aria-label is "Open <label>" where label may be an i18n key in test env
+    expect(screen.getByRole('button', { name: /open.*(live|workspace\.agent\.drawers\.live)/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /open.*(history|workspace\.agent\.drawers\.history)/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /open.*(memory|workspace\.agent\.drawers\.memory)/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /open settings/i })).toBeInTheDocument()
     expect(screen.getByTestId('context-bar-inline')).toBeInTheDocument()
   })
@@ -293,11 +294,12 @@ describe('AgentView new header', () => {
       agentSubview: {},
       activeDrawer: null,
     })
-    render(<AgentView />)
+    render(<MemoryRouter><AgentView /></MemoryRouter>)
 
-    fireEvent.click(screen.getByRole('button', { name: /open live/i }))
+    const liveBtn = screen.getByRole('button', { name: /open.*(live|workspace\.agent\.drawers\.live)/i })
+    fireEvent.click(liveBtn)
     expect(useViewStore.getState().activeDrawer).toBe('live')
-    fireEvent.click(screen.getByRole('button', { name: /open live/i }))
+    fireEvent.click(liveBtn)
     expect(useViewStore.getState().activeDrawer).toBeNull()
   })
 })

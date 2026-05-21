@@ -4,8 +4,6 @@ import { CollapsibleSection, ContextMenuTrigger, Badge } from '@/components/ui'
 import type { MenuEntry } from '@/components/ui'
 import { useChannelStore } from '@/stores/channelStore'
 import { useDialogStore } from '@/stores/dialogStore'
-import { useZoneStore } from '@/stores/zoneStore'
-import { useUserStore } from '@/stores/userStore'
 import { useWorkspacePanelStore } from '@/stores/workspacePanelStore'
 import { toast, toastError } from '@/stores/toastStore'
 import { channelPath } from '@/lib/paths'
@@ -21,9 +19,8 @@ export function ChannelList({ query }: { query?: string }) {
   const toggleShowArchived = useChannelStore((s) => s.toggleShowArchived)
   const setArchived = useChannelStore((s) => s.setArchived)
   const activeId = useChannelStore((s) => s.activeChannelId)
-  const isAdmin = useUserStore((s) => s.user?.role === 'admin')
-  const zoneId = useZoneStore((s) => s.activeZoneId)
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
+  // Single-tenant: local owner has full access
+  const isAdmin = true
   const openCreateChannel = useDialogStore((s) => s.openCreateChannel)
   const setPanel = useWorkspacePanelStore((s) => s.setPanel)
 
@@ -45,7 +42,7 @@ export function ChannelList({ query }: { query?: string }) {
 
   const goToChannel = (id: string) => {
     setPanel('chat')
-    navigate(channelPath({ zoneSlug, channelId: id }))
+    navigate(channelPath({ channelId: id }))
   }
 
   const onArchive = async (id: string, archived: boolean) => {
@@ -66,7 +63,7 @@ export function ChannelList({ query }: { query?: string }) {
         <button
           type="button"
           aria-label={t('sidebar.newChannel')}
-          onClick={() => zoneId && openCreateChannel({ zoneId })}
+          onClick={() => openCreateChannel()}
           className="text-primary px-1"
         >
           ＋

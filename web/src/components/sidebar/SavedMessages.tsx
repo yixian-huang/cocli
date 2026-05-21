@@ -1,18 +1,16 @@
 import { useNavigate } from 'react-router-dom'
 import { useBookmarkStore } from '@/stores/bookmarkStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { messagePath } from '@/lib/paths'
 import { X } from 'lucide-react'
 import { SectionHeader } from '@/components/ui'
 
 export function SavedMessages() {
   const navigate = useNavigate()
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
   const bookmarks = useBookmarkStore((s) => s.bookmarks)
   const toggleBookmark = useBookmarkStore((s) => s.toggleBookmark)
 
   const handleClick = (entry: (typeof bookmarks)[0]) => {
-    navigate(messagePath({ zoneSlug, channelId: entry.message.channelId, messageId: entry.message.id }))
+    navigate(messagePath({ channelId: entry.message.channelId, messageId: entry.message.id }))
   }
 
   if (bookmarks.length === 0) return null

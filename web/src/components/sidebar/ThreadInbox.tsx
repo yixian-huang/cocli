@@ -2,7 +2,6 @@ import { useEffect, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useThreadInboxStore } from '@/stores/threadInboxStore'
 import { useThreadStore } from '@/stores/threadStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { channelPath } from '@/lib/paths'
 import { relativeTime } from '@/lib/utils'
 import { Check, RotateCcw } from 'lucide-react'
@@ -11,7 +10,6 @@ import type { MenuEntry } from '@/components/ui'
 
 export function ThreadInbox({ query }: { query?: string }) {
   const navigate = useNavigate()
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
   const fetchThreads = useThreadInboxStore((s) => s.fetchThreads)
   const threads = useThreadInboxStore((s) => s.threads)
   const toggleDone = useThreadInboxStore((s) => s.toggleDone)
@@ -33,7 +31,7 @@ export function ThreadInbox({ query }: { query?: string }) {
   }, [fetchThreads])
 
   const handleClick = (thread: (typeof visibleThreads)[0]) => {
-    navigate(channelPath({ zoneSlug, channelId: thread.parentMessage.channelId }))
+    navigate(channelPath({ channelId: thread.parentMessage.channelId }))
     openThread(thread.parentMessage.channelId, thread.parentMessage)
   }
 

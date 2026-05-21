@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
 import { dm } from '@/api/client'
-import { useZoneStore } from '@/stores/zoneStore'
 import { useThreadStore } from '@/stores/threadStore'
 import { MessageList } from '@/components/chat/MessageList'
 import { MessageInput } from '@/components/chat/MessageInput'
@@ -20,10 +19,8 @@ export function ChatTab({ agentName }: { agentName: string }) {
   const closeThread = useThreadStore((s) => s.closeThread)
 
   useEffect(() => {
-    const zoneId = useZoneStore.getState().activeZoneId
-    if (!zoneId) { setLoading(false); return }
     setLoading(true)
-    dm.createOrGet(zoneId, agentName, 'agent')
+    dm.createOrGet(agentName, 'agent')
       .then((ch) => setDmChannelId(ch.id))
       .catch(() => setDmChannelId(null))
       .finally(() => setLoading(false))

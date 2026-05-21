@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useAgentStore } from '@/stores/agentStore'
-import { useUserStore } from '@/stores/userStore'
 import { agents as agentsApi } from '@/api/client'
 import { toast, toastError } from '@/stores/toastStore'
 import { Button, Input, Textarea, StatusDot, AttentionBadge, ConfirmDialog } from '@/components/ui'
@@ -21,8 +20,8 @@ export function AgentPanel({ agent }: { agent: Agent }) {
   const [editDesc, setEditDesc] = useState(agent.description || '')
   const [editModel, setEditModel] = useState(agent.model)
   const [saving, setSaving] = useState(false)
-  const currentUser = useUserStore((s) => s.user)
-  const isAdmin = currentUser?.role === 'admin'
+  // Single-tenant: local owner has full access
+  const isAdmin = true
   const startAgent = useAgentStore((s) => s.startAgent)
   const stopAgent = useAgentStore((s) => s.stopAgent)
   const cancelAgentTurn = useAgentStore((s) => s.cancelAgentTurn)

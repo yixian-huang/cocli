@@ -3,7 +3,6 @@ import { useNavigate } from 'react-router-dom'
 import { useAgentStore } from '@/stores/agentStore'
 import { useChannelStore } from '@/stores/channelStore'
 import { useViewStore } from '@/stores/viewStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { cn } from '@/lib/utils'
 import { Bot, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'
 import { agentPath } from '@/lib/paths'
@@ -24,7 +23,6 @@ export function AgentActivity() {
   const activeChannelId = useChannelStore((s) => s.activeChannelId)
   const members = useChannelStore((s) => activeChannelId ? s.membersByChannel[activeChannelId] : undefined)
   const setActiveAgent = useViewStore((s) => s.setActiveAgent)
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
   const [expanded, setExpanded] = useState(false)
 
   const memberIds = useMemo(() => {
@@ -42,8 +40,8 @@ export function AgentActivity() {
 
   const handleAgentClick = useCallback((agentId: string) => {
     setActiveAgent(agentId)
-    navigate(agentPath({ zoneSlug, agentId }))
-  }, [navigate, setActiveAgent, zoneSlug])
+    navigate(agentPath({ agentId }))
+  }, [navigate, setActiveAgent])
 
   if (workingAgents.length === 0) return null
 

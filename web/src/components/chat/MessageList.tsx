@@ -5,7 +5,6 @@ import { useMessageStore, EMPTY_MESSAGES } from '@/stores/messageStore'
 import { useChannelStore } from '@/stores/channelStore'
 import { useViewStore } from '@/stores/viewStore'
 import { useAgentStore } from '@/stores/agentStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { useThreadInboxStore } from '@/stores/threadInboxStore'
 import { messages as messagesApi, search as searchApi } from '@/api/client'
 import { MessageItem } from './MessageItem'
@@ -27,7 +26,6 @@ export function MessageList({ channelId, onReply, searchQuery, loading: loadingP
   const navigate = useNavigate()
   const setQuotedMessage = useViewStore((s) => s.setQuotedMessage)
   const setActiveAgent = useViewStore((s) => s.setActiveAgent)
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
 
   // Stable agent names — only recomputes when agent names change, not status
   const agentNamesKey = useAgentStore((s) => s.agents.map((a) => a.name).join(','))
@@ -35,8 +33,8 @@ export function MessageList({ channelId, onReply, searchQuery, loading: loadingP
 
   const handleAgentClick = useCallback((agentId: string) => {
     setActiveAgent(agentId)
-    navigate(agentPath({ zoneSlug, agentId }))
-  }, [navigate, setActiveAgent, zoneSlug])
+    navigate(agentPath({ agentId }))
+  }, [navigate, setActiveAgent])
 
   // Thread summary map: parentMessageId → { replyCount, lastActivityAt }
   const allThreads = useThreadInboxStore((s) => s.threads)
@@ -306,9 +304,7 @@ export function MessageList({ channelId, onReply, searchQuery, loading: loadingP
       setSearching(true)
       setSearchError(null)
       try {
-        const zoneId = useZoneStore.getState().activeZoneId
-        if (!zoneId) return
-        const res = await searchApi.messages(zoneId, query, undefined, { signal: controller.signal })
+        const res = await searchApi.messages(query, undefined, { signal: controller.signal })
         if (searchReqSeqRef.current !== reqSeq) return
         setSearchResults(res.messages || [])
       } catch {

@@ -6,7 +6,6 @@ import { useChannelStore } from '@/stores/channelStore'
 
 export function OpenDMDialog() {
   const open = useDialogStore((s) => s.active === 'openDM')
-  const payload = useDialogStore((s) => s.payload)
   const close = useDialogStore((s) => s.close)
   const [recipient, setRecipient] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -21,16 +20,15 @@ export function OpenDMDialog() {
   }, [open])
 
   const submit = async () => {
-    const zoneId = (payload as { zoneId?: string } | null)?.zoneId
     const trimmed = recipient.trim().replace(/^@/, '')
-    if (!zoneId || !trimmed) {
+    if (!trimmed) {
       setError('Recipient required')
       return
     }
     setSubmitting(true)
     setError(null)
     try {
-      await dmApi.createOrGet(zoneId, trimmed)
+      await dmApi.createOrGet(trimmed)
       await useChannelStore.getState().fetchDMs()
       close()
     } catch (e) {

@@ -4,8 +4,6 @@ import { useAgentStore } from '@/stores/agentStore'
 import { useChannelStore } from '@/stores/channelStore'
 import { useViewStore } from '@/stores/viewStore'
 import { useDialogStore } from '@/stores/dialogStore'
-import { useZoneStore } from '@/stores/zoneStore'
-import { useUserStore } from '@/stores/userStore'
 import { toast, toastError } from '@/stores/toastStore'
 import { cn } from '@/lib/utils'
 import {
@@ -31,9 +29,8 @@ export function AgentList({ query }: { query?: string }) {
   const [restartingId, setRestartingId] = useState<string | null>(null)
   const activeAgentId = useViewStore((s) => s.activeAgentId)
   const dmChannels = useChannelStore((s) => s.dmChannels)
-  const isAdmin = useUserStore((s) => s.user?.role === 'admin')
-  const zoneId = useZoneStore((s) => s.activeZoneId)
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
+  // Single-tenant: local owner has full access
+  const isAdmin = true
   const openCreateAgent = useDialogStore((s) => s.openCreateAgent)
 
   const text = (query ?? '').trim().toLowerCase()
@@ -80,7 +77,7 @@ export function AgentList({ query }: { query?: string }) {
         <button
           type="button"
           aria-label="New agent"
-          onClick={() => zoneId && openCreateAgent({ zoneId })}
+          onClick={() => openCreateAgent()}
           className="text-primary px-1"
         >
           ＋
@@ -113,7 +110,7 @@ export function AgentList({ query }: { query?: string }) {
                     )}
                   </button>
                   <button
-                    onClick={() => navigate(agentPath({ zoneSlug, agentId: agent.id }))}
+                    onClick={() => navigate(agentPath({ agentId: agent.id }))}
                     className="flex items-center gap-2 flex-1 min-w-0 text-left"
                   >
                     <StatusDot status={agent.status as 'online' | 'offline' | 'working' | 'error'} size="sm" />

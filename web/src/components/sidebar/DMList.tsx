@@ -1,7 +1,6 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useChannelStore } from '@/stores/channelStore'
-import { useZoneStore } from '@/stores/zoneStore'
 import { useAgentStore } from '@/stores/agentStore'
 import { useViewStore } from '@/stores/viewStore'
 import { useWorkspacePanelStore } from '@/stores/workspacePanelStore'
@@ -19,8 +18,6 @@ export function DMList({ query }: { query?: string }) {
   const activeId = useChannelStore((s) => s.activeChannelId)
   const setPanel = useWorkspacePanelStore((s) => s.setPanel)
   const agents = useAgentStore((s) => s.agents)
-  const zoneId = useZoneStore((s) => s.activeZoneId)
-  const zoneSlug = useZoneStore((s) => s.activeZoneSlug)
   const hiddenDMIds = useSidebarPrefsStore((s) => s.hiddenDMIds)
   const hideDM = useSidebarPrefsStore((s) => s.hideDM)
 
@@ -36,10 +33,10 @@ export function DMList({ query }: { query?: string }) {
     if (agent) {
       useViewStore.getState().setActiveAgent(agent.id)
       useChannelStore.getState().setActiveChannel('')
-      navigate(agentPath({ zoneSlug, agentId: agent.id }))
+      navigate(agentPath({ agentId: agent.id }))
     } else {
       setPanel('chat')
-      navigate(channelPath({ zoneSlug, channelId: ch.id }))
+      navigate(channelPath({ channelId: ch.id }))
     }
   }
 
@@ -96,14 +93,9 @@ export function DMList({ query }: { query?: string }) {
                     aria-label="Hide DM"
                     onClick={(e) => {
                       e.stopPropagation()
-                      if (!zoneId) return
                       hideDM(ch.id)
                     }}
-                    disabled={!zoneId}
-                    className={cn(
-                      'opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground',
-                      !zoneId && 'pointer-events-none opacity-0',
-                    )}
+                    className="opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
