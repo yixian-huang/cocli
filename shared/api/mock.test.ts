@@ -18,6 +18,11 @@ describe('mockHandler', () => {
     expect(result).toBeUndefined()
   })
 
+  it('returns {threads:[]} for GET /api/threads', async () => {
+    const result = await mockHandler<{ threads: unknown[] }>('/api/threads', {})
+    expect(result).toEqual({ threads: [] })
+  })
+
   it('returns empty array for unmocked GET paths', async () => {
     const result = await mockHandler<unknown[]>('/api/agents', {})
     expect(result).toEqual([])

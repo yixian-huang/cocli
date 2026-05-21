@@ -30,6 +30,9 @@ export async function mockHandler<T>(path: string, options: RequestInit): Promis
   if (method === 'GET' && route === '/api/health') {
     return undefined as T
   }
+  if (method === 'GET' && route === '/api/threads') {
+    return { threads: [] } as unknown as T
+  }
 
   if (method === 'GET') {
     return [] as unknown as T

@@ -22,7 +22,7 @@ export const useThreadInboxStore = create<ThreadInboxState>((set, get) => ({
     set({ loading: true })
     try {
       const data = await threadsApi.listAll()
-      set({ threads: data.threads, loading: false })
+      set({ threads: data?.threads ?? [], loading: false })
     } catch {
       set({ loading: false })
     }
