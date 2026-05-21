@@ -1,0 +1,15 @@
+[package]
+name = "cocli-actor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Actor trait + Supervisor + Shutdown protocol for cocli daemon"
+
+[dependencies]
+tokio       = { workspace = true }
+async-trait = { workspace = true }
+thiserror   = { workspace = true }
+tracing     = { workspace = true }
