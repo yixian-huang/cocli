@@ -14,6 +14,7 @@ import { AgentActivity } from '@/components/agents/AgentActivity'
 import { AgentView } from '@/components/agents/AgentView'
 import { ThreadFocusView } from '@/components/chat/ThreadFocusView'
 import { HistoryPanel } from '@/components/history/HistoryPanel'
+import { FirstRunWizard } from '@/components/wizard/FirstRunWizard'
 
 const TaskBoard = lazy(() => import('@/components/tasks/TaskBoard').then(m => ({ default: m.TaskBoard })))
 const ChannelSettings = lazy(() => import('@/components/chat/ChannelSettings').then(m => ({ default: m.ChannelSettings })))
@@ -215,7 +216,9 @@ function AppLayout() {
   useKeyboardShortcuts(shortcutDefinitions)
 
   return (
-    <div className="flex h-full w-full overflow-hidden">
+    <>
+      <FirstRunWizard />
+      <div className="flex h-full w-full overflow-hidden">
       {/* Mobile overlay */}
       {sidebarOpen && (
         <div
@@ -415,6 +418,7 @@ function AppLayout() {
       <OpenDMDialog />
       <CreateAgentDialog />
     </div>
+    </>
   )
 }
 
