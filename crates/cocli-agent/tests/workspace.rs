@@ -103,7 +103,11 @@ fn list_returns_immediate_children() {
         })
         .collect();
 
-    assert_eq!(entries.len(), 3, "expected 3 immediate children, got {entries:?}");
+    assert_eq!(
+        entries.len(),
+        3,
+        "expected 3 immediate children, got {entries:?}"
+    );
     let names: std::collections::HashSet<_> = entries.iter().map(|e| e.name.clone()).collect();
     assert!(names.contains("a.txt"));
     assert!(names.contains("b.md"));

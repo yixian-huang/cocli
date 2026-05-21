@@ -14,14 +14,14 @@ pub use daemon_msg::DaemonMsg;
 pub use server_msg::ServerMsg;
 
 // Phase 0a re-exports (spec §5.1)
-pub use server_msg::{
-    AgentDeliverMsg, AgentRecoverSessionsMsg, AgentStartMsg, AgentStopMsg, AgentTurnCancelMsg,
-    PingMsg, ServerShutdownMsg,
-};
 pub use daemon_msg::{
     AgentActivityMsg, AgentDeliverAcceptedMsg, AgentDeliverAckMsg, AgentRecoveryRecordMsg,
     AgentSessionEndMsg, AgentSessionIdleMsg, AgentSessionMsg, AgentStatusMsg, AgentStopErrorMsg,
     AgentTurnMsg, DaemonRecoverMsg, PongMsg, ReadyMsg,
+};
+pub use server_msg::{
+    AgentDeliverMsg, AgentRecoverSessionsMsg, AgentStartMsg, AgentStopMsg, AgentTurnCancelMsg,
+    PingMsg, ServerShutdownMsg,
 };
 pub use types::{
     AgentConfig, ChannelSession, DeliveryMessage, FileTreeEntry, RecoverSession, RuntimeModel,

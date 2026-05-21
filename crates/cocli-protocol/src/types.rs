@@ -4,7 +4,7 @@
 //! Only Phase 0a-relevant fields are ported; lazily extend as roundtrip tests
 //! against canonical Go JSON fixtures fail.
 
-use serde::{Deserialize, Serialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use uuid::Uuid;
 
 /// serde deserializer that treats explicit `null` as `Default::default()`.
@@ -54,26 +54,46 @@ pub fn u64_is_zero(v: &u64) -> bool {
 pub struct AgentConfig {
     pub runtime: String,
     pub model: String,
-    #[serde(default, rename = "workingRuntime", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "workingRuntime",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub working_runtime: String,
-    #[serde(default, rename = "workingModel", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "workingModel",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub working_model: String,
-    #[serde(default, rename = "chatOnly", skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        default,
+        rename = "chatOnly",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub chat_only: bool,
-    #[serde(default, rename = "sessionId", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "sessionId",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub session_id: String,
     #[serde(rename = "serverUrl")]
     pub server_url: String,
-    #[serde(default, rename = "authToken", skip_serializing_if = "String::is_empty")]
-    pub auth_token: String,
     #[serde(
         default,
-        rename = "envVars",
-        skip_serializing_if = "Option::is_none"
+        rename = "authToken",
+        skip_serializing_if = "String::is_empty"
     )]
+    pub auth_token: String,
+    #[serde(default, rename = "envVars", skip_serializing_if = "Option::is_none")]
     pub env_vars: Option<std::collections::HashMap<String, String>>,
     pub name: String,
-    #[serde(default, rename = "displayName", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "displayName",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub display_name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub description: String,
@@ -135,19 +155,27 @@ pub struct DeliveryMessage {
         skip_serializing_if = "String::is_empty"
     )]
     pub task_status: String,
-    #[serde(
-        default,
-        rename = "task_number",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "task_number", skip_serializing_if = "i32_is_zero")]
     pub task_number: i32,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub blocks: String,
-    #[serde(rename = "sourceMessageId", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "sourceMessageId",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub source_message_id: String,
-    #[serde(rename = "expectedReplyTarget", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "expectedReplyTarget",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub expected_reply_target: String,
-    #[serde(rename = "requiresThread", default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(
+        rename = "requiresThread",
+        default,
+        skip_serializing_if = "std::ops::Not::not"
+    )]
     pub requires_thread: bool,
     #[serde(
         rename = "replyObligationId",
@@ -173,7 +201,11 @@ pub struct DeliveryMessage {
         skip_serializing_if = "String::is_empty"
     )]
     pub reply_deadline_at: String,
-    #[serde(rename = "recentContext", default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        rename = "recentContext",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub recent_context: Vec<DeliveryMessage>,
     #[serde(
         rename = "priorityClass",
@@ -283,14 +315,30 @@ pub struct WorkingStatePayload {
     pub task_id: Option<Uuid>,
     #[serde(default, rename = "taskNumber", skip_serializing_if = "i64_is_zero")]
     pub task_number: i64,
-    #[serde(default, rename = "channelName", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "channelName",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub channel_name: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub summary: String,
-    #[serde(default, rename = "nextStepHint", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "nextStepHint",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub next_step_hint: String,
-    #[serde(default, rename = "startedAt", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "startedAt",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub started_at: String,
-    #[serde(default, rename = "lastUpdatedAt", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "lastUpdatedAt",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub last_updated_at: String,
 }

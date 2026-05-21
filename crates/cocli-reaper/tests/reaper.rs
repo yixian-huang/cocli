@@ -68,7 +68,10 @@ fn dead_pid_swept() {
     assert_eq!(stats.scanned, 1);
     assert_eq!(stats.cleaned_stale, 1);
     assert_eq!(stats.reaped, 0);
-    assert!(deps.killed.lock().unwrap().is_empty(), "must NOT kill dead pid");
+    assert!(
+        deps.killed.lock().unwrap().is_empty(),
+        "must NOT kill dead pid"
+    );
 }
 
 #[test]

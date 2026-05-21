@@ -10,9 +10,9 @@
 use std::cell::RefCell;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 /// Namespace shared with the Go daemon (`pidLockDirName` in
 /// `daemon/agent/agent_pidfile.go`). MUST stay "chatrs" for parity — the Rust

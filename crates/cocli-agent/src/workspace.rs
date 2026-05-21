@@ -60,9 +60,8 @@ pub fn resolve_within(root: &Path, rel: &str) -> io::Result<PathBuf> {
 
     // Canonicalize the root first — if the root itself doesn't exist or is
     // not a real dir, the caller should know.
-    let root_real = fs::canonicalize(root).map_err(|e| {
-        io::Error::new(e.kind(), format!("canonicalize root {root:?}: {e}"))
-    })?;
+    let root_real = fs::canonicalize(root)
+        .map_err(|e| io::Error::new(e.kind(), format!("canonicalize root {root:?}: {e}")))?;
 
     let joined = root_real.join(rel_path);
 

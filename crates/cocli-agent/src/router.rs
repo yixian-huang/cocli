@@ -12,7 +12,9 @@ use tokio::sync::{broadcast, mpsc};
 use cocli_actor::{Actor, ActorResult, ShutdownToken};
 use cocli_protocol::{
     daemon_msg::AgentStatusMsg,
-    server_msg::{AgentDeliverMsg, AgentRecoverSessionsMsg, AgentStartMsg, AgentStopMsg, AgentTurnCancelMsg},
+    server_msg::{
+        AgentDeliverMsg, AgentRecoverSessionsMsg, AgentStartMsg, AgentStopMsg, AgentTurnCancelMsg,
+    },
     DaemonMsg, ServerMsg,
 };
 
@@ -426,51 +428,50 @@ impl AgentRouter {
         use cocli_protocol::daemon_msg::AgentWorkspaceFileTreeMsg;
         use cocli_protocol::types::FileTreeEntry;
 
-        let work_dir = crate::workspace::agent_workspace_dir(
-            &self.cfg.agent_workspace_root,
-            &m.agent_id,
-        );
+        let work_dir =
+            crate::workspace::agent_workspace_dir(&self.cfg.agent_workspace_root, &m.agent_id);
 
         let dir_path_for_reply = m.dir_path.clone();
-        let files: Vec<FileTreeEntry> = match crate::workspace::resolve_within(&work_dir, &m.dir_path) {
-            Ok(target) => match std::fs::read_dir(target) {
-                Ok(entries) => entries
-                    .filter_map(|e| e.ok())
-                    .map(|e| {
-                        let meta = e.metadata().ok();
-                        let is_dir = meta.as_ref().map(|md| md.is_dir()).unwrap_or(false);
-                        let size = if is_dir {
-                            0
-                        } else {
-                            meta.as_ref().map(|md| md.len() as i64).unwrap_or(0)
-                        };
-                        FileTreeEntry {
-                            name: e.file_name().to_string_lossy().into_owned(),
-                            is_dir,
-                            size,
-                        }
-                    })
-                    .collect(),
+        let files: Vec<FileTreeEntry> =
+            match crate::workspace::resolve_within(&work_dir, &m.dir_path) {
+                Ok(target) => match std::fs::read_dir(target) {
+                    Ok(entries) => entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| {
+                            let meta = e.metadata().ok();
+                            let is_dir = meta.as_ref().map(|md| md.is_dir()).unwrap_or(false);
+                            let size = if is_dir {
+                                0
+                            } else {
+                                meta.as_ref().map(|md| md.len() as i64).unwrap_or(0)
+                            };
+                            FileTreeEntry {
+                                name: e.file_name().to_string_lossy().into_owned(),
+                                is_dir,
+                                size,
+                            }
+                        })
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %m.agent_id,
+                            dir_path = %m.dir_path,
+                            error = %e,
+                            "router: workspace:list — read_dir failed; returning empty"
+                        );
+                        Vec::new()
+                    }
+                },
                 Err(e) => {
                     tracing::warn!(
                         agent_id = %m.agent_id,
                         dir_path = %m.dir_path,
                         error = %e,
-                        "router: workspace:list — read_dir failed; returning empty"
+                        "router: workspace:list — resolve_within rejected; returning empty"
                     );
                     Vec::new()
                 }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %m.agent_id,
-                    dir_path = %m.dir_path,
-                    error = %e,
-                    "router: workspace:list — resolve_within rejected; returning empty"
-                );
-                Vec::new()
-            }
-        };
+            };
 
         let reply = AgentWorkspaceFileTreeMsg {
             agent_id: m.agent_id,
@@ -497,62 +498,61 @@ impl AgentRouter {
 
         const MAX_FILE_BYTES: usize = 1024 * 1024; // 1 MiB — Go parity
 
-        let work_dir = crate::workspace::agent_workspace_dir(
-            &self.cfg.agent_workspace_root,
-            &m.agent_id,
-        );
+        let work_dir =
+            crate::workspace::agent_workspace_dir(&self.cfg.agent_workspace_root, &m.agent_id);
 
-        let (content, binary): (String, bool) = match crate::workspace::resolve_within(&work_dir, &m.path) {
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %m.agent_id,
-                    path = %m.path,
-                    error = %e,
-                    "router: workspace:read — resolve_within rejected"
-                );
-                // Go parity: surface "access denied" / "error: ..." inline.
-                if e.kind() == std::io::ErrorKind::PermissionDenied {
-                    ("access denied".to_string(), false)
-                } else {
-                    (format!("error: {e}"), false)
-                }
-            }
-            Ok(target) => match std::fs::read(target) {
+        let (content, binary): (String, bool) =
+            match crate::workspace::resolve_within(&work_dir, &m.path) {
                 Err(e) => {
                     tracing::warn!(
                         agent_id = %m.agent_id,
                         path = %m.path,
                         error = %e,
-                        "router: workspace:read — read failed"
+                        "router: workspace:read — resolve_within rejected"
                     );
-                    (format!("error: {e}"), false)
-                }
-                Ok(data) if data.len() > MAX_FILE_BYTES => {
-                    // Go parity: refuse files > 1 MiB.
-                    ("file too large (>1MB)".to_string(), true)
-                }
-                Ok(data) => {
-                    // Go parity: NUL-byte check on the first 512 bytes for
-                    // binary detection (matches `bytes.Contains(data[:512],
-                    // []byte{0})`). Rust extension: if NUL-free but still
-                    // not valid UTF-8, base64-encode as a safety fallback.
-                    let check_len = data.len().min(512);
-                    let has_nul = data[..check_len].contains(&0);
-                    if has_nul {
-                        (STANDARD.encode(&data), true)
+                    // Go parity: surface "access denied" / "error: ..." inline.
+                    if e.kind() == std::io::ErrorKind::PermissionDenied {
+                        ("access denied".to_string(), false)
                     } else {
-                        match String::from_utf8(data) {
-                            Ok(s) => (s, false),
-                            Err(e) => {
-                                // Not valid UTF-8 but had no NULs in the
-                                // first 512 bytes — fall back to base64.
-                                (STANDARD.encode(e.into_bytes()), true)
+                        (format!("error: {e}"), false)
+                    }
+                }
+                Ok(target) => match std::fs::read(target) {
+                    Err(e) => {
+                        tracing::warn!(
+                            agent_id = %m.agent_id,
+                            path = %m.path,
+                            error = %e,
+                            "router: workspace:read — read failed"
+                        );
+                        (format!("error: {e}"), false)
+                    }
+                    Ok(data) if data.len() > MAX_FILE_BYTES => {
+                        // Go parity: refuse files > 1 MiB.
+                        ("file too large (>1MB)".to_string(), true)
+                    }
+                    Ok(data) => {
+                        // Go parity: NUL-byte check on the first 512 bytes for
+                        // binary detection (matches `bytes.Contains(data[:512],
+                        // []byte{0})`). Rust extension: if NUL-free but still
+                        // not valid UTF-8, base64-encode as a safety fallback.
+                        let check_len = data.len().min(512);
+                        let has_nul = data[..check_len].contains(&0);
+                        if has_nul {
+                            (STANDARD.encode(&data), true)
+                        } else {
+                            match String::from_utf8(data) {
+                                Ok(s) => (s, false),
+                                Err(e) => {
+                                    // Not valid UTF-8 but had no NULs in the
+                                    // first 512 bytes — fall back to base64.
+                                    (STANDARD.encode(e.into_bytes()), true)
+                                }
                             }
                         }
                     }
-                }
-            },
-        };
+                },
+            };
 
         let reply = AgentWorkspaceFileContentMsg {
             agent_id: m.agent_id,
@@ -574,10 +574,8 @@ impl AgentRouter {
         &mut self,
         m: cocli_protocol::server_msg::AgentResetWorkspaceMsg,
     ) {
-        let work_dir = crate::workspace::agent_workspace_dir(
-            &self.cfg.agent_workspace_root,
-            &m.agent_id,
-        );
+        let work_dir =
+            crate::workspace::agent_workspace_dir(&self.cfg.agent_workspace_root, &m.agent_id);
 
         if !work_dir.exists() {
             tracing::warn!(
@@ -611,10 +609,7 @@ impl AgentRouter {
     //
     // Mirrors Go `dispatcher.go` AgentWorkingSetMsg branch + AgentManager.SetAgentWorkingState.
     // Phase 0a: server pre-trims/clamps the strings, so we just store and reply.
-    async fn handle_working_set(
-        &mut self,
-        m: cocli_protocol::server_msg::AgentWorkingSetMsg,
-    ) {
+    async fn handle_working_set(&mut self, m: cocli_protocol::server_msg::AgentWorkingSetMsg) {
         use cocli_protocol::types::WorkingStatePayload;
         let incoming = WorkingStatePayload {
             task_id: m.task_id,
@@ -641,16 +636,17 @@ impl AgentRouter {
             error: String::new(),
             error_code: String::new(),
         };
-        if let Err(e) = self.outbound_tx.send(DaemonMsg::AgentWorkingResult(resp)).await {
+        if let Err(e) = self
+            .outbound_tx
+            .send(DaemonMsg::AgentWorkingResult(resp))
+            .await
+        {
             tracing::warn!(error = %e, "router: working:set reply send failed");
         }
     }
 
     // FPC #16 — working memory get.
-    async fn handle_working_get(
-        &mut self,
-        m: cocli_protocol::server_msg::AgentWorkingGetMsg,
-    ) {
+    async fn handle_working_get(&mut self, m: cocli_protocol::server_msg::AgentWorkingGetMsg) {
         let state = self.working.get(&m.agent_id);
         tracing::info!(
             agent_id = %m.agent_id,
@@ -666,16 +662,17 @@ impl AgentRouter {
             error: String::new(),
             error_code: String::new(),
         };
-        if let Err(e) = self.outbound_tx.send(DaemonMsg::AgentWorkingResult(resp)).await {
+        if let Err(e) = self
+            .outbound_tx
+            .send(DaemonMsg::AgentWorkingResult(resp))
+            .await
+        {
             tracing::warn!(error = %e, "router: working:get reply send failed");
         }
     }
 
     // FPC #16 — working memory clear (idempotent).
-    async fn handle_working_clear(
-        &mut self,
-        m: cocli_protocol::server_msg::AgentWorkingClearMsg,
-    ) {
+    async fn handle_working_clear(&mut self, m: cocli_protocol::server_msg::AgentWorkingClearMsg) {
         self.working.clear(&m.agent_id);
         tracing::info!(
             agent_id = %m.agent_id,
@@ -690,7 +687,11 @@ impl AgentRouter {
             error: String::new(),
             error_code: String::new(),
         };
-        if let Err(e) = self.outbound_tx.send(DaemonMsg::AgentWorkingResult(resp)).await {
+        if let Err(e) = self
+            .outbound_tx
+            .send(DaemonMsg::AgentWorkingResult(resp))
+            .await
+        {
             tracing::warn!(error = %e, "router: working:clear reply send failed");
         }
     }
@@ -715,10 +716,7 @@ impl AgentRouter {
     // Earlier code did `break` here, which exited the router loop and
     // drained every agent — defeating the whole point. Now we just log
     // and continue.
-    async fn handle_server_shutdown(
-        &mut self,
-        m: cocli_protocol::server_msg::ServerShutdownMsg,
-    ) {
+    async fn handle_server_shutdown(&mut self, m: cocli_protocol::server_msg::ServerShutdownMsg) {
         tracing::info!(
             reason = %m.reason,
             agents = self.agents.len(),

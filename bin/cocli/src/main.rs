@@ -16,6 +16,9 @@ struct Args {
 fn main() -> anyhow::Result<()> {
     let _args = Args::parse();
     tracing_subscriber::fmt::init();
-    println!("cocli {} — M0 bootstrap stub. Real implementation lands in M0.0.1.", env!("CARGO_PKG_VERSION"));
+    println!(
+        "cocli {} — M0 bootstrap stub. Real implementation lands in M0.0.1.",
+        env!("CARGO_PKG_VERSION")
+    );
     Ok(())
 }

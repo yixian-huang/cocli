@@ -18,7 +18,9 @@ use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
 
 use cocli_bridge_config::{write_mcp_config, BridgeConfig};
-use cocli_driver_claude::{parse_line as parse_claude_line, spawn_claude, ClaudeEvent, SpawnContext};
+use cocli_driver_claude::{
+    parse_line as parse_claude_line, spawn_claude, ClaudeEvent, SpawnContext,
+};
 use cocli_pidfile::write_agent_pidfile;
 use cocli_protocol::{
     daemon_msg::{

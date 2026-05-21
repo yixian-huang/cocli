@@ -18,7 +18,9 @@ fn write_then_read_roundtrip() {
     let raw = fs::read_to_string(&path).expect("read");
     assert_eq!(raw, "12345\n", "expected newline-terminated decimal PID");
 
-    let pid = read_agent_pidfile(aid).expect("read api").expect("Some(pid)");
+    let pid = read_agent_pidfile(aid)
+        .expect("read api")
+        .expect("Some(pid)");
     assert_eq!(pid, 12345);
 
     // remove

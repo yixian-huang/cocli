@@ -215,7 +215,10 @@ fn agent_deliver_ack_roundtrip() {
     assert_eq!(a.attempt, 1);
     // Per spec: routeAction enum is "inbox" | "tierDigest" | "tierDelayed" | "checkMessages".
     assert_eq!(a.route_action, "inbox");
-    assert!(matches!(reparse_daemon(&msg), DaemonMsg::AgentDeliverAck(_)));
+    assert!(matches!(
+        reparse_daemon(&msg),
+        DaemonMsg::AgentDeliverAck(_)
+    ));
 }
 
 #[test]

@@ -85,11 +85,7 @@ pub struct AgentStartMsg {
     pub resume_prompt: String,
     #[serde(default, rename = "launchId", skip_serializing_if = "String::is_empty")]
     pub launch_id: String,
-    #[serde(
-        default,
-        rename = "turnCount",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "turnCount", skip_serializing_if = "i32_is_zero")]
     pub turn_count: i32,
 }
 
@@ -242,12 +238,24 @@ pub struct AgentWorkingSetMsg {
     pub request_id: String,
     #[serde(default, rename = "taskId", skip_serializing_if = "Option::is_none")]
     pub task_id: Option<uuid::Uuid>,
-    #[serde(default, rename = "taskNumber", skip_serializing_if = "crate::types::i64_is_zero")]
+    #[serde(
+        default,
+        rename = "taskNumber",
+        skip_serializing_if = "crate::types::i64_is_zero"
+    )]
     pub task_number: i64,
-    #[serde(default, rename = "channelName", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "channelName",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub channel_name: String,
     pub summary: String,
-    #[serde(default, rename = "nextStepHint", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "nextStepHint",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub next_step_hint: String,
 }
 

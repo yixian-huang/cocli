@@ -261,25 +261,13 @@ pub struct AgentSessionEndMsg {
         skip_serializing_if = "String::is_empty"
     )]
     pub parent_session_id: String,
-    #[serde(
-        default,
-        rename = "inputTokens",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "inputTokens", skip_serializing_if = "i32_is_zero")]
     pub input_tokens: i32,
-    #[serde(
-        default,
-        rename = "outputTokens",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "outputTokens", skip_serializing_if = "i32_is_zero")]
     pub output_tokens: i32,
     #[serde(default, rename = "costUsd", skip_serializing_if = "f64_is_zero")]
     pub cost_usd: f64,
-    #[serde(
-        default,
-        rename = "contextWindow",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "contextWindow", skip_serializing_if = "i32_is_zero")]
     pub context_window: i32,
     #[serde(
         default,
@@ -417,23 +405,11 @@ pub struct AgentActivityMsg {
         skip_serializing_if = "i32_is_zero"
     )]
     pub total_output_tokens: i32,
-    #[serde(
-        default,
-        rename = "contextWindow",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "contextWindow", skip_serializing_if = "i32_is_zero")]
     pub context_window: i32,
-    #[serde(
-        default,
-        rename = "totalCostUSD",
-        skip_serializing_if = "f64_is_zero"
-    )]
+    #[serde(default, rename = "totalCostUSD", skip_serializing_if = "f64_is_zero")]
     pub total_cost_usd: f64,
-    #[serde(
-        default,
-        rename = "turnCount",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "turnCount", skip_serializing_if = "i32_is_zero")]
     pub turn_count: i32,
     #[serde(
         default,
@@ -473,11 +449,7 @@ pub struct AgentActivityMsg {
         skip_serializing_if = "String::is_empty"
     )]
     pub overage_status: String,
-    #[serde(
-        default,
-        rename = "overageResets",
-        skip_serializing_if = "i64_is_zero"
-    )]
+    #[serde(default, rename = "overageResets", skip_serializing_if = "i64_is_zero")]
     pub overage_resets: i64,
     #[serde(
         default,
@@ -582,25 +554,13 @@ pub struct AgentTurnMsg {
     #[serde(rename = "turnNumber")]
     pub turn_number: i32,
     pub entries: Vec<TrajectoryEntry>,
-    #[serde(
-        default,
-        rename = "inputTokens",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "inputTokens", skip_serializing_if = "i32_is_zero")]
     pub input_tokens: i32,
-    #[serde(
-        default,
-        rename = "outputTokens",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "outputTokens", skip_serializing_if = "i32_is_zero")]
     pub output_tokens: i32,
     #[serde(default, rename = "costUsd", skip_serializing_if = "f64_is_zero")]
     pub cost_usd: f64,
-    #[serde(
-        default,
-        rename = "contextWindow",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "contextWindow", skip_serializing_if = "i32_is_zero")]
     pub context_window: i32,
     #[serde(
         default,
@@ -634,17 +594,9 @@ pub struct AgentTurnMsg {
         skip_serializing_if = "i64_is_zero"
     )]
     pub notif_to_check_ms: i64,
-    #[serde(
-        default,
-        rename = "checkCadenceS",
-        skip_serializing_if = "f64_is_zero"
-    )]
+    #[serde(default, rename = "checkCadenceS", skip_serializing_if = "f64_is_zero")]
     pub check_cadence_s: f64,
-    #[serde(
-        default,
-        rename = "nudgesSent",
-        skip_serializing_if = "i32_is_zero"
-    )]
+    #[serde(default, rename = "nudgesSent", skip_serializing_if = "i32_is_zero")]
     pub nudges_sent: i32,
     #[serde(
         default,
@@ -728,6 +680,10 @@ pub struct AgentWorkingResultMsg {
     pub state: Option<crate::types::WorkingStatePayload>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
-    #[serde(default, rename = "errorCode", skip_serializing_if = "String::is_empty")]
+    #[serde(
+        default,
+        rename = "errorCode",
+        skip_serializing_if = "String::is_empty"
+    )]
     pub error_code: String,
 }

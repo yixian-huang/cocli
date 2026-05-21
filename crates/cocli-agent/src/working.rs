@@ -68,10 +68,7 @@ impl WorkingMemoryStore {
                 // by 1ns. Compare via the original DateTime when parseable;
                 // fall back to string compare for safety (RFC3339Nano sorts
                 // lexicographically when normalized to UTC 'Z').
-                let last = match prev
-                    .last_updated_at
-                    .parse::<DateTime<Utc>>()
-                {
+                let last = match prev.last_updated_at.parse::<DateTime<Utc>>() {
                     Ok(prev_last) if prev_last >= now => {
                         format_rfc3339_nanos(prev_last + chrono::Duration::nanoseconds(1))
                     }
