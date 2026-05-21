@@ -166,6 +166,66 @@
       }
     }
   },
+  "wizard": {
+    "title": "Welcome to cocli local",
+    "step": {
+      "locate": {
+        "heading": "Where is your Claude CLI?",
+        "help": "Leave blank for now — we'll auto-detect when the binary is ready in M0.0.2.",
+        "label": "Path to Claude CLI",
+        "placeholder": "/usr/local/bin/claude",
+        "detect": "Detect"
+      },
+      "create": {
+        "heading": "Create your first agent",
+        "help": "This agent lives on your machine. You can change the model later.",
+        "nameLabel": "Agent name",
+        "modelLabel": "Model"
+      },
+      "try": {
+        "heading": "You're all set!",
+        "body": "Go say hi in #general.",
+        "cta": "Open #general →",
+        "later": "Maybe later"
+      }
+    },
+    "common": {
+      "back": "Back",
+      "next": "Next"
+    }
+  },
+  "plugins": {
+    "title": "Plugins",
+    "subtitle": "Bridge external services into your channels.",
+    "register": "Register plugin",
+    "empty": {
+      "heading": "No plugins yet",
+      "body": "Register one to bridge Telegram, Slack, Discord, or your own custom bridge into a cocli channel."
+    },
+    "lastSeen": { "never": "never" },
+    "dialog": {
+      "register": {
+        "title": "Register plugin",
+        "nameLabel": "Plugin name",
+        "capabilities": "Capabilities",
+        "cancel": "Cancel",
+        "submit": "Register"
+      },
+      "reveal": {
+        "title": "Plugin registered",
+        "copy": "Copy",
+        "warning": "Save this token — it won't be shown again. If you lose it, revoke the plugin and register a new one.",
+        "done": "I've saved it"
+      },
+      "revoke": {
+        "title": "Revoke plugin",
+        "body": "Revoke {{name}}? Connected bridges will disconnect.",
+        "cancel": "Cancel",
+        "confirm": "Revoke"
+      }
+    },
+    "row": { "revoke": "Revoke plugin" }
+  },
   "sidebar": {
     "history": "History",
     "zoneTaskBoard": "Zone Task Board",
@@ -197,7 +257,8 @@
     "tabs": {
       "chat": "Chat",
       "people": "People"
-    }
+    },
+    "plugins": "Plugins"
   },
   "theme": {
     "sandstone": {

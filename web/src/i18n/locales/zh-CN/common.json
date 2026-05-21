@@ -166,6 +166,66 @@
       }
     }
   },
+  "wizard": {
+    "title": "欢迎使用 cocli local",
+    "step": {
+      "locate": {
+        "heading": "Claude CLI 在哪里?",
+        "help": "先空着也行 — M0.0.2 二进制就绪后会自动检测。",
+        "label": "Claude CLI 路径",
+        "placeholder": "/usr/local/bin/claude",
+        "detect": "检测"
+      },
+      "create": {
+        "heading": "创建你的第一个 agent",
+        "help": "这个 agent 跑在你本机。模型可以稍后改。",
+        "nameLabel": "Agent 名字",
+        "modelLabel": "Model"
+      },
+      "try": {
+        "heading": "全部就绪!",
+        "body": "去 #general 打个招呼吧。",
+        "cta": "打开 #general →",
+        "later": "稍后"
+      }
+    },
+    "common": {
+      "back": "返回",
+      "next": "下一步"
+    }
+  },
+  "plugins": {
+    "title": "插件",
+    "subtitle": "把外部服务桥接到 cocli channel。",
+    "register": "注册插件",
+    "empty": {
+      "heading": "还没有插件",
+      "body": "注册一个,把 Telegram、Slack、Discord 或自定义桥接对接到 cocli channel。"
+    },
+    "lastSeen": { "never": "从未" },
+    "dialog": {
+      "register": {
+        "title": "注册插件",
+        "nameLabel": "插件名字",
+        "capabilities": "能力",
+        "cancel": "取消",
+        "submit": "注册"
+      },
+      "reveal": {
+        "title": "插件已注册",
+        "copy": "复制",
+        "warning": "请保存好这个 token — 不会再次显示。丢了就 revoke 重新注册一个。",
+        "done": "我已保存"
+      },
+      "revoke": {
+        "title": "撤销插件",
+        "body": "确定撤销 {{name}}? 已连接的桥接会断开。",
+        "cancel": "取消",
+        "confirm": "撤销"
+      }
+    },
+    "row": { "revoke": "撤销插件" }
+  },
   "sidebar": {
     "history": "历史",
     "zoneTaskBoard": "任务看板",
@@ -197,7 +257,8 @@
     "tabs": {
       "chat": "聊天",
       "people": "成员"
-    }
+    },
+    "plugins": "插件"
   },
   "theme": {
     "sandstone": {
