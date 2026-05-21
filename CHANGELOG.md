@@ -4,7 +4,14 @@ All notable changes to this project will be documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.0] — 2026-05-21
+
+M0 bootstrap complete. Workspace skeleton, daemon-rs sources imported,
+web cherry-picked, governance + CI in place. Repo pushed to GitHub
+(private). No runtime behavior yet — `cocli --version` is the only
+working command.
+
+Next: M0.0.1 (channels + messages, no agent yet).
 
 ### Added
 - Workspace skeleton (15 crates declared in Cargo.toml; 8 imported from
