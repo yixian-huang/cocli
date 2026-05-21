@@ -1,0 +1,22 @@
+[package]
+name = "cocli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "cocli — local-first multi-agent platform (OSS)"
+default-run = "cocli"
+
+[[bin]]
+name = "cocli"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+cocli-server = { path = "../../crates/cocli-server" }

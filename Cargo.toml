@@ -9,15 +9,14 @@ members = [
     "crates/cocli-bridge-config",
     "crates/cocli-agent",
     "crates/cocli-health",
-    # Section 3+ members — not yet imported:
-    # "crates/cocli-store",
-    # "crates/cocli-api",
-    # "crates/cocli-ws",
-    # "crates/cocli-server",
-    # "crates/cocli-web",
-    # "crates/cocli-plugin",
-    # "crates/cocli-plugin-sdk",
-    # "bin/cocli",
+    "crates/cocli-store",
+    "crates/cocli-api",
+    "crates/cocli-ws",
+    "crates/cocli-server",
+    "crates/cocli-web",
+    "crates/cocli-plugin",
+    "crates/cocli-plugin-sdk",
+    "bin/cocli",
 ]
 
 [workspace.package]

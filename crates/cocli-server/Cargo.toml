@@ -1,0 +1,23 @@
+[package]
+name = "cocli-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Top-level server assembly: store + api + ws + forwarder + agent router"
+
+[dependencies]
+tokio = { workspace = true }
+axum = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+cocli-store = { path = "../cocli-store" }
+cocli-api = { path = "../cocli-api" }
+cocli-ws = { path = "../cocli-ws" }
+cocli-agent = { path = "../cocli-agent" }
+cocli-protocol = { path = "../cocli-protocol" }
+cocli-actor = { path = "../cocli-actor" }
+cocli-health = { path = "../cocli-health" }

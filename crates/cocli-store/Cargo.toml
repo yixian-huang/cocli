@@ -1,0 +1,21 @@
+[package]
+name = "cocli-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "SQLite-backed persistence layer (channels, agents, messages, sessions, activity, tasks, plugins)"
+
+[dependencies]
+# Heavy deps (sqlx, argon2 etc.) added when M0.0.1 implementation lands.
+# Placeholder only needs the crate to compile on Cargo 1.78 (toolchain pin).
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true }

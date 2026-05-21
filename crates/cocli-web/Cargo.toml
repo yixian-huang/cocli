@@ -1,0 +1,18 @@
+[package]
+name = "cocli-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Embeds web/dist/ assets into the cocli binary (rust-embed)"
+
+[dependencies]
+axum = { workspace = true }
+mime_guess = { workspace = true }
+rust-embed = { workspace = true, optional = true }
+
+[features]
+default = []
+embed-web = ["dep:rust-embed"]
