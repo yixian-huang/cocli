@@ -1,0 +1,16 @@
+[package]
+name = "cocli-bridge-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Writes .mcp-config.json for claude bridge MCP integration"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
