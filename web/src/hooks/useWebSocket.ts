@@ -50,7 +50,11 @@ const MAX_BACKOFF = 30000
 export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null)
   const attemptRef = useRef(0)
+
   useEffect(() => {
+    // No-op in mock mode — no backend to connect to.
+    if (import.meta.env.VITE_USE_MOCK === 'true') return
+
     let mounted = true
     let timer: ReturnType<typeof setTimeout>
 

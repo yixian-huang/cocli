@@ -404,8 +404,8 @@ function AppLayout() {
       <ChannelSwitcher open={showChannelSwitcher} onClose={() => setShowChannelSwitcher(false)} />
       <ShortcutsOverlay open={showShortcuts} onClose={() => setShowShortcuts(false)} sections={shortcutSections} />
 
-      {/* WebSocket reconnect banner */}
-      {wsStatus === 'disconnected' && (
+      {/* WebSocket reconnect banner — suppressed in mock mode (no real backend) */}
+      {wsStatus === 'disconnected' && import.meta.env.VITE_USE_MOCK !== 'true' && (
         <div className="fixed bottom-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-full border border-warning/30 bg-warning/12 px-4 py-2.5 text-sm font-medium text-warning-emphasis shadow-whisper animate-pulse">
           <WifiOff className="h-3.5 w-3.5" />
             {t('ws.reconnecting')}
