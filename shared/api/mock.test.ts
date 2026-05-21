@@ -27,4 +27,12 @@ describe('mockHandler', () => {
     const result = await mockHandler<void>('/api/foo', { method: 'POST' })
     expect(result).toBeUndefined()
   })
+
+  it('matches /api/channels even with query string', async () => {
+    const result = await mockHandler<{ id: string }[]>(
+      '/api/channels?includeArchived=true', {}
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0]?.id).toBe('general')
+  })
 })
