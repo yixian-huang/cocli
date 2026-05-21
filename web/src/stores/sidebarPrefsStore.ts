@@ -1,18 +1,14 @@
 import { create } from 'zustand'
 import { storageKey as brandStorageKey } from '@/brand'
 
-const HIDDEN_DMS_KEY_PREFIX = brandStorageKey('hidden-dms:')
+const HIDDEN_DMS_KEY = brandStorageKey('hidden-dms')
 
-function storageKey(zoneId: string): string {
-  return `${HIDDEN_DMS_KEY_PREFIX}${zoneId}`
-}
-
-function readHiddenDMIds(zoneId: string): Set<string> {
+function readHiddenDMIds(): Set<string> {
   try {
     if (typeof localStorage === 'undefined' || typeof localStorage.getItem !== 'function') {
       return new Set()
     }
-    const raw = localStorage.getItem(storageKey(zoneId))
+    const raw = localStorage.getItem(HIDDEN_DMS_KEY)
     if (!raw) return new Set()
 
     const parsed: unknown = JSON.parse(raw)
@@ -24,56 +20,42 @@ function readHiddenDMIds(zoneId: string): Set<string> {
   }
 }
 
-function persistHiddenDMIds(zoneId: string, hiddenDMIds: Set<string>) {
+function persistHiddenDMIds(hiddenDMIds: Set<string>) {
   try {
     if (typeof localStorage === 'undefined' || typeof localStorage.setItem !== 'function') {
       return
     }
-    localStorage.setItem(storageKey(zoneId), JSON.stringify([...hiddenDMIds]))
+    localStorage.setItem(HIDDEN_DMS_KEY, JSON.stringify([...hiddenDMIds]))
   } catch {
     // Ignore storage failures; the in-memory preference still updates.
   }
 }
 
 interface SidebarPrefsState {
-  zoneId: string | null
   hiddenDMIds: Set<string>
-  setZone: (zoneId: string | null) => void
   isDMHidden: (channelId: string) => boolean
   hideDM: (channelId: string) => void
   unhideDM: (channelId: string) => void
 }
 
 export const useSidebarPrefsStore = create<SidebarPrefsState>((set, get) => ({
-  zoneId: null,
-  hiddenDMIds: new Set(),
-
-  setZone: (zoneId) => {
-    set({
-      zoneId,
-      hiddenDMIds: zoneId ? readHiddenDMIds(zoneId) : new Set(),
-    })
-  },
+  hiddenDMIds: readHiddenDMIds(),
 
   isDMHidden: (channelId) => get().hiddenDMIds.has(channelId),
 
   hideDM: (channelId) => {
-    const { zoneId, hiddenDMIds } = get()
-    if (!zoneId) return
-
+    const { hiddenDMIds } = get()
     const next = new Set(hiddenDMIds)
     next.add(channelId)
-    persistHiddenDMIds(zoneId, next)
+    persistHiddenDMIds(next)
     set({ hiddenDMIds: next })
   },
 
   unhideDM: (channelId) => {
-    const { zoneId, hiddenDMIds } = get()
-    if (!zoneId) return
-
+    const { hiddenDMIds } = get()
     const next = new Set(hiddenDMIds)
     next.delete(channelId)
-    persistHiddenDMIds(zoneId, next)
+    persistHiddenDMIds(next)
     set({ hiddenDMIds: next })
   },
 }))

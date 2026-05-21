@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import type { Agent, AgentAttentionState, AgentStatus, PriorityClass, TrajectoryEntry, Turn } from '@/lib/types'
 import { agents as agentsApi } from '@/api/client'
-import { useZoneStore } from '@/stores/zoneStore'
 
 type ActivityMetrics = {
   lastInputTokens?: number
@@ -58,10 +57,8 @@ export const useAgentStore = create<AgentState>((set) => ({
   loading: true,
 
   fetchAgents: async () => {
-    const zoneId = useZoneStore.getState().activeZoneId
-    if (!zoneId) return
     try {
-      const agents = await agentsApi.list(zoneId)
+      const agents = await agentsApi.list()
       set({ agents: agents || [], loading: false })
     } catch {
       set({ loading: false })

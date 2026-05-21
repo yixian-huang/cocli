@@ -3,10 +3,6 @@ import { create } from 'zustand'
 export type WorkspacePanel =
   | 'chat'
   | 'history'
-  | 'zone_members'
-  | 'zone_tasks'
-  | 'zone_wiki'
-  | 'zone_credentials'
 
 interface WorkspacePanelState {
   panel: WorkspacePanel

@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import type { Channel } from '@/lib/types'
 import { channels as channelsApi, dm as dmApi } from '@/api/client'
-import { useZoneStore } from '@/stores/zoneStore'
 import { defaultTitle } from '@/brand'
 
 export interface ChannelMember {
@@ -43,10 +42,8 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
   setActiveChannel: (id) => set({ activeChannelId: id }),
 
   fetchChannels: async () => {
-    const zoneId = useZoneStore.getState().activeZoneId
-    if (!zoneId) return
     try {
-      const channels = await channelsApi.list(zoneId)
+      const channels = await channelsApi.list()
       set({
         channels: (channels || []).filter((c) => c.type === 'channel' && !c.archived),
         loading: false,
@@ -57,10 +54,8 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
   },
 
   fetchArchivedChannels: async () => {
-    const zoneId = useZoneStore.getState().activeZoneId
-    if (!zoneId) return
     try {
-      const all = await channelsApi.list(zoneId, { includeArchived: true })
+      const all = await channelsApi.list({ includeArchived: true })
       set({ archivedChannels: (all || []).filter((c) => c.type === 'channel' && c.archived) })
     } catch {
       // ignore
@@ -104,10 +99,8 @@ export const useChannelStore = create<ChannelState>((set, get) => ({
   },
 
   fetchDMs: async () => {
-    const zoneId = useZoneStore.getState().activeZoneId
-    if (!zoneId) return
     try {
-      const dms = await dmApi.list(zoneId)
+      const dms = await dmApi.list()
       set({ dmChannels: dms || [] })
     } catch {
       // ignore

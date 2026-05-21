@@ -12,22 +12,22 @@ describe('prefsStore', () => {
     vi.restoreAllMocks()
   })
 
-  it('local update is immediate; PUT is debounced', () => {
-    const putSpy = vi.spyOn(client.prefs, 'put').mockResolvedValue({ ok: true })
+  it('local update is immediate; PATCH is debounced', () => {
+    const patchSpy = vi.spyOn(client.settings, 'patch').mockResolvedValue({ ok: true })
 
     setCollapsed('sidebar.channels', true)
     expect(getCollapsed('sidebar.channels')).toBe(true)
-    expect(putSpy).not.toHaveBeenCalled()
+    expect(patchSpy).not.toHaveBeenCalled()
 
     vi.advanceTimersByTime(499)
-    expect(putSpy).not.toHaveBeenCalled()
+    expect(patchSpy).not.toHaveBeenCalled()
 
     vi.advanceTimersByTime(1)
-    expect(putSpy).toHaveBeenCalledTimes(1)
+    expect(patchSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('multiple rapid changes coalesce into a single PUT', () => {
-    const putSpy = vi.spyOn(client.prefs, 'put').mockResolvedValue({ ok: true })
+  it('multiple rapid changes coalesce into a single PATCH', () => {
+    const patchSpy = vi.spyOn(client.settings, 'patch').mockResolvedValue({ ok: true })
 
     setCollapsed('a', true)
     vi.advanceTimersByTime(100)
@@ -36,8 +36,8 @@ describe('prefsStore', () => {
     setCollapsed('c', true)
     vi.advanceTimersByTime(500)
 
-    expect(putSpy).toHaveBeenCalledTimes(1)
-    const sent = putSpy.mock.calls[0][0] as { ui: { collapsed: Record<string, boolean> } }
+    expect(patchSpy).toHaveBeenCalledTimes(1)
+    const sent = patchSpy.mock.calls[0][0] as { ui: { collapsed: Record<string, boolean> } }
     expect(sent.ui.collapsed).toEqual({ a: true, b: true, c: true })
   })
 
@@ -48,8 +48,8 @@ describe('prefsStore', () => {
     expect(getCollapsed('z')).toBe(true)
   })
 
-  it('PUT failure rolls back the local change', async () => {
-    vi.spyOn(client.prefs, 'put').mockRejectedValue(new Error('500'))
+  it('PATCH failure rolls back the local change', async () => {
+    vi.spyOn(client.settings, 'patch').mockRejectedValue(new Error('500'))
     setCollapsed('a', true)
     vi.advanceTimersByTime(500)
     await Promise.resolve()

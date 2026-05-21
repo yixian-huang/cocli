@@ -1,7 +1,6 @@
 import { create } from 'zustand'
 import type { ThreadSummary } from '@/lib/types'
 import { threads as threadsApi } from '@/api/client'
-import { useZoneStore } from '@/stores/zoneStore'
 
 interface ThreadInboxState {
   threads: ThreadSummary[]
@@ -20,11 +19,9 @@ export const useThreadInboxStore = create<ThreadInboxState>((set, get) => ({
   loading: false,
 
   fetchThreads: async () => {
-    const zoneId = useZoneStore.getState().activeZoneId
-    if (!zoneId) return
     set({ loading: true })
     try {
-      const data = await threadsApi.listAll(zoneId)
+      const data = await threadsApi.listAll()
       set({ threads: data.threads, loading: false })
     } catch {
       set({ loading: false })

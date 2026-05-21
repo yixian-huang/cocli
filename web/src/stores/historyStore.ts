@@ -15,7 +15,7 @@ interface HistoryState {
   setFilters: (filters: Partial<Omit<HistoryQuery, 'page' | 'pageSize'>>) => void
   setPage: (page: number) => void
   setPageSize: (pageSize: number) => void
-  fetch: (zoneId: string) => Promise<void>
+  fetch: () => Promise<void>
   reset: () => void
 }
 
@@ -37,11 +37,11 @@ export const useHistoryStore = create<HistoryState>((set, get) => ({
   setPage: (page) => set({ page }),
   setPageSize: (pageSize) => set({ pageSize, page: 1 }),
 
-  fetch: async (zoneId) => {
+  fetch: async () => {
     set({ loading: true, error: null })
     try {
       const { page, pageSize, filters } = get()
-      const res = await historyApi.list(zoneId, { ...filters, page, pageSize })
+      const res = await historyApi.list({ ...filters, page, pageSize })
       set({
         items: Array.isArray(res.items) ? res.items : [],
         total: res.total ?? 0,

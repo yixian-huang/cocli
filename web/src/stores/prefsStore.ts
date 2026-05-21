@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { prefs as prefsApi } from '@/api/client'
+import { settings as prefsApi } from '@/api/client'
 
 const DEBOUNCE_MS = 500
 
@@ -60,7 +60,7 @@ function schedulePut(snapshot: PrefsShape) {
   flushTimer = setTimeout(async () => {
     flushTimer = null
     try {
-      await prefsApi.put(snapshot as Record<string, unknown>)
+      await prefsApi.patch(snapshot as Record<string, unknown>)
     } catch {
       usePrefsStore.setState({ prefs: lastSnapshot })
     }
@@ -81,8 +81,8 @@ export function applyPrefsFromServer(next: PrefsShape) {
 
 export async function bootstrapPrefs() {
   try {
-    const { prefs } = await prefsApi.get()
-    applyPrefsFromServer(prefs as PrefsShape)
+    const data = await prefsApi.get()
+    applyPrefsFromServer(data as PrefsShape)
   } catch {
     /* leave defaults */
   }

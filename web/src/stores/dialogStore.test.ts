@@ -18,8 +18,8 @@ describe('dialogStore', () => {
   })
 
   it('payload is exposed for the active dialog', () => {
-    useDialogStore.getState().openAddDaemon({ zoneId: 'z1' })
-    expect(useDialogStore.getState().payload).toEqual({ zoneId: 'z1' })
+    useDialogStore.getState().openAddDaemon({ daemonId: 'd1' })
+    expect(useDialogStore.getState().payload).toEqual({ daemonId: 'd1' })
   })
 
   it('close() clears both active and payload', () => {
