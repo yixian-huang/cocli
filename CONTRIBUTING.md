@@ -48,6 +48,19 @@ A GitHub Action checks that every commit in a PR carries the
 - For changes touching > 1 crate, new public API surface, or schema
   migrations: open an RFC issue first (label `rfc:proposed`).
 
+## Daemon / driver layer scope
+
+`crates/cocli-driver` (the runtime trait) and `crates/cocli-driver-claude`
+are the canonical driver-layer crates for cocli local. The closed-source
+cocli cloud daemon uses a different internal trait shape (different crate
+names, additional drivers). The two codebases share Phase 0 heritage but
+**there is no sync mechanism** — patches to this repo are evaluated on
+their merits here, not cherry-picked from cloud.
+
+If you're considering a PR that adds a non-claude runtime driver (codex /
+gemini / kimi / etc.), please open an `rfc:proposed` issue first — that's
+out of M0 scope (claude-only) and needs scoping before code lands.
+
 ## Plugin authors
 
 See `docs/plugin-protocol.md` (lands in M0.0.4). Adapters live in their
