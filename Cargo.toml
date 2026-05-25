@@ -42,7 +42,7 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 sysinfo = "0.30"
-nix = { version = "0.27", features = ["signal"] }
+nix = { version = "0.31", features = ["signal"] }
 dirs = "5"
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 url = "=2.5.2"
