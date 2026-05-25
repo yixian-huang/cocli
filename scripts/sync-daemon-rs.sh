@@ -22,6 +22,8 @@ CRATES=(
     cocli-actor
     cocli-pidfile
     cocli-reaper
+    cocli-driver
+    cocli-runtime-pool
     cocli-driver-claude
     cocli-bridge-config
     cocli-agent

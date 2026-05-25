@@ -1,12 +1,9 @@
 [package]
-name = "cocli-reaper"
+name              = "cocli-reaper"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-authors.workspace = true
-description = "Boot-time orphan agent reaper with Go-parity 5-way ppid logic"
 
 [dependencies]
 cocli-pidfile = { path = "../cocli-pidfile" }
