@@ -1,18 +1,17 @@
 [package]
-name = "cocli-agent"
+name              = "cocli-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-authors.workspace = true
-description = "Agent actor (typestate) + dispatch router + delivery queue"
 
 [dependencies]
 cocli-protocol      = { path = "../cocli-protocol" }
 cocli-actor         = { path = "../cocli-actor" }
 cocli-pidfile       = { path = "../cocli-pidfile" }
+cocli-driver        = { path = "../cocli-driver" }
 cocli-driver-claude = { path = "../cocli-driver-claude" }
+cocli-runtime-pool  = { path = "../cocli-runtime-pool" }
 cocli-bridge-config = { path = "../cocli-bridge-config" }
 
 tokio       = { workspace = true }

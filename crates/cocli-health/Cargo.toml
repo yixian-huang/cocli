@@ -1,12 +1,9 @@
 [package]
-name = "cocli-health"
+name              = "cocli-health"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-repository.workspace = true
-authors.workspace = true
-description = "Idle detection actor — emits agent:session:idle on threshold cross"
 
 [dependencies]
 cocli-protocol = { path = "../cocli-protocol" }

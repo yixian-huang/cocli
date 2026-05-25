@@ -6,6 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 
+use chrono::Local;
+
 use async_trait::async_trait;
 use tokio::sync::{broadcast, mpsc};
 
@@ -33,6 +35,13 @@ pub struct DaemonConfig {
     pub claude_binary: std::path::PathBuf,
     pub bridge_binary: std::path::PathBuf,
     pub agent_workspace_root: std::path::PathBuf,
+    /// Multi-runtime driver registry. Threaded into every agent's `StartCfg`
+    /// so the actor can dispatch by `runtime_name` (capability-driven, not
+    /// `if name == "claude"`). Task 16 wires the populated registry from
+    /// `bin/cocli-daemon-rs/src/main.rs`; for now tests pass an empty
+    /// registry and the prod binary passes a registry containing only the
+    /// claude driver.
+    pub runtime_registry: Arc<cocli_runtime_pool::RuntimeRegistry>,
 }
 
 pub struct AgentRouter {
@@ -195,6 +204,12 @@ impl AgentRouter {
         };
         let cfg = StartCfg {
             claude_binary: self.cfg.claude_binary.clone(),
+            registry: Arc::clone(&self.cfg.runtime_registry),
+            runtime_name: if config.runtime.is_empty() {
+                "claude".to_string()
+            } else {
+                config.runtime.clone()
+            },
             bridge_binary: self.cfg.bridge_binary.clone(),
             workspace_root: self.cfg.agent_workspace_root.clone(),
             server_url: self.cfg.server_url.clone(),
@@ -207,6 +222,15 @@ impl AgentRouter {
             model: config.model.clone(),
             launch_id: launch_id.clone(),
             resume_session,
+            // Build the minimal bootstrap prompt so claude knows to use
+            // mcp__chat__send_message for all replies. Go parity:
+            // prompt.BuildSystemPrompt + ComposeSessionBootstrapPrompt.
+            system_prompt: build_bootstrap_prompt(config),
+            // Pass server-supplied env vars through (e.g. CHATRS_PROVIDER_KEY
+            // decrypted from the agent_provider_binding by the Go server).
+            env_vars: config.env_vars.clone().unwrap_or_default(),
+            no_bridge: false,
+            chat_bridge_args: Vec::new(),
         };
 
         let outbound = self.outbound_tx.clone();
@@ -277,6 +301,13 @@ impl AgentRouter {
     }
 
     async fn handle_deliver(&mut self, m: AgentDeliverMsg) {
+        tracing::info!(
+            agent_id = %m.agent_id,
+            seq = m.seq,
+            attempt = m.attempt,
+            content_len = m.message.content.len(),
+            "router: handle_deliver"
+        );
         if let Some(tx) = self.agents.get(&m.agent_id) {
             let agent_id = m.agent_id.clone();
             let seq = m.seq;
@@ -403,6 +434,47 @@ impl AgentRouter {
             }
         }
     }
+}
+
+/// Build the minimal bootstrap prompt injected as the first user message
+/// after claude's session init. Mirrors Go daemon:
+///   prompt.BuildSystemPrompt → prompt.ComposeSessionBootstrapPrompt
+///
+/// The MCP server is named "chat" (cocli-bridge-config), so claude
+/// exposes tools as `mcp__chat__send_message`, `mcp__chat__check_messages`,
+/// etc. The critical rule is: plain model output is NOT visible in channels —
+/// only `mcp__chat__send_message` creates visible messages.
+fn build_bootstrap_prompt(config: &cocli_protocol::types::AgentConfig) -> String {
+    let name = &config.name;
+    let display_name = if config.display_name.is_empty() {
+        name.as_str()
+    } else {
+        config.display_name.as_str()
+    };
+    let today = Local::now().format("%Y-%m-%d").to_string();
+
+    format!(
+        "You are {name} ({display_name}), an AI agent on the cocli platform.\n\
+         \n\
+         # Current Date\n\
+         Today is {today}.\n\
+         \n\
+         # Chat Tools (prefix \"mcp__chat__\")\n\
+         send_message, check_messages, read_history, list_tasks, create_tasks,\n\
+         claim_tasks, unclaim_task, update_task_status.\n\
+         \n\
+         # Critical Rules\n\
+         - ALL replies MUST go through mcp__chat__send_message — never output plain text as a reply.\n\
+         - Text you output as model text is NOT delivered to channel users. Only mcp__chat__send_message creates visible messages.\n\
+         - For every user message you receive, call mcp__chat__send_message with your reply.\n\
+         \n\
+         ---\n\
+         \n\
+         You have just started. Use mcp__chat__check_messages to see if there are any pending messages.",
+        name = name,
+        display_name = display_name,
+        today = today,
+    )
 }
 
 // ============================================================================
@@ -739,6 +811,10 @@ mod tests {
             claude_binary: std::path::PathBuf::from("/bin/false"),
             bridge_binary: std::path::PathBuf::from("/bin/false"),
             agent_workspace_root: std::path::PathBuf::from("/tmp/agent-test"),
+            // Empty registry: snapshot_is_empty_initially doesn't spawn.
+            // Tests that need real spawn semantics will land in/after Task 16
+            // once main.rs wires a populated registry.
+            runtime_registry: Arc::new(cocli_runtime_pool::RuntimeRegistry::new()),
         })
     }
 
