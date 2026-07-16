@@ -8,18 +8,35 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use std::path::PathBuf;
+
 use tokio::process::{Child, ChildStdin};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use cocli_driver::{Driver, DriverProcess, Event, SpawnContext};
+use cocli_driver_core::{Driver, DriverEvent};
 
-/// Stored in `Running` for drivers with `BusyDeliveryMode::Respawn` (gemini).
+/// Stored in `Running` for turn-exit drivers.
 /// Holds enough context to re-invoke `driver.spawn()` on each user message.
 pub struct RespawnCtx {
     pub driver: Arc<dyn Driver>,
-    /// Template for each new spawn — `initial_message` is overwritten per turn.
-    pub spawn_ctx_template: SpawnContext,
+    pub work_dir: PathBuf,
+    pub model: String,
+    pub server_url: String,
+    pub auth_token: String,
+    pub system_prompt: String,
+    pub env_vars: Vec<(String, String)>,
+}
+
+/// Where the actor stores the subprocess stdin handle.
+///
+/// Stateful drivers such as Codex bind stdin into their per-process driver,
+/// while ordinary persistent drivers keep it in the actor. Turn-exit drivers
+/// may close stdin entirely and deliver by respawning.
+pub enum ActorStdinStorage {
+    Local(ChildStdin),
+    ViaBinder,
+    Closed,
 }
 
 /// Marker trait for typestate phases. Each phase struct must implement this
@@ -42,33 +59,24 @@ pub struct Starting {
 /// Active session. Owns the child process + stdin half + the
 /// stdout-event receiver fed by the pump task spawned during `Idle::start`.
 ///
-/// **event_rx** carries generic `Event`s from the stdout pump (translated
-/// from runtime-specific lines by the driver's `parse_line_to_events`).
+/// **event_rx** carries generic `DriverEvent`s from the stdout pump.
 /// The outer run-loop in `router.rs` `select!`s on `mailbox.recv()` and
 /// `state.event_rx.recv()` together.
-///
-/// **process** is the driver-supplied per-spawn state machine. Phase A wires
-/// stdin encoding through `process.encode_stdin` (Task 14); Task 15+ will
-/// also route turn-cancel/interrupt through `process.interrupt`. The pump
-/// task currently still uses `parse_line_to_events` directly — Task 17 will
-/// promote it to `process.parse_line`, at which point `take_pending_actions`
-/// drain will start surfacing P3/G replay (codex) on the actor side.
 pub struct Running {
-    pub process_child: Child,
-    /// `None` for drivers that use `Stdio::null()` (e.g. gemini SingleShot).
-    pub process_stdin: Option<ChildStdin>,
-    /// Shared with the stdout-pump task for per-driver `parse_line` dispatch.
-    pub process: Arc<Mutex<Box<dyn DriverProcess>>>,
-    pub event_rx: mpsc::Receiver<Event>,
+    pub child: Child,
+    pub stdin_storage: ActorStdinStorage,
+    /// Per-process driver. Process-factory runtimes receive a fresh instance
+    /// for every spawn; stateless drivers reuse the registry instance.
+    pub driver: Arc<dyn Driver>,
+    pub event_rx: mpsc::Receiver<DriverEvent>,
     pub session_id: String,
     pub channel_id: Uuid,
     pub channel_name: String,
     pub last_stdout_at: Instant,
     pub turn_count: u64,
     pub launch_id: String,
-    /// Set for `BusyDeliveryMode::Respawn` drivers (gemini). Holds the driver +
-    /// spawn context template so the actor can re-invoke `driver.spawn()` on
-    /// each user message.
+    /// Set for turn-exit drivers. Holds the factory + owned spawn inputs so
+    /// the actor can re-invoke the core contract on each user message.
     pub respawn_ctx: Option<Arc<RespawnCtx>>,
 }
 

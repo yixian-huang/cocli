@@ -32,8 +32,6 @@ pub struct DaemonConfig {
     pub server_url: String,
     pub machine_id: String,
     pub api_key: String,
-    pub claude_binary: std::path::PathBuf,
-    pub bridge_binary: std::path::PathBuf,
     pub agent_workspace_root: std::path::PathBuf,
     /// Multi-runtime driver registry. Threaded into every agent's `StartCfg`
     /// so the actor can dispatch by `runtime_name` (capability-driven, not
@@ -189,14 +187,12 @@ impl AgentRouter {
             state: Idle,
         };
         let cfg = StartCfg {
-            claude_binary: self.cfg.claude_binary.clone(),
             registry: Arc::clone(&self.cfg.runtime_registry),
             runtime_name: if config.runtime.is_empty() {
                 "claude".to_string()
             } else {
                 config.runtime.clone()
             },
-            bridge_binary: self.cfg.bridge_binary.clone(),
             workspace_root: self.cfg.agent_workspace_root.clone(),
             server_url: self.cfg.server_url.clone(),
             // Phase 0a: reuse the machine API key as the per-agent bearer.
@@ -215,8 +211,6 @@ impl AgentRouter {
             // Pass server-supplied env vars through (e.g. CHATRS_PROVIDER_KEY
             // decrypted from the agent_provider_binding by the Go server).
             env_vars: config.env_vars.clone().unwrap_or_default(),
-            no_bridge: false,
-            chat_bridge_args: Vec::new(),
         };
 
         let outbound = self.outbound_tx.clone();
@@ -860,8 +854,6 @@ mod tests {
             server_url: "http://localhost:8080".to_string(),
             machine_id: "m1".to_string(),
             api_key: "k1".to_string(),
-            claude_binary: std::path::PathBuf::from("/bin/false"),
-            bridge_binary: std::path::PathBuf::from("/bin/false"),
             agent_workspace_root: std::path::PathBuf::from("/tmp/agent-test"),
             // Empty registry: snapshot_is_empty_initially doesn't spawn.
             // Tests that need real spawn semantics will land in/after Task 16

@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use cocli_driver::Driver;
+use cocli_driver_core::Driver;
 
 pub struct RuntimeRegistry {
-    drivers: HashMap<&'static str, Arc<dyn Driver>>,
+    drivers: HashMap<String, Arc<dyn Driver>>,
     /// `None` = all registered runtimes allowed.
     /// `Some(vec![])` = nothing allowed.
     allowlist: Option<Vec<String>>,
@@ -28,7 +28,7 @@ impl RuntimeRegistry {
     }
 
     pub fn register(&mut self, driver: Arc<dyn Driver>) {
-        self.drivers.insert(driver.name(), driver);
+        self.drivers.insert(driver.name().to_string(), driver);
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Driver>> {
@@ -40,8 +40,10 @@ impl RuntimeRegistry {
         self.drivers.get(name).cloned()
     }
 
-    pub fn names(&self) -> Vec<&'static str> {
-        self.drivers.keys().copied().collect()
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<_> = self.drivers.keys().cloned().collect();
+        names.sort();
+        names
     }
 }
 

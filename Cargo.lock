@@ -323,9 +323,7 @@ dependencies = [
  "base64",
  "chrono",
  "cocli-actor",
- "cocli-bridge-config",
- "cocli-driver",
- "cocli-driver-claude",
+ "cocli-driver-core",
  "cocli-pidfile",
  "cocli-protocol",
  "cocli-runtime-pool",
@@ -365,18 +363,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "url",
-]
-
-[[package]]
-name = "cocli-driver"
-version = "0.0.0"
-dependencies = [
- "async-trait",
- "nix",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -528,7 +514,11 @@ name = "cocli-runtime-pool"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "cocli-driver",
+ "cocli-driver-claude",
+ "cocli-driver-codex",
+ "cocli-driver-core",
+ "cocli-driver-cursor",
+ "cocli-driver-gemini",
  "tokio",
 ]
 

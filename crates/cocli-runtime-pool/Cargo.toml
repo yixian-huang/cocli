@@ -6,8 +6,12 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cocli-driver = { path = "../cocli-driver" }
-async-trait  = { workspace = true }
+cocli-driver-core = { path = "../cocli-driver-core" }
 
 [dev-dependencies]
-tokio = { workspace = true }
+async-trait         = { workspace = true }
+tokio               = { workspace = true }
+cocli-driver-claude = { path = "../cocli-driver-claude" }
+cocli-driver-cursor = { path = "../cocli-driver-cursor" }
+cocli-driver-codex  = { path = "../cocli-driver-codex" }
+cocli-driver-gemini = { path = "../cocli-driver-gemini" }
