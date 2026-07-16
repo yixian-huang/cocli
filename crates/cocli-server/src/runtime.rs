@@ -1,5 +1,6 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeSet, HashMap};
+use std::io;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant as StdInstant};
 
@@ -16,8 +17,8 @@ use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
     RuntimeError, RuntimeForkResult, RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo,
-    RuntimeMetricsSnapshot, RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService,
-    RuntimeSessionStatus,
+    RuntimeKnowledgeProvider, RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot,
+    RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -93,6 +94,7 @@ pub struct LocalRuntimeService {
     metrics: Arc<AgentMetrics>,
     recovery: Arc<Mutex<RecoveryStore>>,
     history_sink: OnceLock<Arc<dyn RuntimeHistorySink>>,
+    knowledge_provider: OnceLock<Arc<dyn RuntimeKnowledgeProvider>>,
 }
 
 #[derive(Clone)]
@@ -142,6 +144,7 @@ struct LocalSessionContext {
     metrics: Arc<AgentMetrics>,
     recovery: Arc<Mutex<RecoveryStore>>,
     history_sink: Option<Arc<dyn RuntimeHistorySink>>,
+    knowledge_provider: Option<Arc<dyn RuntimeKnowledgeProvider>>,
 }
 
 #[derive(Default)]
@@ -155,6 +158,14 @@ struct SessionTotals {
 
 struct QuotaRecovery {
     expected_at: Option<StdInstant>,
+}
+
+struct RuntimeRestartContext<'a> {
+    registry: &'a Arc<RuntimeRegistry>,
+    config: &'a LocalRuntimeConfig,
+    agent: &'a Agent,
+    metrics: &'a AgentMetrics,
+    knowledge_provider: Option<&'a Arc<dyn RuntimeKnowledgeProvider>>,
 }
 
 impl LocalRuntimeService {
@@ -197,11 +208,19 @@ impl LocalRuntimeService {
             metrics: Arc::new(AgentMetrics::default()),
             recovery: Arc::new(Mutex::new(RecoveryStore::new())),
             history_sink: OnceLock::new(),
+            knowledge_provider: OnceLock::new(),
         }
     }
 
     async fn spawn_session(&self, agent: &Agent) -> Result<LocalSessionHandle, RuntimeError> {
-        let running = start_running_actor(&self.registry, &self.config, agent).await?;
+        let knowledge_provider = self.knowledge_provider.get().cloned();
+        let running = start_running_actor(
+            &self.registry,
+            &self.config,
+            agent,
+            knowledge_provider.as_ref(),
+        )
+        .await?;
         let status = Arc::new(RwLock::new(runtime_status_for_running(agent, &running)));
         let started_at = Arc::new(RwLock::new(Instant::now()));
         let (command_tx, command_rx) = mpsc::channel(16);
@@ -229,6 +248,7 @@ impl LocalRuntimeService {
                     metrics,
                     recovery,
                     history_sink,
+                    knowledge_provider,
                 },
             )
             .await;
@@ -251,6 +271,7 @@ impl LocalRuntimeService {
 
     async fn session_handle(&self, agent: &Agent) -> Result<LocalSessionHandle, RuntimeError> {
         if let Some(handle) = self.live_session(agent.id).await {
+            self.refresh_runtime_knowledge(agent).await?;
             self.metrics.inc_local_session_reused();
             return Ok(handle);
         }
@@ -258,6 +279,7 @@ impl LocalRuntimeService {
         let start_lock = self.session_lock(agent.id).await;
         let _guard = start_lock.lock().await;
         if let Some(handle) = self.live_session(agent.id).await {
+            self.refresh_runtime_knowledge(agent).await?;
             self.metrics.inc_local_session_reused();
             return Ok(handle);
         }
@@ -322,12 +344,24 @@ impl LocalRuntimeService {
             .await
             .map_err(|_| RuntimeError::NotFound("agent runtime reply channel closed".to_owned()))?
     }
+
+    async fn refresh_runtime_knowledge(&self, agent: &Agent) -> Result<(), RuntimeError> {
+        let Some(provider) = self.knowledge_provider.get() else {
+            return Ok(());
+        };
+        let snapshot = provider.snapshot(agent).await?;
+        materialize_runtime_knowledge(&self.config, agent, &snapshot).await
+    }
 }
 
 #[async_trait]
 impl RuntimeService for LocalRuntimeService {
     fn set_history_sink(&self, sink: Arc<dyn RuntimeHistorySink>) {
         let _ = self.history_sink.set(sink);
+    }
+
+    fn set_knowledge_provider(&self, provider: Arc<dyn RuntimeKnowledgeProvider>) {
+        let _ = self.knowledge_provider.set(provider);
     }
 
     async fn list(&self) -> Vec<RuntimeInfo> {
@@ -491,10 +525,189 @@ impl RuntimeService for LocalRuntimeService {
     }
 }
 
+const MEMORY_MANIFEST_PATH: &str = "memory/.cocli-memory-manifest.json";
+const MAX_PROMPT_MEMORY_INDEX_CHARS: usize = 16 * 1024;
+
+async fn materialize_runtime_knowledge(
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+    snapshot: &RuntimeKnowledgeSnapshot,
+) -> Result<(), RuntimeError> {
+    let workspace_dir = config.workspace_root.join(agent.id.to_string());
+    tokio::fs::create_dir_all(&workspace_dir)
+        .await
+        .map_err(|error| runtime_knowledge_io_error("create workspace", &error))?;
+
+    let previous_paths = read_memory_manifest(&workspace_dir).await;
+    let mut current_paths = BTreeSet::new();
+    for file in &snapshot.files {
+        if !current_paths.insert(file.relative_path.clone()) {
+            return Err(RuntimeError::Delivery(format!(
+                "duplicate runtime knowledge path: {}",
+                file.relative_path
+            )));
+        }
+        let target = managed_workspace_path(&workspace_dir, &file.relative_path)
+            .map_err(|error| runtime_knowledge_io_error("resolve memory mirror path", &error))?;
+        atomic_write_file(&target, file.content.as_bytes(), true)
+            .await
+            .map_err(|error| runtime_knowledge_io_error("write memory mirror", &error))?;
+    }
+
+    for stale in previous_paths.difference(&current_paths) {
+        let target = match managed_workspace_path(&workspace_dir, stale) {
+            Ok(target) => target,
+            Err(error) => {
+                tracing::warn!(path = stale, %error, "ignored invalid stale memory mirror path");
+                continue;
+            }
+        };
+        match tokio::fs::remove_file(&target).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    path = %target.display(),
+                    %error,
+                    "failed to remove stale memory mirror file"
+                );
+            }
+        }
+    }
+
+    let manifest_path = managed_workspace_path(&workspace_dir, MEMORY_MANIFEST_PATH)
+        .map_err(|error| runtime_knowledge_io_error("resolve memory manifest", &error))?;
+    let managed: Vec<&str> = current_paths.iter().map(String::as_str).collect();
+    let manifest = serde_json::to_vec_pretty(&managed).map_err(|error| {
+        RuntimeError::Delivery(format!(
+            "failed to serialize runtime memory manifest: {error}"
+        ))
+    })?;
+    atomic_write_file(&manifest_path, &manifest, false)
+        .await
+        .map_err(|error| runtime_knowledge_io_error("write memory manifest", &error))?;
+    Ok(())
+}
+
+async fn read_memory_manifest(workspace_dir: &Path) -> BTreeSet<String> {
+    let path = match managed_workspace_path(workspace_dir, MEMORY_MANIFEST_PATH) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(%error, "failed to resolve runtime memory manifest");
+            return BTreeSet::new();
+        }
+    };
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return BTreeSet::new(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "failed to read runtime memory manifest");
+            return BTreeSet::new();
+        }
+    };
+    match serde_json::from_slice::<Vec<String>>(&bytes) {
+        Ok(paths) => paths.into_iter().collect(),
+        Err(error) => {
+            tracing::warn!(path = %path.display(), %error, "ignored invalid runtime memory manifest");
+            BTreeSet::new()
+        }
+    }
+}
+
+fn managed_workspace_path(workspace_dir: &Path, relative_path: &str) -> io::Result<PathBuf> {
+    let relative = Path::new(relative_path);
+    if relative.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "absolute runtime knowledge path is not allowed",
+        ));
+    }
+    let mut components = relative.components();
+    if components.next() != Some(Component::Normal("memory".as_ref())) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "runtime knowledge path must be inside memory/",
+        ));
+    }
+    if components.any(|component| !matches!(component, Component::Normal(_))) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "runtime knowledge path contains unsafe components",
+        ));
+    }
+    let file_name = relative.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime knowledge path must name a file",
+        )
+    })?;
+    let parent = relative.parent().unwrap_or(Path::new(""));
+    let parent_relative = parent.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime knowledge path must be valid UTF-8",
+        )
+    })?;
+    let resolved_parent = cocli_agent::workspace::resolve_within(workspace_dir, parent_relative)?;
+    Ok(resolved_parent.join(file_name))
+}
+
+async fn atomic_write_file(path: &Path, content: &[u8], read_only: bool) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "runtime knowledge file has no parent",
+        )
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("memory");
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
+    tokio::fs::write(&temporary, content).await?;
+    set_runtime_file_permissions(&temporary, read_only).await?;
+    if let Err(error) = tokio::fs::rename(&temporary, path).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn set_runtime_file_permissions(path: &Path, read_only: bool) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = if read_only { 0o400 } else { 0o600 };
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await
+}
+
+#[cfg(not(unix))]
+async fn set_runtime_file_permissions(path: &Path, read_only: bool) -> io::Result<()> {
+    let mut permissions = tokio::fs::metadata(path).await?.permissions();
+    permissions.set_readonly(read_only);
+    tokio::fs::set_permissions(path, permissions).await
+}
+
+fn runtime_knowledge_io_error(action: &str, error: &io::Error) -> RuntimeError {
+    RuntimeError::Delivery(format!("{action}: {error}"))
+}
+
+fn truncate_memory_index(index: &str) -> String {
+    let mut chars = index.chars();
+    let truncated: String = chars.by_ref().take(MAX_PROMPT_MEMORY_INDEX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{truncated}\n\n<!-- index truncated for runtime prompt -->")
+    } else {
+        truncated
+    }
+}
+
 async fn start_running_actor(
     registry: &Arc<RuntimeRegistry>,
     config: &LocalRuntimeConfig,
     agent: &Agent,
+    knowledge_provider: Option<&Arc<dyn RuntimeKnowledgeProvider>>,
 ) -> Result<AgentActor<cocli_agent::state::Running>, RuntimeError> {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let (outbound_tx, _outbound_rx) = mpsc::channel(16);
@@ -509,15 +722,26 @@ async fn start_running_actor(
         state: Idle,
     };
     let workspace_dir = config.workspace_root.join(agent.id.to_string());
+    let knowledge = match knowledge_provider {
+        Some(provider) => {
+            let knowledge = provider.snapshot(agent).await?;
+            materialize_runtime_knowledge(config, agent, &knowledge).await?;
+            knowledge
+        }
+        None => RuntimeKnowledgeSnapshot::default(),
+    };
     let current_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let model = agent.model.as_deref().unwrap_or_default();
     let system_prompt = build_local_system_prompt(&LocalPromptConfig {
         agent_id: &agent.id.to_string(),
+        channel_id: &agent.channel_id.to_string(),
         agent_name: &agent.name,
         runtime: &agent.runtime,
         model,
         workspace_dir: &workspace_dir,
         current_date: &current_date,
+        agent_memory_index: &truncate_memory_index(&knowledge.agent_index),
+        channel_memory_index: &truncate_memory_index(&knowledge.channel_index),
     });
     let initial_prompt =
         compose_session_bootstrap_prompt(&system_prompt, LOCAL_INITIALIZATION_PROMPT);
@@ -575,12 +799,16 @@ fn runtime_status_for_running(
 }
 
 async fn restart_with_watchdog(
-    registry: &Arc<RuntimeRegistry>,
-    config: &LocalRuntimeConfig,
-    agent: &Agent,
+    context: RuntimeRestartContext<'_>,
     commands: &mut mpsc::Receiver<LocalSessionCommand>,
-    metrics: &AgentMetrics,
 ) -> Option<AgentActor<cocli_agent::state::Running>> {
+    let RuntimeRestartContext {
+        registry,
+        config,
+        agent,
+        metrics,
+        knowledge_provider,
+    } = context;
     let agent_id = agent.id.to_string();
     let mut watchdog = WatchdogStore::new();
     watchdog.register_down(&agent_id, &agent.name);
@@ -619,7 +847,7 @@ async fn restart_with_watchdog(
             }
         }
 
-        match start_running_actor(registry, config, agent).await {
+        match start_running_actor(registry, config, agent, knowledge_provider).await {
             Ok(running) => {
                 metrics.inc_local_watchdog_restart();
                 metrics.inc_local_session_started();
@@ -646,14 +874,18 @@ async fn restart_with_watchdog(
 }
 
 async fn recover_from_quota(
-    registry: &Arc<RuntimeRegistry>,
-    config: &LocalRuntimeConfig,
-    agent: &Agent,
+    context: RuntimeRestartContext<'_>,
     commands: &mut mpsc::Receiver<LocalSessionCommand>,
-    metrics: &AgentMetrics,
     recovery: &Mutex<RecoveryStore>,
     expected_at: Option<StdInstant>,
 ) -> Option<AgentActor<cocli_agent::state::Running>> {
+    let RuntimeRestartContext {
+        registry,
+        config,
+        agent,
+        metrics,
+        knowledge_provider,
+    } = context;
     let agent_id = agent.id.to_string();
     let mut delay = expected_at
         .map(|expected| expected.saturating_duration_since(StdInstant::now()))
@@ -683,7 +915,7 @@ async fn recover_from_quota(
         }
 
         metrics.inc_recovery_probe_scheduled();
-        match start_running_actor(registry, config, agent).await {
+        match start_running_actor(registry, config, agent, knowledge_provider).await {
             Ok(running) => {
                 let mut recovery = recovery.lock().await;
                 recovery.complete_probe(&agent_id, StdInstant::now(), ProbeResult::Recovered);
@@ -906,6 +1138,7 @@ async fn run_local_session(
         metrics,
         recovery,
         history_sink,
+        knowledge_provider,
     } = context;
     let turn_timeout = config.turn_timeout;
     let mut active: Option<ActiveReply> = None;
@@ -1296,11 +1529,14 @@ async fn run_local_session(
                             state.recovering = true;
                         }
                         match recover_from_quota(
-                            &registry,
-                            &config,
-                            &agent,
+                            RuntimeRestartContext {
+                                registry: &registry,
+                                config: &config,
+                                agent: &agent,
+                                metrics: &metrics,
+                                knowledge_provider: knowledge_provider.as_ref(),
+                            },
                             &mut commands,
-                            &metrics,
                             &recovery,
                             quota.expected_at,
                         ).await {
@@ -1392,11 +1628,14 @@ async fn run_local_session(
                             state.active_turn = false;
                         }
                         match recover_from_quota(
-                            &registry,
-                            &config,
-                            &agent,
+                            RuntimeRestartContext {
+                                registry: &registry,
+                                config: &config,
+                                agent: &agent,
+                                metrics: &metrics,
+                                knowledge_provider: knowledge_provider.as_ref(),
+                            },
                             &mut commands,
-                            &metrics,
                             &recovery,
                             quota.expected_at,
                         ).await {
@@ -1445,11 +1684,14 @@ async fn run_local_session(
                     }
                     record_session_end(&history_sink, &agent, &running, &totals, "error").await;
                     match restart_with_watchdog(
-                        &registry,
-                        &config,
-                        &agent,
+                        RuntimeRestartContext {
+                            registry: &registry,
+                            config: &config,
+                            agent: &agent,
+                            metrics: &metrics,
+                            knowledge_provider: knowledge_provider.as_ref(),
+                        },
                         &mut commands,
-                        &metrics,
                     ).await {
                         Some(restarted) => {
                             running = restarted;
@@ -1792,6 +2034,86 @@ mod tests {
             } else {
                 vec![DriverEvent::Unknown]
             }
+        }
+
+        fn encode_stdin_message(
+            &self,
+            text: &str,
+            _session_id: Option<&str>,
+            _mode: MessageMode,
+        ) -> Option<String> {
+            Some(encode_test_line(text))
+        }
+
+        fn supports_turn_cancel(&self) -> bool {
+            true
+        }
+
+        fn skill_search_paths(&self, _workspace: &Path) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+
+    struct PromptCaptureDriver {
+        prompts: Arc<StdMutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Driver for PromptCaptureDriver {
+        fn name(&self) -> &str {
+            "prompt-capture"
+        }
+
+        fn mcp_tool_prefix(&self) -> &str {
+            ""
+        }
+
+        fn busy_delivery_mode(&self) -> BusyDeliveryMode {
+            BusyDeliveryMode::Direct
+        }
+
+        fn requires_initial_prompt(&self) -> bool {
+            true
+        }
+
+        fn env_propagation(&self) -> EnvPropagation {
+            EnvPropagation::Inherit
+        }
+
+        fn skill_compatibility(&self) -> SkillCompatibility {
+            SkillCompatibility::Supported
+        }
+
+        fn prepare_workspace(
+            &self,
+            _work_dir: &Path,
+            _config: &DriverAgentConfig,
+            _agent_id: &str,
+            system_prompt: &str,
+        ) -> Result<(), DriverError> {
+            self.prompts
+                .lock()
+                .expect("prompt capture mutex")
+                .push(system_prompt.to_owned());
+            Ok(())
+        }
+
+        fn spawn(&self, _cfg: &SpawnConfig) -> Result<tokio::process::Child, DriverError> {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(
+                    "printf 'session\\n'; while IFS= read -r line; do printf 'text:%s\\n' \"$line\"; printf 'turn\\n'; done",
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(DriverError::Io)
+        }
+
+        fn parse_event(&self, line: &str) -> Vec<DriverEvent> {
+            FakeDriver.parse_event(line)
         }
 
         fn encode_stdin_message(
@@ -2411,6 +2733,167 @@ mod tests {
 
         assert!(reply.contains("ship it"));
         assert_eq!(service.list().await[0].models, vec!["test-model"]);
+    }
+
+    #[tokio::test]
+    async fn materializes_sqlite_memory_and_refreshes_live_runtime_mirror() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let store = cocli_store::Store::in_memory()
+            .await
+            .expect("store should open");
+        let channel = store
+            .create_channel("knowledge")
+            .await
+            .expect("channel should persist");
+        let agent = store
+            .create_agent(
+                channel.id,
+                "builder",
+                "prompt-capture",
+                Some("test-model"),
+                cocli_store::AgentStatus::Running,
+            )
+            .await
+            .expect("agent should persist");
+        store
+            .write_memory_topic(
+                cocli_store::MemoryNamespace::Agent(agent.id),
+                "project",
+                "alpha",
+                "Alpha decisions",
+                "Keep the local platform SQLite-first.",
+                Some("test"),
+                None,
+            )
+            .await
+            .expect("agent memory should persist");
+        store
+            .write_memory_topic(
+                cocli_store::MemoryNamespace::Channel(channel.id),
+                "feedback",
+                "beta",
+                "Shared feedback",
+                "Keep all agents aligned.",
+                Some("test"),
+                None,
+            )
+            .await
+            .expect("channel memory should persist");
+
+        let prompts = Arc::new(StdMutex::new(Vec::new()));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(PromptCaptureDriver {
+            prompts: Arc::clone(&prompts),
+        }));
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            RuntimeCatalog::default(),
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        service.set_knowledge_provider(Arc::new(cocli_api::SqliteRuntimeKnowledgeProvider::new(
+            store.clone(),
+        )));
+
+        service.start(&agent).await.expect("runtime should start");
+
+        let workspace = temp.path().join("workspaces").join(agent.id.to_string());
+        let agent_topic = workspace.join("memory/project_alpha.md");
+        let channel_topic = workspace
+            .join("memory/channels")
+            .join(channel.id.to_string())
+            .join("feedback_beta.md");
+        assert!(tokio::fs::read_to_string(&agent_topic)
+            .await
+            .expect("agent mirror")
+            .contains("SQLite-first"));
+        assert!(tokio::fs::read_to_string(&channel_topic)
+            .await
+            .expect("channel mirror")
+            .contains("all agents aligned"));
+
+        let prompt = prompts
+            .lock()
+            .expect("prompt capture mutex")
+            .last()
+            .cloned()
+            .expect("captured system prompt");
+        assert!(prompt.contains("Alpha decisions"));
+        assert!(prompt.contains("Shared feedback"));
+        assert!(prompt.contains(&format!("memory/channels/{}", channel.id)));
+
+        store
+            .write_memory_topic(
+                cocli_store::MemoryNamespace::Agent(agent.id),
+                "reference",
+                "gamma",
+                "Gamma reference",
+                "Refresh this before the next live turn.",
+                Some("test"),
+                None,
+            )
+            .await
+            .expect("new memory should persist");
+        let message = test_message(&agent, 1, "refresh memory");
+        service
+            .reply(&agent, &message)
+            .await
+            .expect("live runtime reply");
+        assert!(
+            tokio::fs::read_to_string(workspace.join("memory/reference_gamma.md"))
+                .await
+                .expect("refreshed mirror")
+                .contains("next live turn")
+        );
+        service.stop(agent.id).await.expect("runtime should stop");
+    }
+
+    #[tokio::test]
+    async fn memory_manifest_removes_only_previously_managed_files() {
+        let temp = tempdir().expect("temp directory");
+        let agent = test_agent("fake");
+        let config = LocalRuntimeConfig {
+            workspace_root: temp.path().join("workspaces"),
+            server_url: "http://127.0.0.1:8090".to_owned(),
+            auth_token: String::new(),
+            turn_timeout: Duration::from_secs(2),
+            watchdog_backoff: [Duration::from_millis(1); 5],
+            recovery_backoff: [Duration::from_millis(1); 5],
+        };
+        let first = RuntimeKnowledgeSnapshot {
+            files: vec![cocli_api::RuntimeKnowledgeFile {
+                relative_path: "memory/project_alpha.md".to_owned(),
+                content: "managed".to_owned(),
+            }],
+            agent_index: String::new(),
+            channel_index: String::new(),
+        };
+        materialize_runtime_knowledge(&config, &agent, &first)
+            .await
+            .expect("first materialization");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+        tokio::fs::write(workspace.join("memory/manual.md"), "user-owned")
+            .await
+            .expect("manual file");
+
+        materialize_runtime_knowledge(&config, &agent, &RuntimeKnowledgeSnapshot::default())
+            .await
+            .expect("second materialization");
+
+        assert!(!workspace.join("memory/project_alpha.md").exists());
+        assert_eq!(
+            tokio::fs::read_to_string(workspace.join("memory/manual.md"))
+                .await
+                .expect("manual file should remain"),
+            "user-owned"
+        );
     }
 
     #[tokio::test]

@@ -169,6 +169,123 @@ pub trait RuntimeHistorySink: Send + Sync {
     async fn record(&self, event: RuntimeHistoryEvent) -> Result<(), StoreError>;
 }
 
+/// One SQLite-backed memory document materialized into a runtime workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeKnowledgeFile {
+    /// Safe path relative to the per-agent workspace.
+    pub relative_path: String,
+    /// Complete Markdown document body.
+    pub content: String,
+}
+
+/// Durable knowledge loaded before a runtime starts or handles another turn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RuntimeKnowledgeSnapshot {
+    /// Files managed by cocli inside the runtime workspace.
+    pub files: Vec<RuntimeKnowledgeFile>,
+    /// Agent-private L1 memory index.
+    pub agent_index: String,
+    /// Current-channel L2 memory index.
+    pub channel_index: String,
+}
+
+/// Runtime-neutral source for durable local knowledge.
+#[async_trait]
+pub trait RuntimeKnowledgeProvider: Send + Sync {
+    async fn snapshot(&self, agent: &Agent) -> Result<RuntimeKnowledgeSnapshot, RuntimeError>;
+}
+
+/// SQLite knowledge provider installed by the local server.
+#[derive(Clone, Debug)]
+pub struct SqliteRuntimeKnowledgeProvider {
+    store: Store,
+}
+
+impl SqliteRuntimeKnowledgeProvider {
+    pub fn new(store: Store) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl RuntimeKnowledgeProvider for SqliteRuntimeKnowledgeProvider {
+    async fn snapshot(&self, agent: &Agent) -> Result<RuntimeKnowledgeSnapshot, RuntimeError> {
+        let agent_namespace = MemoryNamespace::Agent(agent.id);
+        let channel_namespace = MemoryNamespace::Channel(agent.channel_id);
+        let (agent_entries, channel_entries) = tokio::try_join!(
+            self.store.list_memory_namespace(agent_namespace),
+            self.store.list_memory_namespace(channel_namespace),
+        )
+        .map_err(|error| {
+            RuntimeError::Delivery(format!("failed to load durable runtime memory: {error}"))
+        })?;
+
+        let agent_index = memory_index_from_entries(&agent_entries, &agent_namespace.index_path());
+        let channel_index =
+            memory_index_from_entries(&channel_entries, &channel_namespace.index_path());
+        let mut files = Vec::with_capacity(agent_entries.len() + channel_entries.len());
+        append_runtime_knowledge_files(
+            &mut files,
+            agent_entries,
+            &agent_namespace.prefix(),
+            "memory",
+        )?;
+        append_runtime_knowledge_files(
+            &mut files,
+            channel_entries,
+            &channel_namespace.prefix(),
+            &format!("memory/channels/{}", agent.channel_id),
+        )?;
+        files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+
+        Ok(RuntimeKnowledgeSnapshot {
+            files,
+            agent_index,
+            channel_index,
+        })
+    }
+}
+
+fn memory_index_from_entries(entries: &[MemoryDocumentEntry], index_path: &str) -> String {
+    entries
+        .iter()
+        .find(|entry| entry.path == index_path)
+        .map(|entry| entry.body.clone())
+        .unwrap_or_default()
+}
+
+fn append_runtime_knowledge_files(
+    output: &mut Vec<RuntimeKnowledgeFile>,
+    entries: Vec<MemoryDocumentEntry>,
+    source_prefix: &str,
+    target_prefix: &str,
+) -> Result<(), RuntimeError> {
+    for entry in entries {
+        let relative = entry.path.strip_prefix(source_prefix).ok_or_else(|| {
+            RuntimeError::Delivery(format!(
+                "invalid durable memory path outside namespace: {}",
+                entry.path
+            ))
+        })?;
+        if relative.is_empty()
+            || relative.starts_with('/')
+            || relative
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(RuntimeError::Delivery(format!(
+                "invalid durable memory path: {}",
+                entry.path
+            )));
+        }
+        output.push(RuntimeKnowledgeFile {
+            relative_path: format!("{target_prefix}/{relative}"),
+            content: entry.body,
+        });
+    }
+    Ok(())
+}
+
 /// SQLite implementation installed by the local server after it opens the store.
 #[derive(Clone, Debug)]
 pub struct SqliteRuntimeHistorySink {
@@ -323,6 +440,9 @@ pub enum RuntimeError {
 pub trait RuntimeService: Send + Sync {
     /// Installs the durable history sink after the local store is available.
     fn set_history_sink(&self, _sink: Arc<dyn RuntimeHistorySink>) {}
+
+    /// Installs the durable knowledge provider after the local store is available.
+    fn set_knowledge_provider(&self, _provider: Arc<dyn RuntimeKnowledgeProvider>) {}
 
     /// Returns the current runtime catalog.
     async fn list(&self) -> Vec<RuntimeInfo>;

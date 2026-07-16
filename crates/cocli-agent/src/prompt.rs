@@ -11,11 +11,14 @@ pub const LOCAL_INITIALIZATION_PROMPT: &str =
 #[derive(Clone, Copy, Debug)]
 pub struct LocalPromptConfig<'a> {
     pub agent_id: &'a str,
+    pub channel_id: &'a str,
     pub agent_name: &'a str,
     pub runtime: &'a str,
     pub model: &'a str,
     pub workspace_dir: &'a Path,
     pub current_date: &'a str,
+    pub agent_memory_index: &'a str,
+    pub channel_memory_index: &'a str,
 }
 
 /// Builds the persistent system contract for a local cocli agent.
@@ -57,6 +60,8 @@ When the runtime exposes the local `chat` MCP server, these tools are available 
 - `read_history`: inspect bounded channel history without consuming inbox state.
 - `list_tasks`, `create_tasks`, `claim_tasks`, `unclaim_task`, `update_task_status`, `add_task_dependency`, and `get_task_dependencies`: coordinate durable channel work. Claim a task before doing substantial task work, respect blocked dependencies, and keep status/progress current.
 - `set_working_state`, `get_working_state`, and `clear_working_state`: persist and recover a concise work anchor across turns or runtime restarts.
+- `memory_index_list`, `memory_read`, `memory_write`, and `memory_move`: read or update durable L1/L2 memory through SQLite.
+- `mcp_wiki_search`, `mcp_wiki_read`, `mcp_wiki_write`, and `mcp_wiki_list`: use the independent local knowledge base.
 
 Use collaboration tools only when they advance the requested work. Do not invent memory or knowledge-base tools that are not exposed by the runtime.
 "#,
@@ -76,6 +81,30 @@ Your persistent workspace is:
 - You may work outside this directory only when the user request explicitly places another local path in scope.
 "#,
         config.workspace_dir.display()
+    )
+    .expect("write to string");
+    writeln!(
+        out,
+        r#"
+
+# Durable Memory
+
+- SQLite is the source of truth. The generated `memory/` tree is a read-only runtime mirror.
+- Use the memory tools to write or move durable memory; do not edit generated mirror files directly.
+- Agent-private L1 memory is mirrored under `memory/`.
+- Current-channel L2 memory is mirrored under `memory/channels/{}`.
+
+## L1 Agent Memory Index
+
+{}
+
+## L2 Channel Memory Index
+
+{}
+"#,
+        config.channel_id,
+        memory_index_or_empty(config.agent_memory_index),
+        memory_index_or_empty(config.channel_memory_index),
     )
     .expect("write to string");
     out.push_str(
@@ -106,6 +135,15 @@ Your persistent workspace is:
     out
 }
 
+fn memory_index_or_empty(index: &str) -> &str {
+    let index = index.trim();
+    if index.is_empty() {
+        "(no durable memory entries)"
+    } else {
+        index
+    }
+}
+
 /// Joins a persistent system contract with the per-spawn user turn.
 ///
 /// Some local CLIs support a dedicated system-prompt channel while others only
@@ -132,11 +170,14 @@ mod tests {
     fn local_prompt_describes_direct_reply_and_persistent_workspace() {
         let prompt = build_local_system_prompt(&LocalPromptConfig {
             agent_id: "agent-1",
+            channel_id: "channel-1",
             agent_name: "builder",
             runtime: "codex",
             model: "",
             workspace_dir: Path::new("/tmp/cocli/agent-1"),
             current_date: "2026-07-16",
+            agent_memory_index: "- project_alpha.md — Alpha decisions",
+            channel_memory_index: "- feedback_beta.md — Shared feedback",
         });
 
         assert!(prompt.contains("plain text in your final model response is delivered"));
@@ -147,6 +188,11 @@ mod tests {
         assert!(prompt.contains("Do not duplicate your final reply"));
         assert!(prompt.contains("claim_tasks"));
         assert!(prompt.contains("set_working_state"));
+        assert!(prompt.contains("SQLite is the source of truth"));
+        assert!(prompt.contains("project_alpha.md"));
+        assert!(prompt.contains("feedback_beta.md"));
+        assert!(prompt.contains("memory_write"));
+        assert!(prompt.contains("mcp_wiki_search"));
         assert!(!prompt.contains("MUST go through send_message"));
     }
 
