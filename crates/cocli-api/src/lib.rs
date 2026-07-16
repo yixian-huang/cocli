@@ -23,6 +23,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+mod skill_http;
+mod skill_import;
+
 /// Runtime discovery information consumed by the local product surface.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RuntimeInfo {
@@ -645,7 +648,7 @@ impl RuntimeService for EchoRuntimeService {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     store: Store,
     runtime: Arc<dyn RuntimeService>,
     deliveries: Arc<DeliveryCoordinator>,
@@ -866,6 +869,7 @@ pub fn router_with_delivery_config(
     let deliveries = DeliveryCoordinator::new(store.clone(), Arc::clone(&runtime), delivery_config);
     deliveries.spawn();
     Router::new()
+        .merge(skill_http::router())
         .route("/healthz", get(health))
         .route("/api/metrics", get(runtime_metrics))
         .route("/api/deliveries/stats", get(delivery_stats))
@@ -2579,6 +2583,7 @@ struct ErrorResponse {
 struct ApiError {
     status: StatusCode,
     message: String,
+    body: Option<serde_json::Value>,
 }
 
 impl ApiError {
@@ -2586,6 +2591,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            body: None,
         }
     }
 
@@ -2593,6 +2599,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            body: None,
         }
     }
 
@@ -2600,6 +2607,7 @@ impl ApiError {
         Self {
             status: StatusCode::CONFLICT,
             message: message.into(),
+            body: None,
         }
     }
 
@@ -2607,6 +2615,20 @@ impl ApiError {
         Self {
             status: StatusCode::FORBIDDEN,
             message: message.into(),
+            body: None,
+        }
+    }
+
+    fn json(status: StatusCode, body: serde_json::Value) -> Self {
+        let message = body
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("request failed")
+            .to_owned();
+        Self {
+            status,
+            message,
+            body: Some(body),
         }
     }
 }
@@ -2631,18 +2653,30 @@ impl From<StoreError> for ApiError {
             StoreError::MemoryTopicTooLarge { .. }
             | StoreError::MemoryNamespaceFull { .. }
             | StoreError::MemoryIndexFull { .. } => Some(StatusCode::UNPROCESSABLE_ENTITY),
+            StoreError::SkillLibraryNotFound(_) | StoreError::SkillInstallNotFound(_) => {
+                Some(StatusCode::NOT_FOUND)
+            }
+            StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
+                Some(StatusCode::CONFLICT)
+            }
+            StoreError::InvalidSkillName(_)
+            | StoreError::InvalidSkillFilePath(_)
+            | StoreError::InvalidSkillFileSize { .. } => Some(StatusCode::BAD_REQUEST),
+            StoreError::SkillLibraryTooLarge { .. } => Some(StatusCode::UNPROCESSABLE_ENTITY),
             _ => None,
         };
         if let Some(status) = status {
             return Self {
                 status,
                 message: error.to_string(),
+                body: None,
             };
         }
         tracing::error!(%error, "local store request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "local store request failed".to_owned(),
+            body: None,
         }
     }
 }
@@ -2659,12 +2693,16 @@ impl From<RuntimeError> for ApiError {
         Self {
             status,
             message: error.to_string(),
+            body: None,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        if let Some(body) = self.body {
+            return (self.status, Json(body)).into_response();
+        }
         (
             self.status,
             Json(ErrorResponse {

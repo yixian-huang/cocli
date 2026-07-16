@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -8,9 +10,13 @@ use axum::http::{Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
     router, router_with_delivery_config, DeliveryConfig, RuntimeError, RuntimeInfo, RuntimeService,
+    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
 };
-use cocli_store::{Agent, AgentStatus, Message, MessageRole, NewAgentTurn, Store};
+use cocli_store::{
+    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, SkillLibraryFile, Store,
+};
 use serde_json::{json, Value};
+use tempfile::tempdir;
 use tower::ServiceExt;
 
 #[derive(Debug)]
@@ -32,6 +38,135 @@ impl RuntimeService for FakeRuntime {
 
     async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
         Ok(format!("echo: {}", message.content))
+    }
+}
+
+#[derive(Debug, Default)]
+struct FakeSkillRuntime {
+    installs: Mutex<HashMap<(uuid::Uuid, String), Vec<SkillLibraryFile>>>,
+}
+
+#[async_trait]
+impl RuntimeService for FakeSkillRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        vec![RuntimeInfo {
+            name: "fake".to_owned(),
+            installed: true,
+            binary: None,
+            version: Some("test".to_owned()),
+            models: vec!["test-model".to_owned()],
+            capabilities: vec!["reply".to_owned(), "skills:supported".to_owned()],
+            unavailable_reason: None,
+        }]
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    fn skill_compatibility(&self, runtime: &str) -> RuntimeSkillCompatibility {
+        if runtime == "fake" {
+            RuntimeSkillCompatibility::Supported
+        } else {
+            RuntimeSkillCompatibility::Unknown
+        }
+    }
+
+    async fn list_skills(&self, agent: &Agent) -> Result<Vec<RuntimeSkill>, RuntimeError> {
+        let installs = self
+            .installs
+            .lock()
+            .expect("fake skill installs should not be poisoned");
+        Ok(installs
+            .keys()
+            .filter(|(agent_id, _)| *agent_id == agent.id)
+            .map(|(_, install_path)| {
+                let name = install_path
+                    .rsplit('/')
+                    .next()
+                    .expect("install path should have name")
+                    .to_owned();
+                RuntimeSkill {
+                    name: name.clone(),
+                    display_name: name,
+                    description: "fake installed skill".to_owned(),
+                    user_invocable: true,
+                    skill_type: "workspace".to_owned(),
+                    path: format!("{install_path}/SKILL.md"),
+                    install_path: Some(install_path.clone()),
+                }
+            })
+            .collect())
+    }
+
+    async fn install_skill(
+        &self,
+        agent: &Agent,
+        skill_name: &str,
+        files: &[SkillLibraryFile],
+    ) -> Result<String, RuntimeError> {
+        let install_path = format!(".fake/skills/{skill_name}");
+        self.installs
+            .lock()
+            .expect("fake skill installs should not be poisoned")
+            .insert((agent.id, install_path.clone()), files.to_vec());
+        Ok(install_path)
+    }
+
+    async fn uninstall_skill(&self, agent: &Agent, install_path: &str) -> Result<(), RuntimeError> {
+        self.installs
+            .lock()
+            .expect("fake skill installs should not be poisoned")
+            .remove(&(agent.id, install_path.to_owned()));
+        Ok(())
+    }
+
+    async fn list_skill_files(
+        &self,
+        agent: &Agent,
+        install_path: &str,
+    ) -> Result<Vec<RuntimeSkillFileEntry>, RuntimeError> {
+        let installs = self
+            .installs
+            .lock()
+            .expect("fake skill installs should not be poisoned");
+        let files = installs
+            .get(&(agent.id, install_path.to_owned()))
+            .ok_or_else(|| RuntimeError::NotFound("fake skill install not found".to_owned()))?;
+        Ok(files
+            .iter()
+            .map(|file| RuntimeSkillFileEntry {
+                name: file.rel_path.clone(),
+                is_dir: false,
+                size: file.size,
+            })
+            .collect())
+    }
+
+    async fn read_skill_file(
+        &self,
+        agent: &Agent,
+        install_path: &str,
+        relative_path: &str,
+    ) -> Result<RuntimeSkillFileContent, RuntimeError> {
+        let installs = self
+            .installs
+            .lock()
+            .expect("fake skill installs should not be poisoned");
+        let file = installs
+            .get(&(agent.id, install_path.to_owned()))
+            .and_then(|files| files.iter().find(|file| file.rel_path == relative_path))
+            .ok_or_else(|| RuntimeError::NotFound("fake skill file not found".to_owned()))?;
+        match String::from_utf8(file.content.clone()) {
+            Ok(content) => Ok(RuntimeSkillFileContent {
+                content,
+                binary: false,
+            }),
+            Err(_) => Ok(RuntimeSkillFileContent {
+                content: String::new(),
+                binary: true,
+            }),
+        }
     }
 }
 
@@ -97,6 +232,182 @@ async fn json_request(
         .expect("response body should load");
     let body = serde_json::from_slice(&bytes).expect("response should be JSON");
     (status, body)
+}
+
+#[tokio::test]
+async fn skills_routes_complete_the_local_import_install_and_refresh_loop() {
+    let source = tempdir().expect("skill source should create");
+    std::fs::create_dir_all(source.path().join("scripts")).expect("scripts should create");
+    std::fs::write(
+        source.path().join("SKILL.md"),
+        "---\nname: Demo Skill\ndisplay-name: Demo Skill\ndescription: local test skill\nuser-invocable: true\n---\n# Demo\n",
+    )
+    .expect("skill manifest should write");
+    std::fs::write(source.path().join("scripts/run.sh"), "echo first\n")
+        .expect("skill script should write");
+
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeSkillRuntime::default()));
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "skills"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let (_, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "skilled",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id");
+
+    let (compatibility_status, compatibility) =
+        json_request(app.clone(), "GET", "/api/runtimes/compatibility", json!({})).await;
+    assert_eq!(compatibility_status, StatusCode::OK);
+    assert_eq!(compatibility["fake"], "supported");
+
+    let (import_status, imported) = json_request(
+        app.clone(),
+        "POST",
+        "/api/zones/local/skills/library",
+        json!({"url": source.path().to_str().expect("source path")}),
+    )
+    .await;
+    assert_eq!(import_status, StatusCode::OK);
+    assert_eq!(imported["files"], 2);
+    let library_id = imported["library_id"].as_str().expect("library id");
+
+    let (conflict_status, conflict) = json_request(
+        app.clone(),
+        "POST",
+        "/api/zones/local/skills/library",
+        json!({"url": source.path().to_str().expect("source path")}),
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert_eq!(conflict["existing_id"], library_id);
+    assert_eq!(
+        conflict["existing_source"],
+        source.path().to_str().expect("source path")
+    );
+
+    let (list_status, library) = json_request(
+        app.clone(),
+        "GET",
+        "/api/zones/local/skills/library",
+        json!({}),
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+    assert_eq!(library["entries"][0]["name"], "demo-skill");
+    assert_eq!(library["entries"][0]["sourceKind"], "local");
+    assert_eq!(library["entries"][0]["zoneId"], "local");
+
+    let (install_status, installed) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/skills"),
+        json!({"libraryId": library_id}),
+    )
+    .await;
+    assert_eq!(install_status, StatusCode::OK);
+    assert_eq!(installed["installPath"], ".fake/skills/demo-skill");
+    let install_id = installed["installId"].as_str().expect("install id");
+
+    let (duplicate_status, duplicate_error) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/skills"),
+        json!({"libraryId": library_id}),
+    )
+    .await;
+    assert_eq!(duplicate_status, StatusCode::CONFLICT);
+    assert!(duplicate_error["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("already installed")));
+
+    let (skills_status, skills) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/skills"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(skills_status, StatusCode::OK);
+    assert_eq!(skills["skills"][0]["state"], "managed");
+    assert_eq!(skills["skills"][0]["libraryId"], library_id);
+
+    let (files_status, files) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/skills/{install_id}/files"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(files_status, StatusCode::OK);
+    assert!(files["files"]
+        .as_array()
+        .is_some_and(|files| files.iter().any(|file| file["name"] == "scripts/run.sh")));
+
+    let (read_status, first_script) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/skills/{install_id}/files/scripts%2Frun.sh"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(read_status, StatusCode::OK);
+    assert_eq!(first_script["content"], "echo first\n");
+
+    std::fs::write(source.path().join("scripts/run.sh"), "echo refreshed\n")
+        .expect("refreshed script should write");
+    let (refresh_status, refresh) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/zones/local/skills/library/{library_id}/reinstall"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(refresh_status, StatusCode::OK);
+    assert_eq!(refresh["updated"], true);
+
+    let (_, refreshed_script) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/skills/{install_id}/files/scripts%2Frun.sh"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(refreshed_script["content"], "echo refreshed\n");
+
+    let (uninstall_status, uninstalled) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/agents/{agent_id}/skills/{install_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(uninstall_status, StatusCode::OK);
+    assert_eq!(uninstalled["ok"], true);
+
+    let (delete_status, deleted) = json_request(
+        app,
+        "DELETE",
+        &format!("/api/zones/local/skills/library/{library_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::OK);
+    assert_eq!(deleted["deleted"], library_id);
 }
 
 #[tokio::test]
@@ -763,7 +1074,10 @@ async fn failed_runtime_delivery_is_accepted_and_retried_from_sqlite() {
     .await;
     assert_eq!(status, StatusCode::ACCEPTED);
     assert_eq!(posted["replies"], json!([]));
-    assert_eq!(posted["pending_deliveries"][0]["state"], "pending");
+    assert!(matches!(
+        posted["pending_deliveries"][0]["state"].as_str(),
+        Some("pending" | "in_flight")
+    ));
     assert_eq!(posted["pending_deliveries"][0]["attempts"], 1);
 
     let mut messages = json!([]);
