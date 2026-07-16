@@ -201,6 +201,24 @@ pub fn initial_oss_runtime_specs() -> Vec<RuntimeSpec> {
             RuntimeModel::new("gemini-2.5-pro", "Gemini 2.5 Pro"),
             RuntimeModel::new("gemini-2.5-flash", "Gemini 2.5 Flash"),
         ]),
+        RuntimeSpec::new("kimi", "kimi").with_models(vec![
+            RuntimeModel::new("kimi-k2", "Kimi K2 (128K)"),
+            RuntimeModel::new("kimi-k1.5", "Kimi K1.5 (200K)"),
+        ]),
+        RuntimeSpec::new("grok", "grok").with_models(vec![
+            RuntimeModel::new("grok-composer-2.5-fast", "Grok Composer 2.5 Fast"),
+            RuntimeModel::new("grok-build", "Grok Build"),
+        ]),
+        RuntimeSpec::new("chatrs", "chatrs"),
+        RuntimeSpec::new("opencode", "opencode").with_models(vec![
+            RuntimeModel::new("default", "Configured Default / Auto"),
+            RuntimeModel::new("deepseek/deepseek-v4-pro", "DeepSeek V4 Pro (OpenCode)"),
+            RuntimeModel::new(
+                "openrouter/anthropic/claude-opus-4.5",
+                "Claude Opus 4.5 via OpenRouter",
+            ),
+            RuntimeModel::new("fusecode/opus[1m]", "Opus 1M via FuseCode"),
+        ]),
     ]
 }
 

@@ -8,9 +8,10 @@
   runtime name, installed binary, version, models, driver capabilities, and an
   explicit `unavailable_reason`.
 
-The default `initial_oss_runtime_specs()` covers Claude, Cursor, Codex, and
-Gemini. Callers may override binary paths or provide additional specs without
-changing the registry contract.
+The default `initial_oss_runtime_specs()` covers every OSS-owned production
+adapter: Claude, Cursor, Codex, Gemini, Kimi, Grok, Chatrs, and OpenCode.
+Callers may override binary paths or provide additional specs without changing
+the registry contract.
 
 Discovery is local and deterministic. `SystemRuntimeProbe` searches `PATH`,
 checks executable files, and invokes the configured version arguments. It does

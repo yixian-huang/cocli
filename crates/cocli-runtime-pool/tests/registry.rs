@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
 use cocli_driver_codex::CodexDriver;
 use cocli_driver_core::types::{
@@ -10,6 +11,9 @@ use cocli_driver_core::types::{
 use cocli_driver_core::{Driver, DriverError, DriverEvent};
 use cocli_driver_cursor::CursorDriver;
 use cocli_driver_gemini::GeminiDriver;
+use cocli_driver_grok::GrokDriver;
+use cocli_driver_kimi::KimiDriver;
+use cocli_driver_opencode::OpenCodeDriver;
 use cocli_runtime_pool::{initial_oss_runtime_specs, RuntimeProbe, RuntimeRegistry};
 
 struct InstalledProbe;
@@ -122,7 +126,11 @@ fn initial_oss_adapter_matrix_registers_through_core_trait_objects() {
         Arc::new(ClaudeDriver::new(binary.clone(), bridge.clone())),
         Arc::new(CursorDriver::new(binary.clone(), bridge.clone())),
         Arc::new(CodexDriver::new(binary.clone(), bridge.clone())),
-        Arc::new(GeminiDriver::new(binary, bridge)),
+        Arc::new(GeminiDriver::new(binary.clone(), bridge.clone())),
+        Arc::new(KimiDriver::new(binary.clone(), bridge.clone())),
+        Arc::new(GrokDriver::new(binary.clone())),
+        Arc::new(ChatrsDriver::new(binary.clone(), bridge.clone())),
+        Arc::new(OpenCodeDriver::new(binary, bridge)),
     ];
 
     let mut registry = RuntimeRegistry::new();
@@ -133,13 +141,19 @@ fn initial_oss_adapter_matrix_registers_through_core_trait_objects() {
     assert_eq!(
         registry.names(),
         vec![
+            "chatrs".to_string(),
             "claude".to_string(),
             "codex".to_string(),
             "cursor".to_string(),
             "gemini".to_string(),
+            "grok".to_string(),
+            "kimi".to_string(),
+            "opencode".to_string(),
         ]
     );
-    for runtime in ["claude", "cursor", "codex", "gemini"] {
+    for runtime in [
+        "claude", "cursor", "codex", "gemini", "kimi", "grok", "chatrs", "opencode",
+    ] {
         assert_eq!(registry.get(runtime).unwrap().name(), runtime);
     }
 
@@ -147,10 +161,14 @@ fn initial_oss_adapter_matrix_registers_through_core_trait_objects() {
     assert_eq!(
         catalog.installed_names(),
         vec![
+            "chatrs".to_string(),
             "claude".to_string(),
             "codex".to_string(),
             "cursor".to_string(),
             "gemini".to_string(),
+            "grok".to_string(),
+            "kimi".to_string(),
+            "opencode".to_string(),
         ]
     );
     assert!(

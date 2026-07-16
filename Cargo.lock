@@ -366,6 +366,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cocli-driver-chatrs"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "cocli-driver-claude"
 version = "0.0.0"
 dependencies = [
@@ -435,6 +450,53 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "cocli-driver-grok"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cocli-driver-kimi"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "cocli-driver-opencode"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -514,11 +576,15 @@ name = "cocli-runtime-pool"
 version = "0.0.0"
 dependencies = [
  "async-trait",
+ "cocli-driver-chatrs",
  "cocli-driver-claude",
  "cocli-driver-codex",
  "cocli-driver-core",
  "cocli-driver-cursor",
  "cocli-driver-gemini",
+ "cocli-driver-grok",
+ "cocli-driver-kimi",
+ "cocli-driver-opencode",
  "serde",
  "serde_json",
  "tempfile",

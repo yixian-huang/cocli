@@ -1,0 +1,23 @@
+[package]
+name              = "cocli-driver-kimi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cocli-driver-core = { path = "../cocli-driver-core" }
+cocli-bridge-config = { path = "../cocli-bridge-config" }
+
+dirs        = { workspace = true }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tracing     = { workspace = true }
+thiserror   = { workspace = true }
+async-trait = { workspace = true }
+uuid        = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio    = { workspace = true }
