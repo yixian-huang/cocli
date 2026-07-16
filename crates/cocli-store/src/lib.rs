@@ -10,6 +10,9 @@ use sqlx_core::row::Row;
 use sqlx_sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use uuid::Uuid;
 
+mod wiki;
+pub use wiki::{WikiBacklink, WikiPage, WikiPageSummary, WikiRevision};
+
 /// Errors returned by the local SQLite store.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -62,6 +65,29 @@ pub enum StoreError {
     /// A task dependency would introduce a cycle.
     #[error("circular task dependency detected")]
     TaskDependencyCycle,
+    /// A wiki write used a stale optimistic-concurrency version.
+    #[error(
+        "wiki version conflict at path {path:?}: current={current_version}, ifVersion={attempted_version}"
+    )]
+    WikiVersionConflict {
+        /// Canonical page path.
+        path: String,
+        /// Version currently stored.
+        current_version: i64,
+        /// Version supplied by the caller.
+        attempted_version: i64,
+    },
+    /// A requested wiki page does not exist.
+    #[error("wiki page not found: {0}")]
+    WikiPageNotFound(String),
+    /// A requested wiki revision does not exist.
+    #[error("wiki revision {version} not found for page {path}")]
+    WikiRevisionNotFound {
+        /// Canonical page path.
+        path: String,
+        /// Requested historical version.
+        version: i64,
+    },
 }
 
 /// A local conversation channel.
@@ -2124,6 +2150,7 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
         include_str!("../migrations/0003_agent_bridge_state.sql"),
         include_str!("../migrations/0004_tasks.sql"),
         include_str!("../migrations/0005_runtime_history.sql"),
+        include_str!("../migrations/0006_wiki.sql"),
     ] {
         for statement in migration.split(';') {
             let statement = statement.trim();

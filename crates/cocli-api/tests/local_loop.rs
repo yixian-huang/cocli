@@ -100,6 +100,126 @@ async fn json_request(
 }
 
 #[tokio::test]
+async fn wiki_routes_match_browser_contract_and_preserve_history() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let target_path = "roadmap%2Flocal-loop";
+    let source_path = "notes%2Fimplementation";
+
+    let (created_status, created) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/wiki/pages/{target_path}"),
+        json!({
+            "title": "Local Loop",
+            "content": "# Local Loop\n\nInitial.",
+            "tags": ["roadmap", "local"],
+            "updatedBy": "planner"
+        }),
+    )
+    .await;
+    assert_eq!(created_status, StatusCode::OK);
+    assert_eq!(created["version"], 1);
+    assert_eq!(created["path"], "roadmap/local-loop");
+
+    let (source_status, _) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/wiki/pages/{source_path}"),
+        json!({
+            "title": "Implementation",
+            "content": "See [[roadmap/local-loop]].",
+            "tags": ["notes"]
+        }),
+    )
+    .await;
+    assert_eq!(source_status, StatusCode::OK);
+
+    let (list_status, listed) = json_request(
+        app.clone(),
+        "GET",
+        "/api/wiki/pages?q=Local&tag=roadmap",
+        json!({}),
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+    assert_eq!(listed["pages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(listed["pages"][0]["title"], "Local Loop");
+
+    let (_, updated) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/wiki/pages/{target_path}"),
+        json!({
+            "title": "Local Product Loop",
+            "content": "# Local Product Loop\n\nComplete.",
+            "tags": ["roadmap"],
+            "ifVersion": 1
+        }),
+    )
+    .await;
+    assert_eq!(updated["version"], 2);
+
+    let (conflict_status, conflict) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/wiki/pages/{target_path}"),
+        json!({
+            "title": "Stale",
+            "content": "stale",
+            "ifVersion": 1
+        }),
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert!(conflict["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("current=2")));
+
+    let (revision_status, revisions) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/wiki/pages/{target_path}/revisions"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(revision_status, StatusCode::OK);
+    assert_eq!(revisions["revisions"][0]["version"], 2);
+    assert_eq!(revisions["revisions"][1]["version"], 1);
+
+    let (backlink_status, backlinks) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/wiki/pages/{target_path}/backlinks"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(backlink_status, StatusCode::OK);
+    assert_eq!(backlinks["backlinks"][0]["path"], "notes/implementation");
+
+    let (revert_status, reverted) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/wiki/pages/{target_path}/revert"),
+        json!({"version": 1}),
+    )
+    .await;
+    assert_eq!(revert_status, StatusCode::OK);
+    assert_eq!(reverted["page"]["version"], 3);
+    assert_eq!(reverted["page"]["title"], "Local Loop");
+
+    let (get_status, page) = json_request(
+        app,
+        "GET",
+        &format!("/api/wiki/pages/{target_path}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert_eq!(page["content"], "# Local Loop\n\nInitial.");
+}
+
+#[tokio::test]
 async fn post_message_persists_user_message_and_fake_agent_reply() {
     let store = Store::in_memory().await.expect("store should open");
     let app = router(store, Arc::new(FakeRuntime));

@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use cocli_store::{
     Agent, AgentActivity, AgentSession, AgentSessionFinish, AgentStatus, AgentTurn, Channel,
     Delivery, DeliveryStats, Message, MessageRole, NewAgentTurn, Store, StoreError, Task,
-    TaskStatus,
+    TaskStatus, WikiBacklink, WikiPage, WikiPageSummary, WikiRevision,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -698,6 +698,14 @@ pub fn router_with_delivery_config(
         .route("/api/agents/:agent_id/turn/steer", post(steer_turn))
         .route("/api/agents/:agent_id/thread/fork", post(fork_thread))
         .route("/api/agents/:agent_id/recovery/probe", post(probe_recovery))
+        .route("/api/wiki/pages", get(list_wiki_pages))
+        .route(
+            "/api/wiki/pages/:path",
+            get(get_wiki_page).put(upsert_wiki_page),
+        )
+        .route("/api/wiki/pages/:path/revisions", get(list_wiki_revisions))
+        .route("/api/wiki/pages/:path/backlinks", get(list_wiki_backlinks))
+        .route("/api/wiki/pages/:path/revert", post(revert_wiki_page))
         .route(
             "/api/bridge/agents/:agent_id/messages",
             post(bridge_send_message),
@@ -1043,6 +1051,148 @@ async fn probe_recovery(
 ) -> Result<Json<RuntimeRecoveryProbeResult>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
     Ok(Json(state.runtime.probe_recovery(&agent).await?))
+}
+
+#[derive(Deserialize)]
+struct WikiListQuery {
+    q: Option<String>,
+    tag: Option<String>,
+    #[serde(default = "default_wiki_limit")]
+    limit: i64,
+}
+
+#[derive(Serialize)]
+struct WikiPagesResponse {
+    pages: Vec<WikiPageSummary>,
+}
+
+async fn list_wiki_pages(
+    State(state): State<AppState>,
+    Query(query): Query<WikiListQuery>,
+) -> Result<Json<WikiPagesResponse>, ApiError> {
+    Ok(Json(WikiPagesResponse {
+        pages: state
+            .store
+            .list_wiki_pages(query.q.as_deref(), query.tag.as_deref(), query.limit)
+            .await?,
+    }))
+}
+
+async fn get_wiki_page(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<Json<WikiPage>, ApiError> {
+    let path = validate_wiki_path(&path)?;
+    state
+        .store
+        .get_wiki_page(path)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("wiki page not found"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpsertWikiPageRequest {
+    title: String,
+    content: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    updated_by: Option<String>,
+    reason: Option<String>,
+    if_version: Option<i64>,
+}
+
+async fn upsert_wiki_page(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Json(request): Json<UpsertWikiPageRequest>,
+) -> Result<Json<WikiPage>, ApiError> {
+    let path = validate_wiki_path(&path)?;
+    let title = non_empty("wiki title", &request.title)?;
+    Ok(Json(
+        state
+            .store
+            .upsert_wiki_page(
+                path,
+                title,
+                &request.content,
+                &request.tags,
+                request.updated_by.as_deref(),
+                request.reason.as_deref(),
+                request.if_version,
+            )
+            .await?,
+    ))
+}
+
+#[derive(Serialize)]
+struct WikiRevisionsResponse {
+    revisions: Vec<WikiRevision>,
+}
+
+async fn list_wiki_revisions(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<Json<WikiRevisionsResponse>, ApiError> {
+    let path = validate_wiki_path(&path)?;
+    if state.store.get_wiki_page(path).await?.is_none() {
+        return Err(ApiError::not_found("wiki page not found"));
+    }
+    Ok(Json(WikiRevisionsResponse {
+        revisions: state.store.list_wiki_revisions(path, 200).await?,
+    }))
+}
+
+#[derive(Serialize)]
+struct WikiBacklinksResponse {
+    backlinks: Vec<WikiBacklink>,
+}
+
+async fn list_wiki_backlinks(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+) -> Result<Json<WikiBacklinksResponse>, ApiError> {
+    let path = validate_wiki_path(&path)?;
+    if state.store.get_wiki_page(path).await?.is_none() {
+        return Err(ApiError::not_found("wiki page not found"));
+    }
+    Ok(Json(WikiBacklinksResponse {
+        backlinks: state.store.list_wiki_backlinks(path).await?,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RevertWikiPageRequest {
+    version: i64,
+    #[serde(default, rename = "updatedBy")]
+    updated_by: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WikiPageResponse {
+    page: WikiPage,
+}
+
+async fn revert_wiki_page(
+    State(state): State<AppState>,
+    Path(path): Path<String>,
+    Json(request): Json<RevertWikiPageRequest>,
+) -> Result<Json<WikiPageResponse>, ApiError> {
+    let path = validate_wiki_path(&path)?;
+    if request.version <= 0 {
+        return Err(ApiError::bad_request("wiki version must be positive"));
+    }
+    Ok(Json(WikiPageResponse {
+        page: state
+            .store
+            .revert_wiki_page(path, request.version, request.updated_by.as_deref())
+            .await?,
+    }))
+}
+
+fn default_wiki_limit() -> i64 {
+    50
 }
 
 #[derive(Deserialize)]
@@ -1800,6 +1950,24 @@ fn non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str, ApiError> {
     }
 }
 
+fn validate_wiki_path(path: &str) -> Result<&str, ApiError> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+        || !path
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.' | b'/'))
+    {
+        return Err(ApiError::bad_request(
+            "wiki path must be a safe relative path",
+        ));
+    }
+    Ok(path)
+}
+
 fn parse_task_status_filter(status: Option<&str>) -> Result<Option<TaskStatus>, ApiError> {
     match status.map(str::trim).filter(|value| !value.is_empty()) {
         None | Some("all") => Ok(None),
@@ -1863,6 +2031,10 @@ impl From<StoreError> for ApiError {
             | StoreError::InvalidTaskTransition { .. }
             | StoreError::TaskDependencyCycle => Some(StatusCode::CONFLICT),
             StoreError::TaskDependencySelf => Some(StatusCode::BAD_REQUEST),
+            StoreError::WikiPageNotFound(_) | StoreError::WikiRevisionNotFound { .. } => {
+                Some(StatusCode::NOT_FOUND)
+            }
+            StoreError::WikiVersionConflict { .. } => Some(StatusCode::CONFLICT),
             _ => None,
         };
         if let Some(status) = status {
