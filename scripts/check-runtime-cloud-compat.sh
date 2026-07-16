@@ -58,14 +58,23 @@ for crate in "${runtime_crates[@]}"; do
     echo "missing OSS runtime crate: $crate_path" >&2
     exit 1
   fi
-  CRATE="$crate" CRATE_PATH="$crate_path" perl -0pi -e '
-    s{
-      \Q$ENV{CRATE}\E \s* = \s*
-      \{ [^}\n]* \}
-    }{
-      qq{$ENV{CRATE} = { path = "$ENV{CRATE_PATH}" }}
-    }gex
-  ' "$SHADOW/Cargo.toml"
+  CRATE="$crate" CRATE_PATH="$crate_path" python3 - "$SHADOW/Cargo.toml" <<'PY'
+import os
+import pathlib
+import re
+import sys
+
+manifest = pathlib.Path(sys.argv[1])
+crate = os.environ["CRATE"]
+crate_path = os.environ["CRATE_PATH"]
+body = manifest.read_text()
+pattern = rf"(?m)^{re.escape(crate)}\s*=\s*\{{[^}}\n]*\}}"
+replacement = f'{crate} = {{ path = "{crate_path}" }}'
+body, count = re.subn(pattern, replacement, body)
+if count != 1:
+    raise SystemExit(f"expected one dependency declaration for {crate}, found {count}")
+manifest.write_text(body)
+PY
 done
 
 for crate in "${runtime_crates[@]}"; do
