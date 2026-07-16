@@ -18,6 +18,7 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     setupFiles: ['./src/test/setup.ts'],
+    exclude: ['**/node_modules/**'],
   },
   server: {
     // 5173 is often taken by other Vite apps on the same machine.

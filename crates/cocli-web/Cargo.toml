@@ -12,7 +12,13 @@ description = "Embeds web/dist/ assets into the cocli binary (rust-embed)"
 axum = { workspace = true }
 mime_guess = { workspace = true }
 rust-embed = { workspace = true, optional = true }
+tokio = { workspace = true }
 
 [features]
 default = []
 embed-web = ["dep:rust-embed"]
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

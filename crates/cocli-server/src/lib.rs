@@ -16,6 +16,8 @@ pub struct ServerConfig {
     pub bind: SocketAddr,
     /// Directory containing the SQLite database.
     pub data_dir: PathBuf,
+    /// Optional Vite build directory for the local web workspace.
+    pub web_dir: Option<PathBuf>,
 }
 
 /// A bound server ready to accept requests.
@@ -41,7 +43,7 @@ impl Server {
         let listener = TcpListener::bind(config.bind).await?;
         Ok(Self {
             listener,
-            app: router(store, runtime),
+            app: router(store, runtime).merge(cocli_web::router(config.web_dir)),
             data_dir: config.data_dir,
         })
     }

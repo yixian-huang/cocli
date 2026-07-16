@@ -23,6 +23,10 @@ struct Args {
     /// Enable the deterministic fake runtime for local-loop development.
     #[arg(long, env = "COCLI_FAKE_RUNTIME")]
     fake_runtime: bool,
+
+    /// Directory containing the built cocli web assets.
+    #[arg(long, env = "COCLI_WEB_DIR")]
+    web_dir: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -31,6 +35,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
 
     let data_dir = args.data_dir.map(Ok).unwrap_or_else(default_data_dir)?;
+    let web_dir = args.web_dir.or_else(default_web_dir);
     let runtime: Arc<dyn RuntimeService> = if args.fake_runtime {
         Arc::new(EchoRuntimeService)
     } else {
@@ -40,6 +45,7 @@ async fn main() -> Result<()> {
         ServerConfig {
             bind: args.bind,
             data_dir,
+            web_dir: web_dir.clone(),
         },
         runtime,
     )
@@ -51,8 +57,18 @@ async fn main() -> Result<()> {
 
     println!("cocli listening on http://{local_addr}");
     println!("data directory: {}", server.data_dir().display());
+    if let Some(web_dir) = web_dir {
+        println!("web assets: {}", web_dir.display());
+    }
 
     server.run().await.context("cocli local server stopped")
+}
+
+fn default_web_dir() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .map(|directory| directory.join("web").join("dist"))
+        .filter(|directory| directory.is_dir())
 }
 
 fn default_data_dir() -> Result<PathBuf> {

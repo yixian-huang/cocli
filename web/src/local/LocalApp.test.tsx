@@ -1,0 +1,90 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { LocalApp } from './LocalApp'
+
+const runtime = {
+  name: 'fake',
+  installed: true,
+  binary: null,
+  version: 'local-loop',
+  models: ['test-model'],
+  capabilities: ['reply'],
+  unavailable_reason: null,
+}
+
+const channel = {
+  id: 'channel-1',
+  name: 'product-loop',
+  created_at: '2026-07-16T09:00:00Z',
+}
+
+function jsonResponse(body: unknown, status = 200) {
+  return Promise.resolve(new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  }))
+}
+
+describe('LocalApp', () => {
+  beforeEach(() => {
+    Element.prototype.scrollIntoView = vi.fn()
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === '/api/runtimes') return jsonResponse([runtime])
+      if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
+      if (path === '/api/agents' && !init?.method) return jsonResponse([])
+      if (path === `/api/channels/${channel.id}/messages` && !init?.method) return jsonResponse([])
+      if (path === '/api/agents' && init?.method === 'POST') {
+        return jsonResponse({
+          id: 'agent-1',
+          channel_id: channel.id,
+          name: 'builder',
+          runtime: 'fake',
+          model: 'test-model',
+          status: 'running',
+          created_at: '2026-07-16T09:01:00Z',
+        }, 201)
+      }
+      if (path === `/api/channels/${channel.id}/messages` && init?.method === 'POST') {
+        return jsonResponse({
+          message: {
+            id: 'message-1',
+            channel_id: channel.id,
+            seq: 1,
+            agent_id: null,
+            role: 'user',
+            content: 'Ship the loop',
+            created_at: '2026-07-16T09:02:00Z',
+          },
+          replies: [{
+            id: 'message-2',
+            channel_id: channel.id,
+            seq: 2,
+            agent_id: 'agent-1',
+            role: 'assistant',
+            content: 'echo: Ship the loop',
+            created_at: '2026-07-16T09:02:01Z',
+          }],
+        }, 201)
+      }
+      return jsonResponse({ error: `Unhandled ${path}` }, 500)
+    }))
+  })
+
+  it('creates an agent and runs a task through the local API', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+
+    expect(await screen.findByText('builder')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Task for #product-loop'), {
+      target: { value: 'Ship the loop' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Run task' }))
+
+    expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Ship the loop')).toBeInTheDocument())
+  })
+})
