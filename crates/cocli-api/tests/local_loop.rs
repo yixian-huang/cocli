@@ -111,3 +111,69 @@ async fn post_message_persists_user_message_and_fake_agent_reply() {
 
     assert_eq!(messages.as_array().map(Vec::len), Some(2));
 }
+
+#[tokio::test]
+async fn runtime_control_routes_expose_status_and_typed_unsupported_errors() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "controls"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let (_, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "fake",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id");
+
+    let (status_code, status) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/runtime"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status_code, StatusCode::OK);
+    assert_eq!(status["agent_id"], agent_id);
+    assert_eq!(status["running"], false);
+    assert_eq!(status["tier"], "healthy");
+
+    let (steer_status, steer_error) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/turn/steer"),
+        json!({"input": "redirect"}),
+    )
+    .await;
+    assert_eq!(steer_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(steer_error["error"]
+        .as_str()
+        .expect("steer error")
+        .contains("not supported"));
+
+    let (fork_status, fork_error) = json_request(
+        app,
+        "POST",
+        &format!("/api/agents/{agent_id}/thread/fork"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(fork_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(fork_error["error"]
+        .as_str()
+        .expect("fork error")
+        .contains("not supported"));
+}

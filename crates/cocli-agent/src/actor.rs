@@ -638,6 +638,47 @@ impl AgentActor<Running> {
         Ok(())
     }
 
+    /// Redirect the active turn through the runtime-native steering API.
+    pub async fn turn_steer(&self, input: &str) -> Result<(), String> {
+        if !self.state.driver.supports_turn_steer() {
+            return Err(format!(
+                "{} does not support turn steering",
+                self.state.driver.name()
+            ));
+        }
+        self.state
+            .driver
+            .turn_steer(input)
+            .await
+            .map_err(|error| format!("turn_steer: {error}"))
+    }
+
+    /// Fork the active runtime thread and update the actor's session identity.
+    pub async fn thread_fork(&mut self) -> Result<String, String> {
+        if !self.state.driver.supports_thread_fork() {
+            return Err(format!(
+                "{} does not support thread fork",
+                self.state.driver.name()
+            ));
+        }
+        let session_id = self
+            .state
+            .driver
+            .fork_thread(&self.state.session_id)
+            .await
+            .map_err(|error| format!("thread_fork: {error}"))?;
+        self.state.session_id.clone_from(&session_id);
+        emit_session(
+            &self.outbound,
+            &self.id,
+            &session_id,
+            self.state.channel_id,
+            &self.state.launch_id,
+        )
+        .await;
+        Ok(session_id)
+    }
+
     /// Drive the actor through its `Running` lifetime: consume mailbox
     /// commands (`Deliver` / `TurnCancel` / `Stop`) and claude stdout
     /// events in a single `select!` loop. Emits `agent:activity`,

@@ -357,7 +357,12 @@ impl Store {
         self.get_agent(agent_id).await
     }
 
-    async fn get_agent(&self, agent_id: Uuid) -> Result<Option<Agent>, StoreError> {
+    /// Returns one agent by identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or persisted enum decoding fails.
+    pub async fn get_agent(&self, agent_id: Uuid) -> Result<Option<Agent>, StoreError> {
         let row = query(
             "SELECT id, channel_id, name, runtime, model, status, created_at \
              FROM agents WHERE id = ?",
