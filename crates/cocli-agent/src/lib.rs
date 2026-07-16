@@ -14,16 +14,22 @@
 //! - router-level state table (running agents) + state-change events
 
 pub mod actor;
+pub mod context;
+pub mod fork_reason;
 pub mod format;
+pub mod metrics;
 pub mod obs;
 pub mod queue;
+pub mod recovery;
 pub mod router;
 pub mod state;
 pub mod types;
+pub mod watchdog;
 pub mod working;
 pub mod workspace;
 
 pub use actor::{AgentActor, StartCfg};
+pub use metrics::AgentMetrics;
 pub use obs::AgentObservationChanged;
 pub use queue::DeliveryQueue;
 pub use router::{AgentRouter, DaemonConfig};

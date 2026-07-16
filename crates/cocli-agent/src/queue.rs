@@ -83,6 +83,11 @@ impl DeliveryQueue {
         self.per_agent.remove(agent_id);
     }
 
+    /// Total pending deliveries across every agent.
+    pub fn total_len(&self) -> usize {
+        self.per_agent.values().map(VecDeque::len).sum()
+    }
+
     /// Test-helper: pending count for an agent (0 when none queued).
     #[cfg(test)]
     pub fn len(&self, agent_id: &str) -> usize {
@@ -169,9 +174,11 @@ mod tests {
         );
         assert_eq!(q.len("a1"), 1);
         assert_eq!(q.len("a2"), 2);
+        assert_eq!(q.total_len(), 3);
         let drained_a2 = q.drain("a2");
         assert_eq!(drained_a2.len(), 2);
         assert_eq!(q.len("a1"), 1); // a1 untouched
+        assert_eq!(q.total_len(), 1);
     }
 
     #[test]

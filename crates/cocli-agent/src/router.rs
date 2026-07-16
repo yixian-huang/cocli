@@ -21,6 +21,7 @@ use cocli_protocol::{
 };
 
 use crate::actor::{AgentActor, StartCfg};
+use crate::metrics::AgentMetrics;
 use crate::obs::AgentObservationChanged;
 use crate::queue::{DeliveryQueue, EnqueueResult, MAX_PENDING_PER_AGENT};
 use crate::state::Idle;
@@ -60,6 +61,7 @@ pub struct AgentRouter {
     /// focus pointers. Mirrors Go `AgentProcess.currentWork` semantics in
     /// `daemon/agent/agent_working_state.go`.
     working: WorkingMemoryStore,
+    metrics: Arc<AgentMetrics>,
 }
 
 impl AgentRouter {
@@ -73,6 +75,29 @@ impl AgentRouter {
         obs_tx: broadcast::Sender<AgentObservationChanged>,
         running_registry: Arc<RwLock<HashSet<String>>>,
     ) -> Self {
+        Self::new_with_metrics(
+            cfg,
+            inbound_rx,
+            outbound_tx,
+            state_rx,
+            state_tx_template,
+            obs_tx,
+            running_registry,
+            Arc::new(AgentMetrics::default()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_metrics(
+        cfg: Arc<DaemonConfig>,
+        inbound_rx: mpsc::Receiver<ServerMsg>,
+        outbound_tx: mpsc::Sender<DaemonMsg>,
+        state_rx: mpsc::Receiver<AgentStateChange>,
+        state_tx_template: mpsc::Sender<AgentStateChange>,
+        obs_tx: broadcast::Sender<AgentObservationChanged>,
+        running_registry: Arc<RwLock<HashSet<String>>>,
+        metrics: Arc<AgentMetrics>,
+    ) -> Self {
         Self {
             cfg,
             agents: HashMap::new(),
@@ -84,12 +109,17 @@ impl AgentRouter {
             obs_tx,
             running_registry,
             working: WorkingMemoryStore::new(),
+            metrics,
         }
     }
 
     /// Snapshot of currently-registered agent IDs.
     pub fn running_agents_snapshot(&self) -> Vec<String> {
         self.agents.keys().cloned().collect()
+    }
+
+    pub fn metrics(&self) -> Arc<AgentMetrics> {
+        Arc::clone(&self.metrics)
     }
 }
 
@@ -330,13 +360,20 @@ impl AgentRouter {
     }
 
     fn buffer_delivery(&mut self, agent_id: &str, delivery: AgentDeliverMsg) {
-        if self.delivery_queue.enqueue(agent_id, delivery) == EnqueueResult::RejectedFull {
-            tracing::warn!(
-                agent_id,
-                capacity = MAX_PENDING_PER_AGENT,
-                "router: local delivery queue full; delivery remains unaccepted"
-            );
+        match self.delivery_queue.enqueue(agent_id, delivery) {
+            EnqueueResult::Queued => self.metrics.inc_delivery_queue_buffered(),
+            EnqueueResult::Updated => self.metrics.inc_delivery_queue_updated(),
+            EnqueueResult::RejectedFull => {
+                self.metrics.inc_delivery_queue_rejected();
+                tracing::warn!(
+                    agent_id,
+                    capacity = MAX_PENDING_PER_AGENT,
+                    "router: local delivery queue full; delivery remains unaccepted"
+                );
+            }
         }
+        self.metrics
+            .set_delivery_queue_depth(self.delivery_queue.total_len());
     }
 
     fn flush_delivery_queue_for_agent(&mut self, agent_id: &str, tx: &mpsc::Sender<AgentCmd>) {
@@ -345,15 +382,20 @@ impl AgentRouter {
             return;
         }
 
+        self.metrics
+            .set_delivery_queue_depth(self.delivery_queue.total_len());
+        let mut sent = 0;
         let mut pending = buffered.into_iter();
         while let Some(delivery) = pending.next() {
             let seq = delivery.seq;
             match tx.try_send(AgentCmd::Deliver(delivery)) {
-                Ok(()) => {}
+                Ok(()) => sent += 1,
                 Err(tokio::sync::mpsc::error::TrySendError::Full(AgentCmd::Deliver(delivery))) => {
                     let mut remaining = vec![delivery];
                     remaining.extend(pending);
+                    let rebuffered = remaining.len();
                     self.delivery_queue.prepend(agent_id, remaining);
+                    self.metrics.add_delivery_queue_rebuffered(rebuffered);
                     tracing::debug!(
                         agent_id,
                         seq,
@@ -366,7 +408,9 @@ impl AgentRouter {
                 ))) => {
                     let mut remaining = vec![delivery];
                     remaining.extend(pending);
+                    let rebuffered = remaining.len();
                     self.delivery_queue.prepend(agent_id, remaining);
+                    self.metrics.add_delivery_queue_rebuffered(rebuffered);
                     self.agents.remove(agent_id);
                     tracing::info!(
                         agent_id,
@@ -378,6 +422,9 @@ impl AgentRouter {
                 Err(_) => unreachable!("delivery flush only sends AgentCmd::Deliver"),
             }
         }
+        self.metrics.add_delivery_queue_flush_sent(sent);
+        self.metrics
+            .set_delivery_queue_depth(self.delivery_queue.total_len());
     }
 
     async fn handle_turn_cancel(&mut self, m: AgentTurnCancelMsg) {
@@ -455,6 +502,8 @@ impl AgentRouter {
             } => {
                 self.agents.remove(&agent_id);
                 self.delivery_queue.forget(&agent_id);
+                self.metrics
+                    .set_delivery_queue_depth(self.delivery_queue.total_len());
                 if let Ok(mut reg) = self.running_registry.write() {
                     reg.remove(&agent_id);
                 }
@@ -923,6 +972,9 @@ mod tests {
         .expect("full mailbox must not block the router");
 
         assert_eq!(router.delivery_queue.len("agent-full"), 1);
+        let snapshot = router.metrics.snapshot();
+        assert_eq!(snapshot.counters["agent_delivery_queue_buffered_total"], 1);
+        assert_eq!(snapshot.gauges["agent_delivery_queue_depth"], 1.0);
     }
 
     #[tokio::test]
@@ -951,5 +1003,8 @@ mod tests {
 
         assert_eq!(router.delivery_queue.len("agent-closed"), 1);
         assert!(!router.agents.contains_key("agent-closed"));
+        let snapshot = router.metrics.snapshot();
+        assert_eq!(snapshot.counters["agent_delivery_queue_buffered_total"], 1);
+        assert_eq!(snapshot.gauges["agent_delivery_queue_depth"], 1.0);
     }
 }
