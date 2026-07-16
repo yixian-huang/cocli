@@ -16,6 +16,9 @@ pub enum StoreError {
     /// A database query or connection failed.
     #[error(transparent)]
     Sqlx(#[from] sqlx_core::Error),
+    /// Persisted JSON could not be encoded or decoded.
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
     /// A persisted enum value was not recognized.
     #[error("invalid persisted {kind} value: {value}")]
     InvalidValue {
@@ -337,6 +340,133 @@ pub struct Task {
     pub created_by_type: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// One persisted local runtime session.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSession {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
+    pub turn_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub context_window: i64,
+    pub session_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_chat_session_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files_changed: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_success: Option<bool>,
+    pub started_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+/// Final aggregate values recorded when a runtime session ends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AgentSessionFinish {
+    pub end_reason: String,
+    pub turn_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub context_window: i64,
+    pub task_summary: Option<String>,
+    pub files_changed: Option<Vec<String>>,
+    pub task_success: Option<bool>,
+    pub ended_at: DateTime<Utc>,
+}
+
+/// Direct link from a persisted turn to its source channel message.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnMessageRef {
+    pub channel_id: Uuid,
+    pub message_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// One completed runtime turn and its structured trajectory.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTurn {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_id: Option<String>,
+    pub turn_number: i64,
+    pub started_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub context_window: i64,
+    pub entries: serde_json::Value,
+    pub session_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_ref: Option<TurnMessageRef>,
+}
+
+/// Values used to insert or idempotently replace one completed turn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NewAgentTurn {
+    pub agent_id: Uuid,
+    pub session_id: String,
+    pub launch_id: Option<String>,
+    pub turn_number: i64,
+    pub started_at: DateTime<Utc>,
+    pub ended_at: Option<DateTime<Utc>>,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cost_usd: f64,
+    pub context_window: i64,
+    pub entries: serde_json::Value,
+    pub session_type: String,
+    pub channel_id: Option<Uuid>,
+    pub source_message_id: Option<Uuid>,
+}
+
+/// One durable runtime activity marker.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentActivity {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub activity: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub trajectory: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_row_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 struct TaskRow {
@@ -1580,6 +1710,362 @@ impl Store {
         })
     }
 
+    /// Records one runtime session start.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the insert or row decoding fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn create_agent_session(
+        &self,
+        agent_id: Uuid,
+        channel_id: Option<Uuid>,
+        session_id: &str,
+        launch_id: Option<&str>,
+        parent_session_id: Option<Uuid>,
+        session_type: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<AgentSession, StoreError> {
+        let row = query(
+            "INSERT INTO agent_sessions \
+             (id, agent_id, session_id, launch_id, channel_id, parent_session_id, \
+              session_type, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id, agent_id, session_id, launch_id, channel_id, parent_session_id, \
+               end_reason, turn_count, input_tokens, output_tokens, cost_usd, context_window, \
+               session_type, scope, parent_chat_session_id, task_summary, files_changed, \
+               task_success, started_at, ended_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(agent_id)
+        .bind(session_id)
+        .bind(launch_id)
+        .bind(channel_id)
+        .bind(parent_session_id)
+        .bind(normalized_session_type(session_type))
+        .bind(started_at)
+        .fetch_one(&self.pool)
+        .await?;
+        agent_session_from_row(row)
+    }
+
+    /// Marks one launch's newest open session as ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when serialization or the update fails.
+    pub async fn finish_agent_session(
+        &self,
+        agent_id: Uuid,
+        launch_id: &str,
+        finish: &AgentSessionFinish,
+    ) -> Result<bool, StoreError> {
+        let files_changed = finish
+            .files_changed
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let result = query(
+            "UPDATE agent_sessions SET end_reason = ?, turn_count = ?, input_tokens = ?, \
+               output_tokens = ?, cost_usd = ?, context_window = ?, task_summary = ?, \
+               files_changed = ?, task_success = ?, ended_at = ? \
+             WHERE id = (SELECT id FROM agent_sessions \
+               WHERE agent_id = ? AND launch_id = ? AND ended_at IS NULL \
+               ORDER BY started_at DESC LIMIT 1)",
+        )
+        .bind(&finish.end_reason)
+        .bind(finish.turn_count)
+        .bind(finish.input_tokens)
+        .bind(finish.output_tokens)
+        .bind(finish.cost_usd)
+        .bind(finish.context_window)
+        .bind(&finish.task_summary)
+        .bind(files_changed)
+        .bind(finish.task_success.map(i64::from))
+        .bind(finish.ended_at)
+        .bind(agent_id)
+        .bind(launch_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Lists recent sessions for one agent, optionally filtered by type.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn list_agent_sessions(
+        &self,
+        agent_id: Uuid,
+        limit: i64,
+        session_type: Option<&str>,
+    ) -> Result<Vec<AgentSession>, StoreError> {
+        let rows = if let Some(session_type) = session_type.filter(|value| !value.is_empty()) {
+            query(
+                "SELECT id, agent_id, session_id, launch_id, channel_id, parent_session_id, \
+                   end_reason, turn_count, input_tokens, output_tokens, cost_usd, context_window, \
+                   session_type, scope, parent_chat_session_id, task_summary, files_changed, \
+                   task_success, started_at, ended_at \
+                 FROM agent_sessions WHERE agent_id = ? AND session_type = ? \
+                 ORDER BY started_at DESC LIMIT ?",
+            )
+            .bind(agent_id)
+            .bind(session_type)
+            .bind(limit.clamp(1, 100))
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            query(
+                "SELECT id, agent_id, session_id, launch_id, channel_id, parent_session_id, \
+                   end_reason, turn_count, input_tokens, output_tokens, cost_usd, context_window, \
+                   session_type, scope, parent_chat_session_id, task_summary, files_changed, \
+                   task_success, started_at, ended_at \
+                 FROM agent_sessions WHERE agent_id = ? \
+                 ORDER BY started_at DESC LIMIT ?",
+            )
+            .bind(agent_id)
+            .bind(limit.clamp(1, 100))
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.into_iter().map(agent_session_from_row).collect()
+    }
+
+    /// Returns the newest active runtime session for one agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn current_agent_session(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<AgentSession>, StoreError> {
+        let row = query(
+            "SELECT id, agent_id, session_id, launch_id, channel_id, parent_session_id, \
+               end_reason, turn_count, input_tokens, output_tokens, cost_usd, context_window, \
+               session_type, scope, parent_chat_session_id, task_summary, files_changed, \
+               task_success, started_at, ended_at \
+             FROM agent_sessions WHERE agent_id = ? AND ended_at IS NULL \
+             ORDER BY started_at DESC LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(agent_session_from_row).transpose()
+    }
+
+    /// Inserts or replaces one completed turn and refreshes its session aggregates.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when serialization or the transaction fails.
+    pub async fn upsert_agent_turn(&self, turn: &NewAgentTurn) -> Result<AgentTurn, StoreError> {
+        let id = Uuid::new_v4();
+        let entries = serde_json::to_string(&turn.entries)?;
+        let mut transaction = self.pool.begin().await?;
+        query(
+            "INSERT INTO agent_turns \
+             (id, agent_id, session_id, launch_id, turn_number, started_at, ended_at, \
+              input_tokens, output_tokens, cost_usd, context_window, entries, session_type, \
+              channel_id, source_message_id) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(agent_id, launch_id, turn_number) DO UPDATE SET \
+               session_id = excluded.session_id, started_at = excluded.started_at, \
+               ended_at = excluded.ended_at, input_tokens = excluded.input_tokens, \
+               output_tokens = excluded.output_tokens, cost_usd = excluded.cost_usd, \
+               context_window = excluded.context_window, entries = excluded.entries, \
+               session_type = excluded.session_type, channel_id = excluded.channel_id, \
+               source_message_id = excluded.source_message_id",
+        )
+        .bind(id)
+        .bind(turn.agent_id)
+        .bind(&turn.session_id)
+        .bind(&turn.launch_id)
+        .bind(turn.turn_number)
+        .bind(turn.started_at)
+        .bind(turn.ended_at)
+        .bind(turn.input_tokens)
+        .bind(turn.output_tokens)
+        .bind(turn.cost_usd)
+        .bind(turn.context_window)
+        .bind(entries)
+        .bind(normalized_session_type(&turn.session_type))
+        .bind(turn.channel_id)
+        .bind(turn.source_message_id)
+        .execute(&mut *transaction)
+        .await?;
+        if let Some(launch_id) = turn.launch_id.as_deref() {
+            query(
+                "UPDATE agent_sessions SET \
+                   turn_count = (SELECT COUNT(*) FROM agent_turns \
+                     WHERE agent_id = ? AND launch_id = ?), \
+                   input_tokens = (SELECT COALESCE(SUM(input_tokens), 0) FROM agent_turns \
+                     WHERE agent_id = ? AND launch_id = ?), \
+                   output_tokens = (SELECT COALESCE(SUM(output_tokens), 0) FROM agent_turns \
+                     WHERE agent_id = ? AND launch_id = ?), \
+                   cost_usd = (SELECT COALESCE(SUM(cost_usd), 0) FROM agent_turns \
+                     WHERE agent_id = ? AND launch_id = ?), \
+                   context_window = (SELECT COALESCE(MAX(context_window), 0) FROM agent_turns \
+                     WHERE agent_id = ? AND launch_id = ?) \
+                 WHERE id = (SELECT id FROM agent_sessions \
+                   WHERE agent_id = ? AND launch_id = ? ORDER BY started_at DESC LIMIT 1)",
+            )
+            .bind(turn.agent_id)
+            .bind(launch_id)
+            .bind(turn.agent_id)
+            .bind(launch_id)
+            .bind(turn.agent_id)
+            .bind(launch_id)
+            .bind(turn.agent_id)
+            .bind(launch_id)
+            .bind(turn.agent_id)
+            .bind(launch_id)
+            .bind(turn.agent_id)
+            .bind(launch_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        self.get_agent_turn_by_generation(
+            turn.agent_id,
+            turn.launch_id.as_deref(),
+            turn.turn_number,
+        )
+        .await?
+        .ok_or(StoreError::InvalidValue {
+            kind: "agent turn",
+            value: format!("{}:{}", turn.agent_id, turn.turn_number),
+        })
+    }
+
+    /// Lists an agent's turns, optionally filtered by runtime session id.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn list_agent_turns(
+        &self,
+        agent_id: Uuid,
+        session_id: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AgentTurn>, StoreError> {
+        let rows = if let Some(session_id) = session_id.filter(|value| !value.is_empty()) {
+            let statement = agent_turn_select(
+                "WHERE turn.agent_id = ? AND turn.session_id = ? \
+                 ORDER BY turn.turn_number ASC LIMIT ? OFFSET ?",
+            );
+            query(&statement)
+                .bind(agent_id)
+                .bind(session_id)
+                .bind(limit.clamp(1, 200))
+                .bind(offset.max(0))
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            let statement = agent_turn_select(
+                "WHERE turn.agent_id = ? ORDER BY turn.started_at DESC LIMIT ? OFFSET ?",
+            );
+            query(&statement)
+                .bind(agent_id)
+                .bind(limit.clamp(1, 200))
+                .bind(offset.max(0))
+                .fetch_all(&self.pool)
+                .await?
+        };
+        rows.into_iter().map(agent_turn_from_row).collect()
+    }
+
+    /// Returns one turn owned by an agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn get_agent_turn(
+        &self,
+        agent_id: Uuid,
+        turn_id: Uuid,
+    ) -> Result<Option<AgentTurn>, StoreError> {
+        let statement = agent_turn_select("WHERE turn.agent_id = ? AND turn.id = ? LIMIT 1");
+        let row = query(&statement)
+            .bind(agent_id)
+            .bind(turn_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(agent_turn_from_row).transpose()
+    }
+
+    /// Inserts one runtime activity marker.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when serialization or insertion fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_agent_activity(
+        &self,
+        agent_id: Uuid,
+        session_row_id: Option<Uuid>,
+        session_id: Option<&str>,
+        activity: &str,
+        detail: Option<&str>,
+        trajectory: &[String],
+        launch_id: Option<&str>,
+        created_at: DateTime<Utc>,
+    ) -> Result<AgentActivity, StoreError> {
+        let id = Uuid::new_v4();
+        query(
+            "INSERT INTO agent_activity \
+             (id, agent_id, session_row_id, session_id, activity, detail, trajectory, \
+              launch_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(agent_id)
+        .bind(session_row_id)
+        .bind(session_id)
+        .bind(activity)
+        .bind(detail)
+        .bind(serde_json::to_string(trajectory)?)
+        .bind(launch_id)
+        .bind(created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(AgentActivity {
+            id,
+            agent_id,
+            activity: activity.to_owned(),
+            detail: detail.map(str::to_owned),
+            trajectory: trajectory.to_vec(),
+            launch_id: launch_id.map(str::to_owned),
+            created_at,
+            session_row_id,
+            session_id: session_id.map(str::to_owned),
+        })
+    }
+
+    /// Lists recent activity for one agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn list_agent_activity(
+        &self,
+        agent_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AgentActivity>, StoreError> {
+        let rows = query(
+            "SELECT id, agent_id, activity, detail, trajectory, launch_id, created_at, \
+               session_row_id, session_id FROM agent_activity \
+             WHERE agent_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+        )
+        .bind(agent_id)
+        .bind(limit.clamp(1, 100))
+        .bind(offset.max(0))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(agent_activity_from_row).collect()
+    }
+
     async fn get_delivery(&self, delivery_id: Uuid) -> Result<Option<Delivery>, StoreError> {
         let row = query(
             "SELECT id, agent_id, channel_id, message_id, seq, state, attempts, \
@@ -1611,6 +2097,24 @@ impl Store {
             .map(Task::try_from)
             .transpose()
     }
+
+    async fn get_agent_turn_by_generation(
+        &self,
+        agent_id: Uuid,
+        launch_id: Option<&str>,
+        turn_number: i64,
+    ) -> Result<Option<AgentTurn>, StoreError> {
+        let statement = agent_turn_select(
+            "WHERE turn.agent_id = ? AND turn.launch_id IS ? AND turn.turn_number = ? LIMIT 1",
+        );
+        let row = query(&statement)
+            .bind(agent_id)
+            .bind(launch_id)
+            .bind(turn_number)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(agent_turn_from_row).transpose()
+    }
 }
 
 async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
@@ -1619,6 +2123,7 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
         include_str!("../migrations/0002_delivery_queue.sql"),
         include_str!("../migrations/0003_agent_bridge_state.sql"),
         include_str!("../migrations/0004_tasks.sql"),
+        include_str!("../migrations/0005_runtime_history.sql"),
     ] {
         for statement in migration.split(';') {
             let statement = statement.trim();
@@ -1705,6 +2210,108 @@ fn task_row_from_sqlite(row: SqliteRow) -> Result<TaskRow, StoreError> {
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn agent_session_from_row(row: SqliteRow) -> Result<AgentSession, StoreError> {
+    let files_changed = row
+        .try_get::<Option<String>, _>("files_changed")?
+        .map(|value| serde_json::from_str(&value))
+        .transpose()?;
+    Ok(AgentSession {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        session_id: row.try_get("session_id")?,
+        launch_id: row.try_get("launch_id")?,
+        channel_id: row.try_get("channel_id")?,
+        parent_session_id: row.try_get("parent_session_id")?,
+        end_reason: row.try_get("end_reason")?,
+        turn_count: row.try_get("turn_count")?,
+        input_tokens: row.try_get("input_tokens")?,
+        output_tokens: row.try_get("output_tokens")?,
+        cost_usd: row.try_get("cost_usd")?,
+        context_window: row.try_get("context_window")?,
+        session_type: row.try_get("session_type")?,
+        scope: row.try_get("scope")?,
+        parent_chat_session_id: row.try_get("parent_chat_session_id")?,
+        task_summary: row.try_get("task_summary")?,
+        files_changed,
+        task_success: row
+            .try_get::<Option<i64>, _>("task_success")?
+            .map(|value| value != 0),
+        started_at: row.try_get("started_at")?,
+        ended_at: row.try_get("ended_at")?,
+    })
+}
+
+fn agent_turn_select(suffix: &str) -> String {
+    format!(
+        "SELECT turn.id, turn.agent_id, turn.session_id, turn.launch_id, turn.turn_number, \
+           turn.started_at, turn.ended_at, turn.input_tokens, turn.output_tokens, turn.cost_usd, \
+           turn.context_window, turn.entries, turn.session_type, turn.channel_id, \
+           turn.source_message_id, message.seq AS message_seq, message.created_at AS message_created_at \
+         FROM agent_turns turn LEFT JOIN messages message ON message.id = turn.source_message_id \
+         {suffix}"
+    )
+}
+
+fn agent_turn_from_row(row: SqliteRow) -> Result<AgentTurn, StoreError> {
+    let started_at: DateTime<Utc> = row.try_get("started_at")?;
+    let ended_at: Option<DateTime<Utc>> = row.try_get("ended_at")?;
+    let channel_id: Option<Uuid> = row.try_get("channel_id")?;
+    let source_message_id: Option<Uuid> = row.try_get("source_message_id")?;
+    let message_ref = channel_id
+        .zip(source_message_id)
+        .map(|(channel_id, message_id)| TurnMessageRef {
+            channel_id,
+            message_id,
+            seq: row.try_get("message_seq").ok().flatten(),
+            created_at: row.try_get("message_created_at").ok().flatten(),
+        });
+    Ok(AgentTurn {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        session_id: row.try_get("session_id")?,
+        launch_id: row.try_get("launch_id")?,
+        turn_number: row.try_get("turn_number")?,
+        started_at,
+        ended_at,
+        input_tokens: row.try_get("input_tokens")?,
+        output_tokens: row.try_get("output_tokens")?,
+        cost_usd: row.try_get("cost_usd")?,
+        context_window: row.try_get("context_window")?,
+        entries: serde_json::from_str(&row.try_get::<String, _>("entries")?)?,
+        session_type: row.try_get("session_type")?,
+        duration_ms: ended_at.map(|ended_at| {
+            ended_at
+                .signed_duration_since(started_at)
+                .num_milliseconds()
+                .max(0)
+        }),
+        message_ref,
+    })
+}
+
+fn agent_activity_from_row(row: SqliteRow) -> Result<AgentActivity, StoreError> {
+    Ok(AgentActivity {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        activity: row.try_get("activity")?,
+        detail: row.try_get("detail")?,
+        trajectory: serde_json::from_str(&row.try_get::<String, _>("trajectory")?)?,
+        launch_id: row.try_get("launch_id")?,
+        created_at: row.try_get("created_at")?,
+        session_row_id: row.try_get("session_row_id")?,
+        session_id: row.try_get("session_id")?,
+    })
+}
+
+fn normalized_session_type(session_type: &str) -> &str {
+    let session_type = session_type.trim();
+    if session_type.is_empty() {
+        "chat"
+    } else {
+        session_type
+    }
 }
 
 async fn upsert_inbox_cursor(

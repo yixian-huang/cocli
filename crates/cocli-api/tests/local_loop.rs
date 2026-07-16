@@ -5,10 +5,11 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
     router, router_with_delivery_config, DeliveryConfig, RuntimeError, RuntimeInfo, RuntimeService,
 };
-use cocli_store::{Agent, AgentStatus, Message, MessageRole, Store};
+use cocli_store::{Agent, AgentStatus, Message, MessageRole, NewAgentTurn, Store};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -264,6 +265,132 @@ async fn task_routes_support_numbering_claims_transitions_and_dependencies() {
     .await;
     assert_eq!(in_progress.as_array().map(Vec::len), Some(1));
     assert_eq!(in_progress[0]["taskNumber"], 2);
+}
+
+#[tokio::test]
+async fn runtime_history_routes_match_the_existing_web_contract() {
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("history-api")
+        .await
+        .expect("channel should persist");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "historian",
+            "fake",
+            Some("test-model"),
+            AgentStatus::Running,
+        )
+        .await
+        .expect("agent should persist");
+    let message = store
+        .append_message(channel.id, None, MessageRole::User, "record this")
+        .await
+        .expect("message should persist");
+    let started_at = Utc::now();
+    let session = store
+        .create_agent_session(
+            agent.id,
+            Some(channel.id),
+            "session-web",
+            Some("launch-web"),
+            None,
+            "chat",
+            started_at,
+        )
+        .await
+        .expect("session should persist");
+    let turn = store
+        .upsert_agent_turn(&NewAgentTurn {
+            agent_id: agent.id,
+            session_id: session.session_id.clone(),
+            launch_id: session.launch_id.clone(),
+            turn_number: 1,
+            started_at,
+            ended_at: Some(started_at + ChronoDuration::milliseconds(250)),
+            input_tokens: 10,
+            output_tokens: 5,
+            cost_usd: 0.001,
+            context_window: 100_000,
+            entries: json!([{"kind": "text", "text": "recorded"}]),
+            session_type: "chat".to_owned(),
+            channel_id: Some(channel.id),
+            source_message_id: Some(message.id),
+        })
+        .await
+        .expect("turn should persist");
+    store
+        .insert_agent_activity(
+            agent.id,
+            Some(session.id),
+            Some(&session.session_id),
+            "working",
+            Some("recording"),
+            &["recording".to_owned()],
+            session.launch_id.as_deref(),
+            started_at,
+        )
+        .await
+        .expect("activity should persist");
+
+    let app = router(store, Arc::new(FakeRuntime));
+    let agent_id = agent.id;
+
+    let (sessions_status, sessions) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/sessions?limit=20&type=chat"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(sessions_status, StatusCode::OK);
+    assert_eq!(sessions[0]["sessionId"], "session-web");
+    assert_eq!(sessions[0]["turnCount"], 1);
+    assert_eq!(sessions[0]["inputTokens"], 10);
+
+    let (current_status, current) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/sessions/current"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(current_status, StatusCode::OK);
+    assert_eq!(current["id"], session.id.to_string());
+
+    let (turns_status, turns) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/sessions/session-web/turns?limit=120&offset=0"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(turns_status, StatusCode::OK);
+    assert_eq!(turns[0]["id"], turn.id.to_string());
+    assert_eq!(turns[0]["durationMs"], 250);
+    assert_eq!(turns[0]["messageRef"]["messageId"], message.id.to_string());
+
+    let (turn_status, loaded_turn) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/turns/{}", turn.id),
+        json!(null),
+    )
+    .await;
+    assert_eq!(turn_status, StatusCode::OK);
+    assert_eq!(loaded_turn["entries"][0]["kind"], "text");
+
+    let (activity_status, activity) = json_request(
+        app,
+        "GET",
+        &format!("/api/agents/{agent_id}/activity?limit=50&offset=0"),
+        json!(null),
+    )
+    .await;
+    assert_eq!(activity_status, StatusCode::OK);
+    assert_eq!(activity[0]["activity"], "working");
+    assert_eq!(activity[0]["sessionRowId"], session.id.to_string());
 }
 
 #[tokio::test]

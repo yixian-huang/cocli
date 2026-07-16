@@ -13,8 +13,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use cocli_store::{
-    Agent, AgentStatus, Channel, Delivery, DeliveryStats, Message, MessageRole, Store, StoreError,
-    Task, TaskStatus,
+    Agent, AgentActivity, AgentSession, AgentStatus, AgentTurn, Channel, Delivery, DeliveryStats,
+    Message, MessageRole, Store, StoreError, Task, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -493,6 +493,18 @@ pub fn router_with_delivery_config(
         .route("/api/agents/:agent_id/start", post(start_agent))
         .route("/api/agents/:agent_id/stop", post(stop_agent))
         .route("/api/agents/:agent_id/runtime", get(runtime_status))
+        .route("/api/agents/:agent_id/sessions", get(list_agent_sessions))
+        .route(
+            "/api/agents/:agent_id/sessions/current",
+            get(current_agent_session),
+        )
+        .route(
+            "/api/agents/:agent_id/sessions/:session_id/turns",
+            get(list_session_turns),
+        )
+        .route("/api/agents/:agent_id/turns", get(list_agent_turns))
+        .route("/api/agents/:agent_id/turns/:turn_id", get(get_agent_turn))
+        .route("/api/agents/:agent_id/activity", get(list_agent_activity))
         .route("/api/agents/:agent_id/turn/cancel", post(cancel_turn))
         .route("/api/agents/:agent_id/turn/steer", post(steer_turn))
         .route("/api/agents/:agent_id/thread/fork", post(fork_thread))
@@ -653,6 +665,138 @@ async fn runtime_status(
 ) -> Result<Json<RuntimeSessionStatus>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
     Ok(Json(state.runtime.status(&agent).await?))
+}
+
+#[derive(Deserialize)]
+struct AgentSessionsQuery {
+    #[serde(default = "default_session_limit")]
+    limit: i64,
+    #[serde(rename = "type")]
+    session_type: Option<String>,
+}
+
+async fn list_agent_sessions(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<AgentSessionsQuery>,
+) -> Result<Json<Vec<AgentSession>>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(
+        state
+            .store
+            .list_agent_sessions(agent_id, query.limit, query.session_type.as_deref())
+            .await?,
+    ))
+}
+
+async fn current_agent_session(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<Option<AgentSession>>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(state.store.current_agent_session(agent_id).await?))
+}
+
+#[derive(Deserialize)]
+struct AgentTurnsQuery {
+    #[serde(default, rename = "sessionId")]
+    session_id: Option<String>,
+    #[serde(default = "default_turn_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+async fn list_agent_turns(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<AgentTurnsQuery>,
+) -> Result<Json<Vec<AgentTurn>>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(
+        state
+            .store
+            .list_agent_turns(
+                agent_id,
+                query.session_id.as_deref(),
+                query.limit,
+                query.offset,
+            )
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct TurnPageQuery {
+    #[serde(default = "default_session_turn_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+async fn list_session_turns(
+    State(state): State<AppState>,
+    Path((agent_id, session_id)): Path<(Uuid, String)>,
+    Query(query): Query<TurnPageQuery>,
+) -> Result<Json<Vec<AgentTurn>>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(
+        state
+            .store
+            .list_agent_turns(agent_id, Some(&session_id), query.limit, query.offset)
+            .await?,
+    ))
+}
+
+async fn get_agent_turn(
+    State(state): State<AppState>,
+    Path((agent_id, turn_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<AgentTurn>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    state
+        .store
+        .get_agent_turn(agent_id, turn_id)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("turn not found"))
+}
+
+#[derive(Deserialize)]
+struct AgentActivityQuery {
+    #[serde(default = "default_activity_limit")]
+    limit: i64,
+    #[serde(default)]
+    offset: i64,
+}
+
+async fn list_agent_activity(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<AgentActivityQuery>,
+) -> Result<Json<Vec<AgentActivity>>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(
+        state
+            .store
+            .list_agent_activity(agent_id, query.limit, query.offset)
+            .await?,
+    ))
+}
+
+fn default_session_limit() -> i64 {
+    20
+}
+
+fn default_turn_limit() -> i64 {
+    50
+}
+
+fn default_session_turn_limit() -> i64 {
+    100
+}
+
+fn default_activity_limit() -> i64 {
+    50
 }
 
 #[derive(Serialize)]
