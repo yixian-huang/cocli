@@ -1,0 +1,550 @@
+{
+  "version": "2026-06-03",
+  "commands": [
+    {
+      "action": "message.digest",
+      "tool": "message_digest",
+      "cli": [
+        "message",
+        "digest"
+      ],
+      "tier": "core",
+      "section": "Messaging",
+      "summary": "non-consuming server-authoritative digest (relevance previews + signal counts; does not advance read cursor)",
+      "example": "cocli message digest [--since last]",
+      "flags": [
+        "--since"
+      ]
+    },
+    {
+      "action": "message.check",
+      "tool": "check_messages",
+      "cli": [
+        "message",
+        "check"
+      ],
+      "tier": "core",
+      "section": "Messaging",
+      "summary": "fetch unread inbox with triaged digest + DIRECT/HIGH full bodies",
+      "example": "cocli message check"
+    },
+    {
+      "action": "message.drill",
+      "tool": "drill_inbox",
+      "cli": [
+        "message",
+        "drill"
+      ],
+      "tier": "extended",
+      "section": "Messaging",
+      "summary": "full bodies for a category previewed in the last check (run check first)",
+      "example": "cocli message drill --category peer_update",
+      "flags": [
+        "--category"
+      ]
+    },
+    {
+      "action": "message.history",
+      "tool": "read_history",
+      "cli": [
+        "message",
+        "history"
+      ],
+      "tier": "extended",
+      "section": "Messaging",
+      "summary": "paginated channel history",
+      "example": "cocli message history --target \"#channel\" [--limit 50] [--before seq] [--after seq]",
+      "flags": [
+        "--target",
+        "--channel",
+        "--limit",
+        "--before",
+        "--after",
+        "--around"
+      ]
+    },
+    {
+      "action": "message.search",
+      "tool": "search_messages",
+      "cli": [
+        "message",
+        "search"
+      ],
+      "tier": "extended",
+      "section": "Messaging",
+      "summary": "search messages across channels",
+      "example": "cocli message search --query \"...\"",
+      "flags": [
+        "--query",
+        "--q",
+        "--channel",
+        "--target",
+        "--limit"
+      ]
+    },
+    {
+      "action": "message.ack",
+      "tool": "ack_messages",
+      "cli": [
+        "message",
+        "ack"
+      ],
+      "tier": "extended",
+      "section": "Messaging",
+      "summary": "advance read cursor after processing a check batch",
+      "example": "cocli message ack --refs '[{\"messageId\":\"...\"}]'",
+      "flags": [
+        "--refs"
+      ]
+    },
+    {
+      "action": "message.send",
+      "tool": "send_message",
+      "cli": [
+        "message",
+        "send"
+      ],
+      "tier": "core",
+      "section": "Messaging",
+      "summary": "post a visible chat message (only this delivers to channel users)",
+      "example": "cocli message send --target \"#channel\" --content \"...\"",
+      "flags": [
+        "--target",
+        "--content",
+        "--source-message-id",
+        "--in-reply-to",
+        "--expected-target"
+      ]
+    },
+    {
+      "action": "wiki.search",
+      "tool": "mcp_wiki_search",
+      "cli": [
+        "wiki",
+        "search"
+      ],
+      "tier": "extended",
+      "section": "Wiki",
+      "summary": "search wiki pages",
+      "example": "cocli wiki search --query \"...\"",
+      "flags": [
+        "--query",
+        "--q",
+        "--limit"
+      ]
+    },
+    {
+      "action": "wiki.read",
+      "tool": "mcp_wiki_read",
+      "cli": [
+        "wiki",
+        "read"
+      ],
+      "tier": "extended",
+      "section": "Wiki",
+      "summary": "read wiki content",
+      "example": "cocli wiki read --path messaging/some-page [--section \"Heading\"] [--range L10-L50]",
+      "flags": [
+        "--path",
+        "--section",
+        "--range"
+      ]
+    },
+    {
+      "action": "wiki.write",
+      "tool": "mcp_wiki_write",
+      "cli": [
+        "wiki",
+        "write"
+      ],
+      "tier": "extended",
+      "section": "Wiki",
+      "summary": "write or update a wiki page",
+      "example": "cocli wiki write --path messaging/page --title \"Title\" --content \"...\" [--if-version N]",
+      "flags": [
+        "--path",
+        "--title",
+        "--content",
+        "--content-md",
+        "--if-version",
+        "--stdin"
+      ]
+    },
+    {
+      "action": "wiki.list",
+      "tool": "mcp_wiki_list",
+      "cli": [
+        "wiki",
+        "list"
+      ],
+      "tier": "extended",
+      "section": "Wiki",
+      "summary": "list wiki pages",
+      "example": "cocli wiki list"
+    },
+    {
+      "action": "memory.list",
+      "tool": "memory_index_list",
+      "cli": [
+        "memory",
+        "list"
+      ],
+      "tier": "extended",
+      "section": "Memory",
+      "summary": "memory index",
+      "example": "cocli memory list [--scope agent|channel]",
+      "flags": [
+        "--scope",
+        "--channel-id"
+      ]
+    },
+    {
+      "action": "memory.read",
+      "tool": "memory_read",
+      "cli": [
+        "memory",
+        "read"
+      ],
+      "tier": "extended",
+      "section": "Memory",
+      "summary": "read one memory topic",
+      "example": "cocli memory read --scope agent --type project --topic slug",
+      "flags": [
+        "--scope",
+        "--type",
+        "--topic",
+        "--channel-id"
+      ]
+    },
+    {
+      "action": "memory.write",
+      "tool": "memory_write",
+      "cli": [
+        "memory",
+        "write"
+      ],
+      "tier": "extended",
+      "section": "Memory",
+      "summary": "save or update a memory topic",
+      "example": "cocli memory write --scope agent --type project --topic slug --description \"...\" --content \"...\"",
+      "flags": [
+        "--scope",
+        "--type",
+        "--topic",
+        "--description",
+        "--body",
+        "--content",
+        "--channel-id"
+      ]
+    },
+    {
+      "action": "memory.move",
+      "tool": "memory_move",
+      "cli": [
+        "memory",
+        "move"
+      ],
+      "tier": "extended",
+      "section": "Memory",
+      "summary": "move a topic between agent-private and channel-shared memory",
+      "example": "cocli memory move --from-scope agent --to-scope channel --to-channel-id \u003cuuid\u003e --type project --topic slug",
+      "flags": [
+        "--from-scope",
+        "--from-channel-id",
+        "--to-scope",
+        "--to-channel-id",
+        "--type",
+        "--topic"
+      ]
+    },
+    {
+      "action": "self.status",
+      "tool": "self_status",
+      "cli": [
+        "self",
+        "status"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "agent self status",
+      "example": "cocli self status"
+    },
+    {
+      "action": "self.fork",
+      "tool": "fork_thread",
+      "cli": [
+        "self",
+        "fork"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "fork a new agent thread",
+      "example": "cocli self fork --reason \"...\"",
+      "flags": [
+        "--reason"
+      ]
+    },
+    {
+      "action": "self.set_working_state",
+      "tool": "set_working_state",
+      "cli": [
+        "self",
+        "set-work"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "declare current working focus",
+      "example": "cocli self set-work --summary \"...\"",
+      "flags": [
+        "--summary",
+        "--channel",
+        "--task-number",
+        "--next-step-hint"
+      ]
+    },
+    {
+      "action": "self.get_working_state",
+      "tool": "get_working_state",
+      "cli": [
+        "self",
+        "get-work"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "read current working focus",
+      "example": "cocli self get-work"
+    },
+    {
+      "action": "self.clear_working_state",
+      "tool": "clear_working_state",
+      "cli": [
+        "self",
+        "clear-work"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "clear working focus",
+      "example": "cocli self clear-work"
+    },
+    {
+      "action": "reminder.schedule",
+      "tool": "schedule_self",
+      "cli": [
+        "reminder",
+        "schedule"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "schedule a self reminder",
+      "example": "cocli reminder schedule --after-seconds 300 --payload \"follow up\"",
+      "flags": [
+        "--after-seconds",
+        "--payload",
+        "--channel",
+        "--target"
+      ]
+    },
+    {
+      "action": "reminder.cancel",
+      "tool": "cancel_self_reminder",
+      "cli": [
+        "reminder",
+        "cancel"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "cancel a scheduled reminder",
+      "example": "cocli reminder cancel --reminder-id \u003cid\u003e [--reason \"...\"]",
+      "flags": [
+        "--reminder-id",
+        "--reason"
+      ]
+    },
+    {
+      "action": "reminder.list",
+      "tool": "list_my_reminders",
+      "cli": [
+        "reminder",
+        "list"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "list scheduled reminders",
+      "example": "cocli reminder list"
+    },
+    {
+      "action": "server.list",
+      "tool": "list_server",
+      "cli": [
+        "server",
+        "list"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "list server channels",
+      "example": "cocli server list"
+    },
+    {
+      "action": "server.create_channel",
+      "tool": "create_channel",
+      "cli": [
+        "server",
+        "create-channel"
+      ],
+      "tier": "extended",
+      "section": "Self / Reminders / Server",
+      "summary": "create a channel",
+      "example": "cocli server create-channel --name ops",
+      "flags": [
+        "--name",
+        "--description"
+      ]
+    },
+    {
+      "action": "task.list",
+      "tool": "list_tasks",
+      "cli": [
+        "task",
+        "list"
+      ],
+      "tier": "core",
+      "section": "Tasks",
+      "summary": "list tasks in a channel",
+      "example": "cocli task list --channel \"#channel\" [--status todo|in_progress|in_review|done|all]",
+      "flags": [
+        "--channel",
+        "--status"
+      ]
+    },
+    {
+      "action": "task.create",
+      "tool": "create_tasks",
+      "cli": [
+        "task",
+        "create"
+      ],
+      "tier": "extended",
+      "section": "Tasks",
+      "summary": "create a task",
+      "example": "cocli task create --channel \"#channel\" --title \"...\"",
+      "flags": [
+        "--channel",
+        "--title"
+      ]
+    },
+    {
+      "action": "task.claim",
+      "tool": "claim_tasks",
+      "cli": [
+        "task",
+        "claim"
+      ],
+      "tier": "core",
+      "section": "Tasks",
+      "summary": "claim a task before starting work",
+      "example": "cocli task claim --channel \"#channel\" --task-numbers \"1\" [--message-ids \"shortid\"]",
+      "flags": [
+        "--channel",
+        "--task-numbers",
+        "--message-ids"
+      ]
+    },
+    {
+      "action": "task.unclaim",
+      "tool": "unclaim_task",
+      "cli": [
+        "task",
+        "unclaim"
+      ],
+      "tier": "extended",
+      "section": "Tasks",
+      "summary": "release a claimed task",
+      "example": "cocli task unclaim --channel \"#channel\" --task-number 1",
+      "flags": [
+        "--channel",
+        "--task-number"
+      ]
+    },
+    {
+      "action": "task.update_status",
+      "tool": "update_task_status",
+      "cli": [
+        "task",
+        "update-status"
+      ],
+      "tier": "extended",
+      "section": "Tasks",
+      "summary": "update task status",
+      "example": "cocli task update-status --channel \"#channel\" --task-number 1 --status done [--progress \"...\"]",
+      "flags": [
+        "--channel",
+        "--task-number",
+        "--status",
+        "--progress"
+      ]
+    },
+    {
+      "action": "task.add_dependency",
+      "tool": "add_task_dependency",
+      "cli": [
+        "task",
+        "add-dependency"
+      ],
+      "tier": "extended",
+      "section": "Tasks",
+      "summary": "add a task dependency",
+      "example": "cocli task add-dependency --channel \"#channel\" --task-number 2 --depends-on 1",
+      "flags": [
+        "--channel",
+        "--task-number",
+        "--depends-on"
+      ]
+    },
+    {
+      "action": "task.get_dependencies",
+      "tool": "get_task_dependencies",
+      "cli": [
+        "task",
+        "get-dependencies"
+      ],
+      "tier": "extended",
+      "section": "Tasks",
+      "summary": "list dependencies for a task",
+      "example": "cocli task get-dependencies --channel \"#channel\" --task-number 1",
+      "flags": [
+        "--channel",
+        "--task-number"
+      ]
+    },
+    {
+      "action": "file.upload",
+      "tool": "upload_file",
+      "cli": [
+        "file",
+        "upload"
+      ],
+      "tier": "extended",
+      "section": "Files",
+      "summary": "upload a file attachment",
+      "example": "cocli file upload --path ./artifact.txt",
+      "flags": [
+        "--path"
+      ]
+    },
+    {
+      "action": "file.view",
+      "tool": "view_file",
+      "cli": [
+        "file",
+        "view"
+      ],
+      "tier": "extended",
+      "section": "Files",
+      "summary": "view an uploaded file",
+      "example": "cocli file view --file-id \u003cid\u003e",
+      "flags": [
+        "--file-id"
+      ]
+    }
+  ]
+}

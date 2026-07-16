@@ -46,6 +46,11 @@ impl RuntimeSpec {
         self
     }
 
+    pub fn with_command(mut self, command: impl Into<PathBuf>) -> Self {
+        self.command = command.into();
+        self
+    }
+
     pub fn with_models(mut self, models: Vec<RuntimeModel>) -> Self {
         self.models = models;
         self
@@ -121,6 +126,33 @@ pub struct RuntimeCatalog {
 }
 
 impl RuntimeCatalog {
+    /// Probe runtime binaries and versions without requiring a driver registry.
+    ///
+    /// This is intended for consumer startup/ready handshakes that need to
+    /// report what is installed before or independently of driver activation.
+    pub fn probe(specs: &[RuntimeSpec], probe: &dyn RuntimeProbe) -> Self {
+        let mut runtimes = specs
+            .iter()
+            .map(|spec| {
+                let binary = probe.resolve_binary(&spec.command);
+                let version = binary
+                    .as_deref()
+                    .and_then(|path| probe.detect_version(path, &spec.version_args));
+                RuntimeCatalogEntry {
+                    name: spec.name.clone(),
+                    installed: binary.is_some(),
+                    binary,
+                    version,
+                    models: spec.models.clone(),
+                    capabilities: None,
+                    unavailable_reason: None,
+                }
+            })
+            .collect::<Vec<_>>();
+        runtimes.sort_by(|a, b| a.name.cmp(&b.name));
+        Self { runtimes }
+    }
+
     pub fn discover(
         registry: &RuntimeRegistry,
         specs: &[RuntimeSpec],

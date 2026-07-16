@@ -33,7 +33,7 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.78"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yixian/cocli"
+repository = "https://github.com/yixian-huang/cocli"
 authors = ["yixian.huang <yixian.huang.cn@gmail.com>"]
 
 [workspace.dependencies]
@@ -53,6 +53,8 @@ nix = { version = "0.27", features = ["signal"] }
 dirs = "5"
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 url = "=2.5.2"
+native-tls = "=0.2.12"
+security-framework = "=2.11.1"
 tempfile = "=3.10.1"
 base64 = "0.22"
 # rayon 1.11+ / rayon-core 1.13+ require rustc 1.80; pin the last lineage

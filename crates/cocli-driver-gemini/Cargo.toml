@@ -1,13 +1,16 @@
 [package]
 name              = "cocli-driver-gemini"
-version.workspace = true
+version           = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description       = "Gemini CLI runtime adapter for cocli"
 
 [dependencies]
-cocli-driver-core   = { path = "../cocli-driver-core" }
-cocli-bridge-config = { path = "../cocli-bridge-config" }
+cocli-driver-core   = { version = "0.1.0", path = "../cocli-driver-core" }
+cocli-bridge-config = { version = "0.1.0", path = "../cocli-bridge-config" }
 
 tokio      = { workspace = true }
 serde      = { workspace = true }

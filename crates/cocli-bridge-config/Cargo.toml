@@ -1,9 +1,12 @@
 [package]
 name              = "cocli-bridge-config"
-version.workspace = true
+version           = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description       = "Shared cocli bridge configuration and agent action CLI injection"
 
 [dependencies]
 serde      = { workspace = true }

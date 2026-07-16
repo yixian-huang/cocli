@@ -16,7 +16,7 @@ bootstrap  channels  first    tasks +    polish +    plugin     brew +    stable
 |-----------|----------|--------|
 | M0        | repo bootstrap, workspace skeleton | **in progress** (2026-05) |
 | M0.0.1    | channels + messages (no agent) | planned |
-| M0.0.2    | first local runtime replies (Claude, Cursor, Codex, Gemini) | planned |
+| M0.0.2    | first local runtime replies (8-runtime OSS production matrix) | planned |
 | M0.0.3    | tasks + sessions + workspace UI | planned |
 | M0.0.4    | polish + soft launch | planned |
 | M0.1.0    | plugin protocol + Rust/TS SDK | planned |
@@ -28,6 +28,10 @@ bootstrap  channels  first    tasks +    polish +    plugin     brew +    stable
 `0.0.x` is alpha. Schema and APIs may break without migration support.
 `0.1.0+` is beta. APIs settle. Schema migrations preserved.
 `1.0.0+` is stable. SemVer guarantees. Breaking changes ride v2 paths.
+
+The shared Runtime/Driver crates begin their independent beta line at `0.1.0`.
+Their ownership, exact-revision cloud consumption, and compatibility gate are
+defined in [docs/runtime-ownership.md](docs/runtime-ownership.md).
 
 ## Non-goals (explicit)
 

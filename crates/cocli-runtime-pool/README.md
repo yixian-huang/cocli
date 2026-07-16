@@ -13,7 +13,11 @@ adapter: Claude, Cursor, Codex, Gemini, Kimi, Grok, Chatrs, and OpenCode.
 Callers may override binary paths or provide additional specs without changing
 the registry contract.
 
-Discovery is local and deterministic. `SystemRuntimeProbe` searches `PATH`,
-checks executable files, and invokes the configured version arguments. It does
-not call provider APIs. Tests and embedders can implement `RuntimeProbe` to
-avoid process execution or supply cached metadata.
+Binary discovery is local and deterministic. `SystemRuntimeProbe` searches
+`PATH`, checks executable files, and invokes the configured version arguments.
+Tests and embedders can implement `RuntimeProbe` to avoid process execution or
+supply cached metadata.
+
+`discover_runtime_models()` is the optional production model-enrichment layer.
+It prefers local CLI/cache data, queries provider APIs only when matching
+credentials are present, and retains deterministic fallbacks.

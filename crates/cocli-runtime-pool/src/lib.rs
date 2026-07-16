@@ -4,6 +4,7 @@
 
 mod catalog;
 mod discovery;
+mod models;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -15,6 +16,7 @@ pub use catalog::{
     RuntimeModel, RuntimeSpec,
 };
 pub use discovery::{RuntimeProbe, SystemRuntimeProbe};
+pub use models::discover_runtime_models;
 
 pub struct RuntimeRegistry {
     drivers: HashMap<String, Arc<dyn Driver>>,

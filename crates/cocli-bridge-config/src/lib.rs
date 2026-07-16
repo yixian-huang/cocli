@@ -12,6 +12,10 @@
 //! }
 //! ```
 
+mod action_inject;
+mod action_manifest;
+mod action_wrapper;
+
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,6 +23,13 @@ use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+
+pub use action_inject::{inject_action_cli, merge_action_env_vars, ActionInjection};
+pub use action_manifest::{
+    compact_reinforcement_commands, core_cli_phrases, embedded_manifest, embedded_manifest_bytes,
+    format_platform_cli_prompt, tool_for_action, tool_for_cli, ActionManifest, ManifestCommand,
+};
+pub use action_wrapper::render_cocli_wrapper;
 
 /// Inputs required to render the MCP config for the claude-bridge.
 pub struct BridgeConfig<'a> {

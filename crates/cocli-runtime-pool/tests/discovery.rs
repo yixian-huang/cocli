@@ -175,3 +175,27 @@ fn absolute_non_executable_file_is_not_installed() {
         Some(format!("binary not found: {}", binary.display()))
     );
 }
+
+#[test]
+fn probe_reports_installed_specs_without_a_driver_registry() {
+    let temp = tempfile::tempdir().unwrap();
+    let binary = temp.path().join("standalone-runtime");
+    write_executable(&binary, "#!/bin/sh\necho 'standalone 2.0'\n");
+
+    let specs = vec![
+        RuntimeSpec::new("standalone", "placeholder")
+            .with_command(binary.clone())
+            .with_models(vec![RuntimeModel::new("model-1", "Model 1")]),
+        RuntimeSpec::new("missing", "missing-runtime"),
+    ];
+    let catalog =
+        cocli_runtime_pool::RuntimeCatalog::probe(&specs, &SystemRuntimeProbe::with_path(None));
+
+    assert_eq!(catalog.get("standalone").unwrap().binary, Some(binary));
+    assert_eq!(
+        catalog.get("standalone").unwrap().version.as_deref(),
+        Some("standalone 2.0")
+    );
+    assert!(catalog.get("standalone").unwrap().capabilities.is_none());
+    assert!(!catalog.get("missing").unwrap().installed);
+}

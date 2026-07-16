@@ -50,14 +50,22 @@ A GitHub Action checks that every commit in a PR carries the
 
 ## Daemon / driver layer scope
 
-The canonical shared driver layer lives in this repository. M0 targets four
-first-party runtime adapters: Claude, Cursor, Codex, and Gemini. Shared
-runtime fixes should land here first with contract fixtures; cloud consumes
-an explicit OSS revision or release and keeps SaaS-only adapters private.
+The canonical shared driver layer lives in this repository. The first-party
+production matrix is Claude, Cursor, Codex, Gemini, Kimi, Grok, Chatrs, and
+OpenCode. Shared runtime fixes land here first with contract fixtures; cloud
+consumes an exact OSS revision and does not retain parallel adapter,
+discovery, bridge-injection, or driver-core implementations.
 
-New runtime families beyond the initial four require an `rfc:proposed`
+New runtime families beyond this production matrix require an `rfc:proposed`
 issue. Changes to an existing adapter do not require an RFC when they preserve
 the shared driver contract and include parser/spawn regression tests.
+
+Before requesting review for runtime changes, run:
+
+    cargo +1.78 test --workspace
+    cargo +1.78 clippy --workspace --all-targets -- -D warnings
+    cargo fmt --all -- --check
+    scripts/check-runtime-release.sh
 
 ## Plugin authors
 
