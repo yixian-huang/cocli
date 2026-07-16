@@ -210,13 +210,28 @@ impl AgentActor<Idle> {
             }
         });
 
+        let should_send_initial_prompt = !cfg.system_prompt.is_empty()
+            && !driver.is_turn_exit()
+            && driver.requires_initial_prompt();
+        let initial_prompt_sent = if should_send_initial_prompt {
+            try_write_encoded_message(
+                &mut stdin_storage,
+                driver.as_ref(),
+                &cfg.system_prompt,
+                None,
+            )
+            .await
+            .map_err(|e| StartError {
+                message: format!("write pre-session initial prompt: {e}"),
+            })?
+        } else {
+            false
+        };
+
         let session_id =
             collect_session_id(driver.as_ref(), &mut event_rx, &mut stdin_storage, &self.id)
                 .await?;
-        if !cfg.system_prompt.is_empty()
-            && !driver.is_turn_exit()
-            && driver.requires_initial_prompt()
-        {
+        if should_send_initial_prompt && !initial_prompt_sent {
             write_encoded_message(
                 &mut stdin_storage,
                 driver.as_ref(),
@@ -336,10 +351,27 @@ async fn write_encoded_message(
     text: &str,
     session_id: Option<&str>,
 ) -> Result<(), String> {
-    let encoded = driver
-        .encode_stdin_message(text, session_id, MessageMode::User)
-        .ok_or_else(|| format!("{} encode_stdin_message returned no payload", driver.name()))?;
-    write_raw_message(stdin, driver, encoded.as_bytes()).await
+    if try_write_encoded_message(stdin, driver, text, session_id).await? {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} encode_stdin_message returned no payload",
+            driver.name()
+        ))
+    }
+}
+
+async fn try_write_encoded_message(
+    stdin: &mut ActorStdinStorage,
+    driver: &dyn Driver,
+    text: &str,
+    session_id: Option<&str>,
+) -> Result<bool, String> {
+    let Some(encoded) = driver.encode_stdin_message(text, session_id, MessageMode::User) else {
+        return Ok(false);
+    };
+    write_raw_message(stdin, driver, encoded.as_bytes()).await?;
+    Ok(true)
 }
 
 async fn write_raw_message(
@@ -392,6 +424,16 @@ fn spawn_stderr_drain(
 }
 
 impl AgentActor<Running> {
+    /// Executes a raw stdin write requested by the active runtime driver.
+    pub async fn write_driver_request(&mut self, data: &str) -> Result<(), String> {
+        write_raw_message(
+            &mut self.state.stdin_storage,
+            self.state.driver.as_ref(),
+            data.as_bytes(),
+        )
+        .await
+    }
+
     /// Deliver a server-side message to the agent. Emits `AgentDeliverAccepted`
     /// (when seq>0 && attempt>0) before the write, and always emits
     /// `AgentDeliverAck` afterwards with the `routeAction` derived from
@@ -682,11 +724,7 @@ impl AgentActor<Running> {
                             self.state.session_id = session_id;
                         }
                         Some(DriverEvent::Write { data }) => {
-                            if let Err(error) = write_raw_message(
-                                &mut self.state.stdin_storage,
-                                self.state.driver.as_ref(),
-                                data.as_bytes(),
-                            ).await {
+                            if let Err(error) = self.write_driver_request(&data).await {
                                 tracing::warn!(agent_id = %agent_id, %error, "driver-requested stdin write failed");
                             }
                         }

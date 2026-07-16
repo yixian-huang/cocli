@@ -1,5 +1,7 @@
 //! Local server assembly for cocli.
 
+mod runtime;
+
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +10,8 @@ use axum::Router;
 use cocli_api::{router, RuntimeService};
 use cocli_store::{Store, StoreError};
 use tokio::net::TcpListener;
+
+pub use runtime::{LocalRuntimeConfig, LocalRuntimeService, RuntimeSetupError};
 
 /// Configuration for one local cocli server.
 #[derive(Clone, Debug)]

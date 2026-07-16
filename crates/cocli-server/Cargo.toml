@@ -14,6 +14,9 @@ axum = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
 cocli-store = { path = "../cocli-store" }
 cocli-api = { path = "../cocli-api" }
 cocli-ws = { path = "../cocli-ws" }
@@ -22,3 +25,13 @@ cocli-protocol = { path = "../cocli-protocol" }
 cocli-actor = { path = "../cocli-actor" }
 cocli-health = { path = "../cocli-health" }
 cocli-web = { path = "../cocli-web", features = ["embed-web"] }
+cocli-runtime-pool = { path = "../cocli-runtime-pool" }
+cocli-driver-core = { path = "../cocli-driver-core" }
+cocli-driver-claude = { path = "../cocli-driver-claude" }
+cocli-driver-cursor = { path = "../cocli-driver-cursor" }
+cocli-driver-codex = { path = "../cocli-driver-codex" }
+cocli-driver-gemini = { path = "../cocli-driver-gemini" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+cocli-pidfile = { path = "../cocli-pidfile" }

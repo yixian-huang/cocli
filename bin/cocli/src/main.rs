@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use cocli_api::{EchoRuntimeService, NoRuntimeService, RuntimeService};
-use cocli_server::{Server, ServerConfig};
+use cocli_api::{EchoRuntimeService, RuntimeService};
+use cocli_server::{LocalRuntimeConfig, LocalRuntimeService, Server, ServerConfig};
 
 #[derive(Parser, Debug)]
 #[command(name = "cocli", version, about = "Local-first multi-agent platform")]
@@ -39,7 +39,13 @@ async fn main() -> Result<()> {
     let runtime: Arc<dyn RuntimeService> = if args.fake_runtime {
         Arc::new(EchoRuntimeService)
     } else {
-        Arc::new(NoRuntimeService)
+        Arc::new(
+            LocalRuntimeService::discover(LocalRuntimeConfig::new(
+                data_dir.join("workspaces"),
+                format!("http://{}", args.bind),
+            ))
+            .context("failed to discover local runtimes")?,
+        )
     };
     let server = Server::bind(
         ServerConfig {
