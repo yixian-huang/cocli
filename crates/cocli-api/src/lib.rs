@@ -779,6 +779,14 @@ pub fn router_with_delivery_config(
             "/api/bridge/agents/:agent_id/memory/move",
             post(bridge_move_memory_topic),
         )
+        .route(
+            "/api/bridge/agents/:agent_id/wiki/pages",
+            get(bridge_list_wiki_pages),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/wiki/pages/:path",
+            get(bridge_get_wiki_page).put(bridge_upsert_wiki_page),
+        )
         .with_state(AppState {
             store,
             runtime,
@@ -1950,6 +1958,71 @@ async fn resolve_bridge_memory_namespace(
             Ok(MemoryNamespace::Channel(channel_id))
         }
     }
+}
+
+async fn bridge_list_wiki_pages(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<WikiListQuery>,
+) -> Result<Json<WikiPagesResponse>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(WikiPagesResponse {
+        pages: state
+            .store
+            .list_wiki_pages(query.q.as_deref(), query.tag.as_deref(), query.limit)
+            .await?,
+    }))
+}
+
+async fn bridge_get_wiki_page(
+    State(state): State<AppState>,
+    Path((agent_id, path)): Path<(Uuid, String)>,
+) -> Result<Json<WikiPage>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    let path = validate_wiki_path(&path)?;
+    state
+        .store
+        .get_wiki_page(path)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("wiki page not found"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeUpsertWikiPageRequest {
+    title: String,
+    #[serde(alias = "content_md", alias = "content")]
+    content_md: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    reason: Option<String>,
+    #[serde(default, alias = "if_version")]
+    if_version: Option<i64>,
+}
+
+async fn bridge_upsert_wiki_page(
+    State(state): State<AppState>,
+    Path((agent_id, path)): Path<(Uuid, String)>,
+    Json(request): Json<BridgeUpsertWikiPageRequest>,
+) -> Result<Json<WikiPage>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let path = validate_wiki_path(&path)?;
+    let title = non_empty("wiki title", &request.title)?;
+    Ok(Json(
+        state
+            .store
+            .upsert_wiki_page(
+                path,
+                title,
+                &request.content_md,
+                &request.tags,
+                Some(&agent.name),
+                request.reason.as_deref(),
+                request.if_version,
+            )
+            .await?,
+    ))
 }
 
 fn default_bridge_message_limit() -> i64 {

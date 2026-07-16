@@ -360,6 +360,70 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
 }
 
 #[tokio::test]
+async fn bridge_wiki_routes_attribute_agent_writes_and_search_pages() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "wiki-bridge"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let (_, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "wiki-writer",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id");
+    let encoded_path = "reference%2Fbridge-api";
+
+    let (write_status, written) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/bridge/agents/{agent_id}/wiki/pages/{encoded_path}"),
+        json!({
+            "title": "Bridge API",
+            "content_md": "# Bridge API\n\nDurable.",
+            "tags": ["reference"],
+            "reason": "record contract"
+        }),
+    )
+    .await;
+    assert_eq!(write_status, StatusCode::OK);
+    assert_eq!(written["updatedBy"], "wiki-writer");
+    assert_eq!(written["path"], "reference/bridge-api");
+
+    let (search_status, search) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{agent_id}/wiki/pages?q=Durable&limit=10"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(search_status, StatusCode::OK);
+    assert_eq!(search["pages"].as_array().map(Vec::len), Some(1));
+
+    let (read_status, read) = json_request(
+        app,
+        "GET",
+        &format!("/api/bridge/agents/{agent_id}/wiki/pages/{encoded_path}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(read_status, StatusCode::OK);
+    assert_eq!(read["content"], "# Bridge API\n\nDurable.");
+}
+
+#[tokio::test]
 async fn post_message_persists_user_message_and_fake_agent_reply() {
     let store = Store::in_memory().await.expect("store should open");
     let app = router(store, Arc::new(FakeRuntime));
