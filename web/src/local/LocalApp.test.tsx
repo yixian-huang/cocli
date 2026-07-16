@@ -27,6 +27,12 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe('LocalApp', () => {
   beforeEach(() => {
+    localStorage.clear()
+    window.matchMedia = vi.fn().mockReturnValue({
+      matches: false,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })
     Element.prototype.scrollIntoView = vi.fn()
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
@@ -86,5 +92,34 @@ describe('LocalApp', () => {
 
     expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Ship the loop')).toBeInTheDocument())
+  })
+
+  it('persists light mode and switches the workspace to Chinese', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Appearance: Dark/ }))
+    expect(document.documentElement.dataset.localTheme).toBe('light')
+    expect(localStorage.getItem('cocli-local-theme')).toBe('light')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Language' }))
+    fireEvent.click(screen.getByRole('option', { name: /简体中文/ }))
+
+    expect(await screen.findByRole('heading', { name: '添加 Agent' })).toBeInTheDocument()
+    expect(document.documentElement.lang).toBe('zh-CN')
+    expect(localStorage.getItem('cocli-local-language')).toBe('zh-CN')
+  })
+
+  it('supports keyboard selection in the agent runtime menu', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    const runtimeSelect = screen.getByRole('button', { name: 'Runtime' })
+    fireEvent.keyDown(runtimeSelect, { key: 'ArrowDown' })
+
+    expect(runtimeSelect).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByRole('listbox', { name: 'Runtime' })).toBeInTheDocument()
+    fireEvent.keyDown(runtimeSelect, { key: 'Enter' })
+    expect(runtimeSelect).toHaveAttribute('aria-expanded', 'false')
   })
 })
