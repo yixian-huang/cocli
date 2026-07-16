@@ -7,12 +7,16 @@ use async_trait::async_trait;
 use cocli_agent::state::Idle;
 use cocli_agent::{AgentActor, StartCfg};
 use cocli_api::{RuntimeError, RuntimeInfo, RuntimeService};
+use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
 use cocli_driver_codex::CodexDriver;
 use cocli_driver_core::types::TurnStatus;
 use cocli_driver_core::{Driver, DriverEvent};
 use cocli_driver_cursor::CursorDriver;
 use cocli_driver_gemini::GeminiDriver;
+use cocli_driver_grok::GrokDriver;
+use cocli_driver_kimi::KimiDriver;
+use cocli_driver_opencode::OpenCodeDriver;
 use cocli_protocol::types::DeliveryMessage;
 use cocli_protocol::AgentDeliverMsg;
 use cocli_runtime_pool::{
@@ -225,10 +229,14 @@ fn resolve_bridge(probe: &dyn RuntimeProbe) -> Result<PathBuf, RuntimeSetupError
 
 fn create_driver(name: &str, binary: PathBuf, bridge: PathBuf) -> Option<Arc<dyn Driver>> {
     match name {
+        "chatrs" => Some(Arc::new(ChatrsDriver::new(binary, bridge))),
         "claude" => Some(Arc::new(ClaudeDriver::new(binary, bridge))),
         "cursor" => Some(Arc::new(CursorDriver::new(binary, bridge))),
         "codex" => Some(Arc::new(CodexDriver::new(binary, bridge))),
         "gemini" => Some(Arc::new(GeminiDriver::new(binary, bridge))),
+        "grok" => Some(Arc::new(GrokDriver::new(binary))),
+        "kimi" => Some(Arc::new(KimiDriver::new(binary, bridge))),
+        "opencode" => Some(Arc::new(OpenCodeDriver::new(binary, bridge))),
         _ => None,
     }
 }
@@ -520,6 +528,18 @@ mod tests {
 
         assert!(reply.contains("ship it"));
         assert_eq!(service.list().await[0].models, vec!["test-model"]);
+    }
+
+    #[test]
+    fn creates_every_runtime_in_the_oss_catalog() {
+        let binary = PathBuf::from("/bin/false");
+        let bridge = PathBuf::from("/bin/cocli-bridge");
+
+        for runtime in initial_oss_runtime_specs() {
+            let driver = create_driver(&runtime.name, binary.clone(), bridge.clone())
+                .unwrap_or_else(|| panic!("missing local driver constructor: {}", runtime.name));
+            assert_eq!(driver.name(), runtime.name);
+        }
     }
 
     #[tokio::test]
