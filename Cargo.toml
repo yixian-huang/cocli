@@ -26,6 +26,7 @@ members = [
     "crates/cocli-plugin",
     "crates/cocli-plugin-sdk",
     "bin/cocli",
+    "bin/cocli-bridge",
 ]
 
 [workspace.package]

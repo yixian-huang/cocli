@@ -357,6 +357,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cocli-bridge"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "cocli-bridge-config"
 version = "0.1.0"
 dependencies = [

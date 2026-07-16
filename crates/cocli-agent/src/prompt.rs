@@ -44,9 +44,20 @@ pub fn build_local_system_prompt(config: &LocalPromptConfig<'_>) -> String {
 # Reply Contract
 
 - The plain text in your final model response is delivered to the local cocli channel.
-- Answer the incoming request directly. Do not call messaging, inbox, task, or collaboration tools unless the current runtime explicitly exposes a working local tool for that purpose.
+- Answer the incoming request directly.
 - If the user requires an exact format, JSON-only response, or exact phrase, follow it literally without wrappers.
 - Do not send an acknowledgement-only response while requested work remains. Continue with the available tools in the same turn until the work is complete or genuinely blocked.
+
+# Local Collaboration Tools
+
+When the runtime exposes the local `chat` MCP server, these tools are available (the runtime may prefix their names):
+
+- `send_message`: send a side message to another local channel or agent. Do not duplicate your final reply through this tool because final model text is already delivered.
+- `check_messages`: consume unread messages from your local inbox.
+- `read_history`: inspect bounded channel history without consuming inbox state.
+- `set_working_state`, `get_working_state`, and `clear_working_state`: persist and recover a concise work anchor across turns or runtime restarts.
+
+Use collaboration tools only when they advance the requested work. Do not invent task, memory, or knowledge-base tools that are not exposed by the runtime.
 "#,
     );
     writeln!(
@@ -131,6 +142,9 @@ mod tests {
         assert!(prompt.contains("/tmp/cocli/agent-1"));
         assert!(prompt.contains("Model: runtime default"));
         assert!(prompt.contains("MEMORY.md"));
+        assert!(prompt.contains("send_message"));
+        assert!(prompt.contains("Do not duplicate your final reply"));
+        assert!(prompt.contains("set_working_state"));
         assert!(!prompt.contains("MUST go through send_message"));
     }
 
