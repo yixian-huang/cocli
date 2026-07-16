@@ -1,5 +1,5 @@
 [package]
-name              = "cocli-driver-claude"
+name              = "cocli-driver-codex"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,10 +9,10 @@ license.workspace = true
 cocli-driver-core   = { path = "../cocli-driver-core" }
 cocli-bridge-config = { path = "../cocli-bridge-config" }
 
-tokio      = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-tracing    = { workspace = true }
+tokio       = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+tracing     = { workspace = true }
 thiserror   = { workspace = true }
 async-trait = { workspace = true }
 dirs        = { workspace = true }

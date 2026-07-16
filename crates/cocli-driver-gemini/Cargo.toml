@@ -1,5 +1,5 @@
 [package]
-name              = "cocli-driver-claude"
+name              = "cocli-driver-gemini"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -20,3 +20,7 @@ dirs        = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 dirs     = { workspace = true }
+
+[[example]]
+name = "dump_settings"
+path = "examples/dump_settings.rs"

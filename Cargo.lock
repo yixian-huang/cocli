@@ -364,6 +364,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -383,10 +384,28 @@ name = "cocli-driver-claude"
 version = "0.0.0"
 dependencies = [
  "async-trait",
- "cocli-driver",
- "nix",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "dirs",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "cocli-driver-codex"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -400,6 +419,36 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "cocli-driver-cursor"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "cocli-driver-gemini"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "cocli-bridge-config",
+ "cocli-driver-core",
+ "dirs",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

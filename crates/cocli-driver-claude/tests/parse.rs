@@ -1,4 +1,6 @@
+use cocli_driver_claude::ClaudeDriver;
 use cocli_driver_claude::*;
+use cocli_driver_core::Driver;
 
 #[test]
 fn parses_session_started() {
@@ -73,22 +75,26 @@ fn parses_unknown_safely() {
     assert!(matches!(parse_line(line), ClaudeEvent::Unknown));
 }
 
+/// Regression: claude's `result` event normalizes to TurnStatus::Completed
+/// (claude stream-json has no turn-status field; conversion defaults to
+/// Completed — cancellation classification happens at the actor level).
 #[test]
-fn encode_user_message_includes_session() {
-    let s = encode_user_message("hello", Some("sid-1"));
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-    assert_eq!(v["type"], "user");
-    assert_eq!(v["session_id"], "sid-1");
-    assert_eq!(v["message"]["role"], "user");
-    assert_eq!(v["message"]["content"][0]["type"], "text");
-    assert_eq!(v["message"]["content"][0]["text"], "hello");
-}
+fn claude_turn_end_converts_with_status_completed() {
+    use cocli_driver_core::types::TurnStatus;
+    use cocli_driver_core::DriverEvent;
+    use std::path::PathBuf;
 
-#[test]
-fn encode_user_message_omits_session_when_none() {
-    let s = encode_user_message("hello", None);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
-    assert!(v.get("session_id").is_none());
-    assert_eq!(v["type"], "user");
-    assert_eq!(v["message"]["content"][0]["text"], "hello");
+    let line = r#"{"type":"result","subtype":"success","usage":{"input_tokens":10,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"total_cost_usd":0.001}"#;
+    let drv = ClaudeDriver::new(
+        PathBuf::from("/bin/false"),
+        PathBuf::from("/opt/cocli/bin/cocli-bridge"),
+    );
+    let evs = drv.parse_event(line);
+    assert_eq!(evs.len(), 1);
+    match &evs[0] {
+        DriverEvent::TurnEnd { status, .. } => {
+            assert_eq!(status, &TurnStatus::Completed);
+        }
+        other => panic!("expected TurnEnd, got {other:?}"),
+    }
 }

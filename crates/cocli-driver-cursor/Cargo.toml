@@ -1,5 +1,5 @@
 [package]
-name              = "cocli-driver-claude"
+name              = "cocli-driver-cursor"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -12,11 +12,8 @@ cocli-bridge-config = { path = "../cocli-bridge-config" }
 tokio      = { workspace = true }
 serde      = { workspace = true }
 serde_json = { workspace = true }
-tracing    = { workspace = true }
-thiserror   = { workspace = true }
-async-trait = { workspace = true }
 dirs        = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-dirs     = { workspace = true }
