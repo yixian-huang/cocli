@@ -19,6 +19,7 @@ pub mod fork_reason;
 pub mod format;
 pub mod metrics;
 pub mod obs;
+pub mod prompt;
 pub mod queue;
 pub mod recovery;
 pub mod router;

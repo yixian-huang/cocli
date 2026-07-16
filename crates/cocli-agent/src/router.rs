@@ -216,6 +216,11 @@ impl AgentRouter {
             obs_tx: self.obs_tx.clone(),
             state: Idle,
         };
+        let system_prompt = build_bootstrap_prompt(config);
+        let initial_prompt = crate::prompt::compose_session_bootstrap_prompt(
+            &system_prompt,
+            &build_initial_prompt(),
+        );
         let cfg = StartCfg {
             registry: Arc::clone(&self.cfg.runtime_registry),
             runtime_name: if config.runtime.is_empty() {
@@ -237,7 +242,8 @@ impl AgentRouter {
             // Build the minimal bootstrap prompt so claude knows to use
             // mcp__chat__send_message for all replies. Go parity:
             // prompt.BuildSystemPrompt + ComposeSessionBootstrapPrompt.
-            system_prompt: build_bootstrap_prompt(config),
+            system_prompt,
+            initial_prompt,
             // Pass server-supplied env vars through (e.g. CHATRS_PROVIDER_KEY
             // decrypted from the agent_provider_binding by the Go server).
             env_vars: config.env_vars.clone().unwrap_or_default(),
@@ -561,15 +567,16 @@ fn build_bootstrap_prompt(config: &cocli_protocol::types::AgentConfig) -> String
          # Critical Rules\n\
          - ALL replies MUST go through mcp__chat__send_message — never output plain text as a reply.\n\
          - Text you output as model text is NOT delivered to channel users. Only mcp__chat__send_message creates visible messages.\n\
-         - For every user message you receive, call mcp__chat__send_message with your reply.\n\
-         \n\
-         ---\n\
-         \n\
-         You have just started. Use mcp__chat__check_messages to see if there are any pending messages.",
+         - For every user message you receive, call mcp__chat__send_message with your reply.",
         name = name,
         display_name = display_name,
         today = today,
     )
+}
+
+fn build_initial_prompt() -> String {
+    "You have just started. Use mcp__chat__check_messages to see if there are any pending messages."
+        .to_owned()
 }
 
 // ============================================================================

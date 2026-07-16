@@ -6,6 +6,10 @@ use std::time::{Duration, Instant as StdInstant};
 use async_trait::async_trait;
 use cocli_agent::context::{classify_context_pressure, default_backstop_pct, ContextPressureTier};
 use cocli_agent::fork_reason::classify_fork_reason;
+use cocli_agent::prompt::{
+    build_local_system_prompt, compose_session_bootstrap_prompt, LocalPromptConfig,
+    LOCAL_INITIALIZATION_PROMPT,
+};
 use cocli_agent::recovery::{ProbeResult, RecoveryStore};
 use cocli_agent::state::Idle;
 use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
@@ -34,11 +38,6 @@ use cocli_store::{Agent, Message};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio::time::Instant;
 use uuid::Uuid;
-
-const INITIALIZATION_PROMPT: &str = "\
-You are a local cocli agent. Reply to tasks in plain text. \
-Do not call messaging or collaboration tools. \
-For this initialization turn, reply with exactly READY.";
 
 /// Inputs used to discover and run local CLI runtimes.
 #[derive(Clone, Debug)]
@@ -482,6 +481,19 @@ async fn start_running_actor(
         obs_tx,
         state: Idle,
     };
+    let workspace_dir = config.workspace_root.join(agent.id.to_string());
+    let current_date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let model = agent.model.as_deref().unwrap_or_default();
+    let system_prompt = build_local_system_prompt(&LocalPromptConfig {
+        agent_id: &agent.id.to_string(),
+        agent_name: &agent.name,
+        runtime: &agent.runtime,
+        model,
+        workspace_dir: &workspace_dir,
+        current_date: &current_date,
+    });
+    let initial_prompt =
+        compose_session_bootstrap_prompt(&system_prompt, LOCAL_INITIALIZATION_PROMPT);
     let start = actor.start(StartCfg {
         registry: Arc::clone(registry),
         runtime_name: agent.runtime.clone(),
@@ -490,10 +502,11 @@ async fn start_running_actor(
         auth_token: config.auth_token.clone(),
         channel_id: agent.channel_id,
         channel_name: "local".to_owned(),
-        model: agent.model.clone().unwrap_or_default(),
+        model: model.to_owned(),
         launch_id: Uuid::new_v4().to_string(),
         resume_session: None,
-        system_prompt: INITIALIZATION_PROMPT.to_owned(),
+        system_prompt,
+        initial_prompt,
         env_vars: HashMap::new(),
     });
     let mut running = tokio::time::timeout(config.turn_timeout, start)
@@ -1287,6 +1300,10 @@ mod tests {
 
     use super::*;
 
+    fn encode_test_line(text: &str) -> String {
+        text.replace('\n', "\\n")
+    }
+
     struct FakeDriver;
 
     #[async_trait]
@@ -1369,7 +1386,7 @@ mod tests {
             _session_id: Option<&str>,
             _mode: MessageMode,
         ) -> Option<String> {
-            Some(text.to_owned())
+            Some(encode_test_line(text))
         }
 
         fn supports_turn_cancel(&self) -> bool {
@@ -1450,7 +1467,7 @@ mod tests {
             _session_id: Option<&str>,
             _mode: MessageMode,
         ) -> Option<String> {
-            Some(text.to_owned())
+            Some(encode_test_line(text))
         }
 
         fn supports_turn_cancel(&self) -> bool {
@@ -1554,7 +1571,7 @@ mod tests {
             _session_id: Option<&str>,
             _mode: MessageMode,
         ) -> Option<String> {
-            Some(text.to_owned())
+            Some(encode_test_line(text))
         }
 
         fn supports_turn_cancel(&self) -> bool {
@@ -1633,7 +1650,7 @@ mod tests {
                 .arg("-c")
                 .arg("printf 'session\\ntext:%s\\nturn\\n' \"$1\"")
                 .arg("turn-exit")
-                .arg(cfg.initial_prompt)
+                .arg(encode_test_line(cfg.initial_prompt))
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1776,7 +1793,7 @@ mod tests {
             _session_id: Option<&str>,
             _mode: MessageMode,
         ) -> Option<String> {
-            Some(text.to_owned())
+            Some(encode_test_line(text))
         }
 
         fn supports_turn_cancel(&self) -> bool {
@@ -1895,7 +1912,7 @@ mod tests {
             _session_id: Option<&str>,
             _mode: MessageMode,
         ) -> Option<String> {
-            Some(text.to_owned())
+            Some(encode_test_line(text))
         }
 
         fn supports_turn_cancel(&self) -> bool {

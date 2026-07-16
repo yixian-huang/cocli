@@ -215,6 +215,7 @@ async fn actor_uses_core_driver_for_prepare_spawn_parse_and_delivery() {
             launch_id: "launch-1".to_string(),
             resume_session: None,
             system_prompt: String::new(),
+            initial_prompt: String::new(),
             env_vars: HashMap::new(),
         })
         .await
@@ -291,7 +292,8 @@ async fn actor_sends_required_initial_prompt_before_waiting_for_session() {
             model: "fake-model".to_string(),
             launch_id: "launch-2".to_string(),
             resume_session: None,
-            system_prompt: "bootstrap".to_string(),
+            system_prompt: "platform contract".to_string(),
+            initial_prompt: "bootstrap".to_string(),
             env_vars: HashMap::new(),
         }),
     )

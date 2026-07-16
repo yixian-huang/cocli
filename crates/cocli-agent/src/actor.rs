@@ -34,6 +34,7 @@ use cocli_protocol::{
 
 use crate::format::format_delivery_bundle;
 use crate::obs::AgentObservationChanged;
+use crate::prompt::compose_session_bootstrap_prompt;
 use crate::state::{ActorStdinStorage, AgentState, Idle, RespawnCtx, Running, Stopping};
 use crate::types::{AgentCmd, AgentStateChange};
 
@@ -58,8 +59,10 @@ pub struct StartCfg {
     pub model: String,
     pub launch_id: String,
     pub resume_session: Option<String>,
-    /// System prompt passed to the driver (empty for Phase 0a claude).
+    /// Persistent system contract passed to the driver and workspace hooks.
     pub system_prompt: String,
+    /// Per-spawn user turn used to initialize the runtime session.
+    pub initial_prompt: String,
     /// Extra env vars forwarded to the runtime subprocess.
     pub env_vars: HashMap<String, String>,
 }
@@ -113,7 +116,7 @@ impl AgentActor<Idle> {
             server_url: &bridge_http_url,
             auth_token: &cfg.auth_token,
             system_prompt: &cfg.system_prompt,
-            initial_prompt: &cfg.system_prompt,
+            initial_prompt: &cfg.initial_prompt,
             env_vars: &spawn_env,
         };
 
@@ -210,14 +213,14 @@ impl AgentActor<Idle> {
             }
         });
 
-        let should_send_initial_prompt = !cfg.system_prompt.is_empty()
+        let should_send_initial_prompt = !cfg.initial_prompt.is_empty()
             && !driver.is_turn_exit()
             && driver.requires_initial_prompt();
         let initial_prompt_sent = if should_send_initial_prompt {
             try_write_encoded_message(
                 &mut stdin_storage,
                 driver.as_ref(),
-                &cfg.system_prompt,
+                &cfg.initial_prompt,
                 None,
             )
             .await
@@ -235,7 +238,7 @@ impl AgentActor<Idle> {
             write_encoded_message(
                 &mut stdin_storage,
                 driver.as_ref(),
-                &cfg.system_prompt,
+                &cfg.initial_prompt,
                 Some(&session_id),
             )
             .await
@@ -499,6 +502,7 @@ impl AgentActor<Running> {
     /// next initial prompt.
     async fn respawn_and_deliver(&mut self, message: &str, ctx: &RespawnCtx) -> Result<(), String> {
         let _ = self.state.child.kill().await;
+        let initial_prompt = compose_session_bootstrap_prompt(&ctx.system_prompt, message);
         let spawn_cfg = SpawnConfig {
             working_dir: &ctx.work_dir,
             model: &ctx.model,
@@ -508,7 +512,7 @@ impl AgentActor<Running> {
             server_url: &ctx.server_url,
             auth_token: &ctx.auth_token,
             system_prompt: &ctx.system_prompt,
-            initial_prompt: message,
+            initial_prompt: &initial_prompt,
             env_vars: &ctx.env_vars,
         };
         let driver: Arc<dyn Driver> = match ctx.driver.as_process_factory() {
