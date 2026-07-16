@@ -14,6 +14,7 @@ use axum::{Json, Router};
 use chrono::Utc;
 use cocli_store::{
     Agent, AgentStatus, Channel, Delivery, DeliveryStats, Message, MessageRole, Store, StoreError,
+    Task, TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -466,6 +467,28 @@ pub fn router_with_delivery_config(
             "/api/channels/:channel_id/messages",
             get(list_messages).post(post_message),
         )
+        .route(
+            "/api/channels/:channel_id/tasks",
+            get(list_tasks).post(create_task),
+        )
+        .route(
+            "/api/channels/:channel_id/tasks/:task_number/claim",
+            post(claim_task),
+        )
+        .route(
+            "/api/channels/:channel_id/tasks/:task_number/unclaim",
+            post(unclaim_task),
+        )
+        .route(
+            "/api/channels/:channel_id/tasks/:task_number/status",
+            post(update_task_status),
+        )
+        .route(
+            "/api/channels/:channel_id/tasks/:task_number/dependencies",
+            get(get_task_dependencies)
+                .post(add_task_dependency)
+                .delete(remove_task_dependency),
+        )
         .route("/api/agents", get(list_agents).post(create_agent))
         .route("/api/agents/:agent_id/start", post(start_agent))
         .route("/api/agents/:agent_id/stop", post(stop_agent))
@@ -868,6 +891,186 @@ async fn list_messages(
 }
 
 #[derive(Deserialize)]
+struct TaskListQuery {
+    status: Option<String>,
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+    Path(channel_id): Path<Uuid>,
+    Query(query): Query<TaskListQuery>,
+) -> Result<Json<Vec<Task>>, ApiError> {
+    require_channel(&state.store, channel_id).await?;
+    let status = parse_task_status_filter(query.status.as_deref())?;
+    Ok(Json(state.store.list_tasks(channel_id, status).await?))
+}
+
+#[derive(Deserialize)]
+struct CreateTaskRequest {
+    title: String,
+    #[serde(default, alias = "messageId")]
+    message_id: Option<Uuid>,
+    #[serde(default, alias = "createdByAgentId")]
+    created_by_agent_id: Option<Uuid>,
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    Path(channel_id): Path<Uuid>,
+    Json(request): Json<CreateTaskRequest>,
+) -> Result<(StatusCode, Json<Task>), ApiError> {
+    require_channel(&state.store, channel_id).await?;
+    let title = non_empty("task title", &request.title)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            state
+                .store
+                .create_task(
+                    channel_id,
+                    title,
+                    request.message_id,
+                    request.created_by_agent_id,
+                )
+                .await?,
+        ),
+    ))
+}
+
+#[derive(Deserialize)]
+struct ClaimTaskRequest {
+    #[serde(alias = "agentId")]
+    agent_id: Uuid,
+}
+
+async fn claim_task(
+    State(state): State<AppState>,
+    Path((channel_id, task_number)): Path<(Uuid, i64)>,
+    Json(request): Json<ClaimTaskRequest>,
+) -> Result<Json<Task>, ApiError> {
+    let agent = require_agent(&state.store, request.agent_id).await?;
+    if agent.channel_id != channel_id {
+        return Err(ApiError::bad_request(
+            "task assignee must belong to the task channel",
+        ));
+    }
+    Ok(Json(
+        state
+            .store
+            .claim_task(channel_id, task_number, agent.id)
+            .await?,
+    ))
+}
+
+async fn unclaim_task(
+    State(state): State<AppState>,
+    Path((channel_id, task_number)): Path<(Uuid, i64)>,
+) -> Result<Json<Task>, ApiError> {
+    Ok(Json(
+        state.store.unclaim_task(channel_id, task_number).await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct UpdateTaskStatusRequest {
+    status: TaskStatus,
+    progress: Option<String>,
+}
+
+async fn update_task_status(
+    State(state): State<AppState>,
+    Path((channel_id, task_number)): Path<(Uuid, i64)>,
+    Json(request): Json<UpdateTaskStatusRequest>,
+) -> Result<Json<Task>, ApiError> {
+    Ok(Json(
+        state
+            .store
+            .update_task_status(
+                channel_id,
+                task_number,
+                request.status,
+                request.progress.as_deref(),
+            )
+            .await?,
+    ))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskDependenciesResponse {
+    task_number: i64,
+    depends_on: Vec<i64>,
+}
+
+async fn get_task_dependencies(
+    State(state): State<AppState>,
+    Path((channel_id, task_number)): Path<(Uuid, i64)>,
+) -> Result<Json<TaskDependenciesResponse>, ApiError> {
+    if state
+        .store
+        .get_task(channel_id, task_number)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found(format!(
+            "task #{task_number} not found"
+        )));
+    }
+    Ok(Json(TaskDependenciesResponse {
+        task_number,
+        depends_on: state
+            .store
+            .get_task_dependencies(channel_id, task_number)
+            .await?,
+    }))
+}
+
+#[derive(Deserialize)]
+struct TaskDependencyRequest {
+    #[serde(alias = "dependsOn")]
+    depends_on: i64,
+}
+
+async fn add_task_dependency(
+    State(state): State<AppState>,
+    Path((channel_id, task_number)): Path<(Uuid, i64)>,
+    Json(request): Json<TaskDependencyRequest>,
+) -> Result<(StatusCode, Json<TaskDependenciesResponse>), ApiError> {
+    state
+        .store
+        .add_task_dependency(channel_id, task_number, request.depends_on)
+        .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(TaskDependenciesResponse {
+            task_number,
+            depends_on: state
+                .store
+                .get_task_dependencies(channel_id, task_number)
+                .await?,
+        }),
+    ))
+}
+
+async fn remove_task_dependency(
+    State(state): State<AppState>,
+    Path((channel_id, task_number)): Path<(Uuid, i64)>,
+    Json(request): Json<TaskDependencyRequest>,
+) -> Result<Json<TaskDependenciesResponse>, ApiError> {
+    state
+        .store
+        .remove_task_dependency(channel_id, task_number, request.depends_on)
+        .await?;
+    Ok(Json(TaskDependenciesResponse {
+        task_number,
+        depends_on: state
+            .store
+            .get_task_dependencies(channel_id, task_number)
+            .await?,
+    }))
+}
+
+#[derive(Deserialize)]
 struct PostMessageRequest {
     content: String,
 }
@@ -922,6 +1125,26 @@ fn non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str, ApiError> {
     }
 }
 
+fn parse_task_status_filter(status: Option<&str>) -> Result<Option<TaskStatus>, ApiError> {
+    match status.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("all") => Ok(None),
+        Some("todo") => Ok(Some(TaskStatus::Todo)),
+        Some("in_progress") => Ok(Some(TaskStatus::InProgress)),
+        Some("in_review") => Ok(Some(TaskStatus::InReview)),
+        Some("done") => Ok(Some(TaskStatus::Done)),
+        Some(value) => Err(ApiError::bad_request(format!(
+            "unsupported task status: {value}"
+        ))),
+    }
+}
+
+async fn require_channel(store: &Store, channel_id: Uuid) -> Result<Channel, ApiError> {
+    store
+        .get_channel(channel_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("channel not found"))
+}
+
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
@@ -951,6 +1174,21 @@ impl ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
+        let status = match &error {
+            StoreError::TaskNotFound { .. } => Some(StatusCode::NOT_FOUND),
+            StoreError::TaskAlreadyClaimed { .. }
+            | StoreError::TaskUnmetDependencies { .. }
+            | StoreError::InvalidTaskTransition { .. }
+            | StoreError::TaskDependencyCycle => Some(StatusCode::CONFLICT),
+            StoreError::TaskDependencySelf => Some(StatusCode::BAD_REQUEST),
+            _ => None,
+        };
+        if let Some(status) = status {
+            return Self {
+                status,
+                message: error.to_string(),
+            };
+        }
         tracing::error!(%error, "local store request failed");
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,

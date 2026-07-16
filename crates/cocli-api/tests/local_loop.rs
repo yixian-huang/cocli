@@ -157,6 +157,116 @@ async fn post_message_persists_user_message_and_fake_agent_reply() {
 }
 
 #[tokio::test]
+async fn task_routes_support_numbering_claims_transitions_and_dependencies() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "task-api"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let (_, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "builder",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id");
+
+    let (first_status, first) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks"),
+        json!({"title": "prepare"}),
+    )
+    .await;
+    assert_eq!(first_status, StatusCode::CREATED);
+    assert_eq!(first["taskNumber"], 1);
+    assert_eq!(first["status"], "todo");
+    let (_, second) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks"),
+        json!({"title": "ship"}),
+    )
+    .await;
+    assert_eq!(second["taskNumber"], 2);
+
+    let (dependency_status, dependencies) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks/2/dependencies"),
+        json!({"dependsOn": 1}),
+    )
+    .await;
+    assert_eq!(dependency_status, StatusCode::CREATED);
+    assert_eq!(dependencies["dependsOn"], json!([1]));
+
+    let (blocked_status, blocked) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks/2/claim"),
+        json!({"agentId": agent_id}),
+    )
+    .await;
+    assert_eq!(blocked_status, StatusCode::CONFLICT);
+    assert!(blocked["error"]
+        .as_str()
+        .expect("blocked error")
+        .contains("unmet dependencies"));
+
+    let (claim_status, claimed) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks/1/claim"),
+        json!({"agentId": agent_id}),
+    )
+    .await;
+    assert_eq!(claim_status, StatusCode::OK);
+    assert_eq!(claimed["status"], "in_progress");
+    assert_eq!(claimed["assigneeName"], "builder");
+    let (done_status, done) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks/1/status"),
+        json!({"status": "done", "progress": "verified"}),
+    )
+    .await;
+    assert_eq!(done_status, StatusCode::OK);
+    assert_eq!(done["progress"], "verified");
+
+    let (dependent_status, dependent) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks/2/claim"),
+        json!({"agentId": agent_id}),
+    )
+    .await;
+    assert_eq!(dependent_status, StatusCode::OK);
+    assert_eq!(dependent["status"], "in_progress");
+
+    let (_, in_progress) = json_request(
+        app,
+        "GET",
+        &format!("/api/channels/{channel_id}/tasks?status=in_progress"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(in_progress.as_array().map(Vec::len), Some(1));
+    assert_eq!(in_progress[0]["taskNumber"], 2);
+}
+
+#[tokio::test]
 async fn failed_runtime_delivery_is_accepted_and_retried_from_sqlite() {
     let store = Store::in_memory().await.expect("store should open");
     let app = router_with_delivery_config(

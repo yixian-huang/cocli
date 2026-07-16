@@ -27,6 +27,38 @@ pub enum StoreError {
     /// A delivery completion was attempted after it was already finalized or released.
     #[error("delivery is not in flight: {0}")]
     DeliveryNotInFlight(Uuid),
+    /// A requested channel task does not exist.
+    #[error("task #{task_number} not found")]
+    TaskNotFound {
+        /// Channel-local task number.
+        task_number: i64,
+    },
+    /// A task is already assigned to another agent.
+    #[error("task #{task_number} is already claimed")]
+    TaskAlreadyClaimed {
+        /// Channel-local task number.
+        task_number: i64,
+    },
+    /// A task cannot be claimed until its dependencies are complete.
+    #[error("task #{task_number} has unmet dependencies")]
+    TaskUnmetDependencies {
+        /// Channel-local task number.
+        task_number: i64,
+    },
+    /// The requested task status change is not permitted.
+    #[error("invalid task transition: {from} -> {to}")]
+    InvalidTaskTransition {
+        /// Persisted source state.
+        from: String,
+        /// Requested destination state.
+        to: String,
+    },
+    /// A task cannot depend on itself.
+    #[error("a task cannot depend on itself")]
+    TaskDependencySelf,
+    /// A task dependency would introduce a cycle.
+    #[error("circular task dependency detected")]
+    TaskDependencyCycle,
 }
 
 /// A local conversation channel.
@@ -236,6 +268,92 @@ pub struct WorkingState {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Lifecycle state of a local channel task.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Todo,
+    InProgress,
+    InReview,
+    Done,
+}
+
+impl TaskStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Todo => "todo",
+            Self::InProgress => "in_progress",
+            Self::InReview => "in_review",
+            Self::Done => "done",
+        }
+    }
+
+    fn parse(value: String) -> Result<Self, StoreError> {
+        match value.as_str() {
+            "todo" => Ok(Self::Todo),
+            "in_progress" => Ok(Self::InProgress),
+            "in_review" => Ok(Self::InReview),
+            "done" => Ok(Self::Done),
+            _ => Err(StoreError::InvalidValue {
+                kind: "task status",
+                value,
+            }),
+        }
+    }
+
+    fn can_transition_to(self, next: Self) -> bool {
+        self == next
+            || matches!(
+                (self, next),
+                (Self::Todo, Self::InProgress)
+                    | (Self::InProgress, Self::InReview | Self::Done)
+                    | (Self::InReview, Self::InProgress | Self::Done)
+            )
+    }
+}
+
+/// One channel-scoped task exposed to both the local UI and agent bridge.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Task {
+    pub id: Uuid,
+    pub channel_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<Uuid>,
+    pub task_number: i64,
+    pub title: String,
+    pub status: TaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub assignee_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by_type: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+struct TaskRow {
+    id: Uuid,
+    channel_id: Uuid,
+    message_id: Option<Uuid>,
+    task_number: i64,
+    title: String,
+    status: String,
+    progress: Option<String>,
+    assignee_id: Option<Uuid>,
+    assignee_name: Option<String>,
+    created_by_agent_id: Option<Uuid>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
 struct MessageRow {
     id: Uuid,
     channel_id: Uuid,
@@ -290,6 +408,29 @@ impl TryFrom<DeliveryRow> for Delivery {
             attempts: row.attempts,
             next_attempt_at: row.next_attempt_at,
             last_error: row.last_error,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        })
+    }
+}
+
+impl TryFrom<TaskRow> for Task {
+    type Error = StoreError;
+
+    fn try_from(row: TaskRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id,
+            channel_id: row.channel_id,
+            message_id: row.message_id,
+            task_number: row.task_number,
+            title: row.title,
+            status: TaskStatus::parse(row.status)?,
+            progress: row.progress,
+            assignee_id: row.assignee_id,
+            assignee_type: row.assignee_id.map(|_| "agent".to_owned()),
+            assignee_name: row.assignee_name,
+            created_by_id: row.created_by_agent_id,
+            created_by_type: row.created_by_agent_id.map(|_| "agent".to_owned()),
             created_at: row.created_at,
             updated_at: row.updated_at,
         })
@@ -730,6 +871,363 @@ impl Store {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Creates a task with the next channel-local task number.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the insert or row decoding fails.
+    pub async fn create_task(
+        &self,
+        channel_id: Uuid,
+        title: &str,
+        message_id: Option<Uuid>,
+        created_by_agent_id: Option<Uuid>,
+    ) -> Result<Task, StoreError> {
+        let title = title.chars().take(100).collect::<String>();
+        let now = Utc::now();
+        let row = query(
+            "INSERT INTO tasks \
+             (id, channel_id, message_id, task_number, title, status, \
+              created_by_agent_id, created_at, updated_at) \
+             SELECT ?, ?, ?, COALESCE(MAX(task_number), 0) + 1, ?, 'todo', ?, ?, ? \
+             FROM tasks WHERE channel_id = ? \
+             RETURNING id",
+        )
+        .bind(Uuid::new_v4())
+        .bind(channel_id)
+        .bind(message_id)
+        .bind(title)
+        .bind(created_by_agent_id)
+        .bind(now)
+        .bind(now)
+        .bind(channel_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let task_id: Uuid = row.try_get("id")?;
+        self.get_task_by_id(task_id)
+            .await?
+            .ok_or(StoreError::InvalidValue {
+                kind: "task",
+                value: task_id.to_string(),
+            })
+    }
+
+    /// Lists tasks for one channel in task-number order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn list_tasks(
+        &self,
+        channel_id: Uuid,
+        status: Option<TaskStatus>,
+    ) -> Result<Vec<Task>, StoreError> {
+        let rows = if let Some(status) = status {
+            query(
+                "SELECT t.id, t.channel_id, t.message_id, t.task_number, t.title, \
+                 t.status, t.progress, t.assignee_id, a.name AS assignee_name, \
+                 t.created_by_agent_id, t.created_at, t.updated_at \
+                 FROM tasks t LEFT JOIN agents a ON a.id = t.assignee_id \
+                 WHERE t.channel_id = ? AND t.status = ? ORDER BY t.task_number",
+            )
+            .bind(channel_id)
+            .bind(status.as_str())
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            query(
+                "SELECT t.id, t.channel_id, t.message_id, t.task_number, t.title, \
+                 t.status, t.progress, t.assignee_id, a.name AS assignee_name, \
+                 t.created_by_agent_id, t.created_at, t.updated_at \
+                 FROM tasks t LEFT JOIN agents a ON a.id = t.assignee_id \
+                 WHERE t.channel_id = ? ORDER BY t.task_number",
+            )
+            .bind(channel_id)
+            .fetch_all(&self.pool)
+            .await?
+        };
+        rows.into_iter()
+            .map(task_row_from_sqlite)
+            .map(|row| row.and_then(Task::try_from))
+            .collect()
+    }
+
+    /// Returns one task by channel-local number.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn get_task(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+    ) -> Result<Option<Task>, StoreError> {
+        let row = query(
+            "SELECT t.id, t.channel_id, t.message_id, t.task_number, t.title, \
+             t.status, t.progress, t.assignee_id, a.name AS assignee_name, \
+             t.created_by_agent_id, t.created_at, t.updated_at \
+             FROM tasks t LEFT JOIN agents a ON a.id = t.assignee_id \
+             WHERE t.channel_id = ? AND t.task_number = ?",
+        )
+        .bind(channel_id)
+        .bind(task_number)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(task_row_from_sqlite)
+            .transpose()?
+            .map(Task::try_from)
+            .transpose()
+    }
+
+    /// Claims an unassigned task for one local agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed task error when the task is absent, assigned, or blocked.
+    pub async fn claim_task(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+        agent_id: Uuid,
+    ) -> Result<Task, StoreError> {
+        let existing = self
+            .get_task(channel_id, task_number)
+            .await?
+            .ok_or(StoreError::TaskNotFound { task_number })?;
+        if existing.assignee_id == Some(agent_id) {
+            return Ok(existing);
+        }
+        if existing.assignee_id.is_some() {
+            return Err(StoreError::TaskAlreadyClaimed { task_number });
+        }
+        if !self.dependencies_met(channel_id, task_number).await? {
+            return Err(StoreError::TaskUnmetDependencies { task_number });
+        }
+        let now = Utc::now();
+        let result = query(
+            "UPDATE tasks SET assignee_id = ?, \
+             status = CASE WHEN status = 'todo' THEN 'in_progress' ELSE status END, \
+             updated_at = ? \
+             WHERE channel_id = ? AND task_number = ? AND assignee_id IS NULL",
+        )
+        .bind(agent_id)
+        .bind(now)
+        .bind(channel_id)
+        .bind(task_number)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::TaskAlreadyClaimed { task_number });
+        }
+        self.get_task(channel_id, task_number)
+            .await?
+            .ok_or(StoreError::TaskNotFound { task_number })
+    }
+
+    /// Clears a task's assignee, returning active work to `todo`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError::TaskNotFound`] when the task is absent.
+    pub async fn unclaim_task(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+    ) -> Result<Task, StoreError> {
+        let now = Utc::now();
+        let result = query(
+            "UPDATE tasks SET assignee_id = NULL, \
+             status = CASE WHEN status = 'in_progress' THEN 'todo' ELSE status END, \
+             updated_at = ? WHERE channel_id = ? AND task_number = ?",
+        )
+        .bind(now)
+        .bind(channel_id)
+        .bind(task_number)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::TaskNotFound { task_number });
+        }
+        self.get_task(channel_id, task_number)
+            .await?
+            .ok_or(StoreError::TaskNotFound { task_number })
+    }
+
+    /// Advances a task through the local lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for absent tasks or invalid transitions.
+    pub async fn update_task_status(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+        status: TaskStatus,
+        progress: Option<&str>,
+    ) -> Result<Task, StoreError> {
+        let existing = self
+            .get_task(channel_id, task_number)
+            .await?
+            .ok_or(StoreError::TaskNotFound { task_number })?;
+        if !existing.status.can_transition_to(status) {
+            return Err(StoreError::InvalidTaskTransition {
+                from: existing.status.as_str().to_owned(),
+                to: status.as_str().to_owned(),
+            });
+        }
+        if existing.status == status && progress.is_none() {
+            return Ok(existing);
+        }
+        let now = Utc::now();
+        if let Some(progress) = progress {
+            query(
+                "UPDATE tasks SET status = ?, progress = ?, updated_at = ? \
+                 WHERE channel_id = ? AND task_number = ?",
+            )
+            .bind(status.as_str())
+            .bind(progress)
+            .bind(now)
+            .bind(channel_id)
+            .bind(task_number)
+            .execute(&self.pool)
+            .await?;
+        } else {
+            query(
+                "UPDATE tasks SET status = ?, updated_at = ? \
+                 WHERE channel_id = ? AND task_number = ?",
+            )
+            .bind(status.as_str())
+            .bind(now)
+            .bind(channel_id)
+            .bind(task_number)
+            .execute(&self.pool)
+            .await?;
+        }
+        self.get_task(channel_id, task_number)
+            .await?
+            .ok_or(StoreError::TaskNotFound { task_number })
+    }
+
+    /// Adds an acyclic dependency between two tasks in the same channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed error for missing tasks, self-dependency, or a cycle.
+    pub async fn add_task_dependency(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+        depends_on: i64,
+    ) -> Result<(), StoreError> {
+        if task_number == depends_on {
+            return Err(StoreError::TaskDependencySelf);
+        }
+        for number in [task_number, depends_on] {
+            if self.get_task(channel_id, number).await?.is_none() {
+                return Err(StoreError::TaskNotFound {
+                    task_number: number,
+                });
+            }
+        }
+        let creates_cycle: i64 = query_scalar(
+            "WITH RECURSIVE reachable(task_number) AS ( \
+               SELECT depends_on FROM task_dependencies \
+               WHERE channel_id = ? AND task_number = ? \
+               UNION \
+               SELECT dependency.depends_on FROM task_dependencies dependency \
+               JOIN reachable ON dependency.task_number = reachable.task_number \
+               WHERE dependency.channel_id = ? \
+             ) \
+             SELECT EXISTS(SELECT 1 FROM reachable WHERE task_number = ?)",
+        )
+        .bind(channel_id)
+        .bind(depends_on)
+        .bind(channel_id)
+        .bind(task_number)
+        .fetch_one(&self.pool)
+        .await?;
+        if creates_cycle != 0 {
+            return Err(StoreError::TaskDependencyCycle);
+        }
+        query(
+            "INSERT OR IGNORE INTO task_dependencies \
+             (channel_id, task_number, depends_on, created_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind(channel_id)
+        .bind(task_number)
+        .bind(depends_on)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Removes one dependency edge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the delete fails.
+    pub async fn remove_task_dependency(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+        depends_on: i64,
+    ) -> Result<bool, StoreError> {
+        let result = query(
+            "DELETE FROM task_dependencies \
+             WHERE channel_id = ? AND task_number = ? AND depends_on = ?",
+        )
+        .bind(channel_id)
+        .bind(task_number)
+        .bind(depends_on)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Returns the task numbers this task depends on.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn get_task_dependencies(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+    ) -> Result<Vec<i64>, StoreError> {
+        let rows = query(
+            "SELECT depends_on FROM task_dependencies \
+             WHERE channel_id = ? AND task_number = ? ORDER BY depends_on",
+        )
+        .bind(channel_id)
+        .bind(task_number)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| row.try_get("depends_on").map_err(StoreError::from))
+            .collect()
+    }
+
+    async fn dependencies_met(
+        &self,
+        channel_id: Uuid,
+        task_number: i64,
+    ) -> Result<bool, StoreError> {
+        let count: i64 = query_scalar(
+            "SELECT COUNT(*) FROM task_dependencies dependency \
+             JOIN tasks prerequisite \
+               ON prerequisite.channel_id = dependency.channel_id \
+              AND prerequisite.task_number = dependency.depends_on \
+             WHERE dependency.channel_id = ? AND dependency.task_number = ? \
+               AND prerequisite.status != 'done'",
+        )
+        .bind(channel_id)
+        .bind(task_number)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count == 0)
+    }
+
     /// Returns one persisted message by identifier.
     ///
     /// # Errors
@@ -1069,6 +1567,23 @@ impl Store {
             .map(Delivery::try_from)
             .transpose()
     }
+
+    async fn get_task_by_id(&self, task_id: Uuid) -> Result<Option<Task>, StoreError> {
+        let row = query(
+            "SELECT t.id, t.channel_id, t.message_id, t.task_number, t.title, \
+             t.status, t.progress, t.assignee_id, a.name AS assignee_name, \
+             t.created_by_agent_id, t.created_at, t.updated_at \
+             FROM tasks t LEFT JOIN agents a ON a.id = t.assignee_id \
+             WHERE t.id = ?",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(task_row_from_sqlite)
+            .transpose()?
+            .map(Task::try_from)
+            .transpose()
+    }
 }
 
 async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
@@ -1076,6 +1591,7 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
         include_str!("../migrations/0001_local_loop.sql"),
         include_str!("../migrations/0002_delivery_queue.sql"),
         include_str!("../migrations/0003_agent_bridge_state.sql"),
+        include_str!("../migrations/0004_tasks.sql"),
     ] {
         for statement in migration.split(';') {
             let statement = statement.trim();
@@ -1143,6 +1659,23 @@ fn working_state_from_row(row: SqliteRow) -> Result<WorkingState, StoreError> {
         task_number: row.try_get("task_number")?,
         next_step_hint: row.try_get("next_step_hint")?,
         started_at: row.try_get("started_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn task_row_from_sqlite(row: SqliteRow) -> Result<TaskRow, StoreError> {
+    Ok(TaskRow {
+        id: row.try_get("id")?,
+        channel_id: row.try_get("channel_id")?,
+        message_id: row.try_get("message_id")?,
+        task_number: row.try_get("task_number")?,
+        title: row.try_get("title")?,
+        status: row.try_get("status")?,
+        progress: row.try_get("progress")?,
+        assignee_id: row.try_get("assignee_id")?,
+        assignee_name: row.try_get("assignee_name")?,
+        created_by_agent_id: row.try_get("created_by_agent_id")?,
+        created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
 }
