@@ -1,13 +1,87 @@
-//! cocli-server — top-level assembly. M0.0.x implementation.
+//! Local server assembly for cocli.
 
-#![allow(dead_code)]
-pub fn version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use axum::Router;
+use cocli_api::{router, RuntimeService};
+use cocli_store::{Store, StoreError};
+use tokio::net::TcpListener;
+
+/// Configuration for one local cocli server.
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// Loopback address to bind.
+    pub bind: SocketAddr,
+    /// Directory containing the SQLite database.
+    pub data_dir: PathBuf,
 }
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn placeholder() {
-        assert_eq!(super::version(), "0.0.0");
+
+/// A bound server ready to accept requests.
+#[derive(Debug)]
+pub struct Server {
+    listener: TcpListener,
+    app: Router,
+    data_dir: PathBuf,
+}
+
+impl Server {
+    /// Creates the data directory, opens SQLite, and binds the HTTP listener.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when filesystem, database, or socket setup fails.
+    pub async fn bind(
+        config: ServerConfig,
+        runtime: Arc<dyn RuntimeService>,
+    ) -> Result<Self, ServerError> {
+        tokio::fs::create_dir_all(&config.data_dir).await?;
+        let store = Store::open(database_path(&config.data_dir)).await?;
+        let listener = TcpListener::bind(config.bind).await?;
+        Ok(Self {
+            listener,
+            app: router(store, runtime),
+            data_dir: config.data_dir,
+        })
     }
+
+    /// Returns the actual bound address, including an OS-assigned port.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`std::io::Error`] if the socket address cannot be read.
+    pub fn local_addr(&self) -> Result<SocketAddr, std::io::Error> {
+        self.listener.local_addr()
+    }
+
+    /// Returns the directory containing local state.
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Serves requests until shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ServerError`] when the HTTP server exits with an error.
+    pub async fn run(self) -> Result<(), ServerError> {
+        axum::serve(self.listener, self.app).await?;
+        Ok(())
+    }
+}
+
+fn database_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("cocli.sqlite3")
+}
+
+/// Errors emitted while binding or running the local server.
+#[derive(Debug, thiserror::Error)]
+pub enum ServerError {
+    /// Filesystem, socket, or HTTP serving failed.
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    /// SQLite initialization failed.
+    #[error(transparent)]
+    Store(#[from] StoreError),
 }
