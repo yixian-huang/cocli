@@ -26,6 +26,9 @@ pub struct AgentMetrics {
     local_turn_failed_total: AtomicU64,
     local_turn_cancelled_total: AtomicU64,
     local_turn_timed_out_total: AtomicU64,
+    local_watchdog_restart_total: AtomicU64,
+    local_watchdog_failure_total: AtomicU64,
+    local_watchdog_exhausted_total: AtomicU64,
     local_active_sessions: AtomicU64,
     local_active_turns: AtomicU64,
 }
@@ -149,6 +152,21 @@ impl AgentMetrics {
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn inc_local_watchdog_restart(&self) {
+        self.local_watchdog_restart_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_watchdog_failure(&self) {
+        self.local_watchdog_failure_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_watchdog_exhausted(&self) {
+        self.local_watchdog_exhausted_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
     pub fn inc_local_active_sessions(&self) {
         self.local_active_sessions.fetch_add(1, Ordering::Relaxed);
     }
@@ -247,6 +265,18 @@ impl AgentMetrics {
             "local_agent_turn_timed_out_total".to_string(),
             saturating_i64(self.local_turn_timed_out_total.load(Ordering::Relaxed)),
         );
+        counters.insert(
+            "local_agent_watchdog_restart_total".to_string(),
+            saturating_i64(self.local_watchdog_restart_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_watchdog_failure_total".to_string(),
+            saturating_i64(self.local_watchdog_failure_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_watchdog_exhausted_total".to_string(),
+            saturating_i64(self.local_watchdog_exhausted_total.load(Ordering::Relaxed)),
+        );
 
         let mut gauges = BTreeMap::new();
         gauges.insert(
@@ -314,6 +344,9 @@ mod tests {
         metrics.inc_local_turn_failed();
         metrics.inc_local_turn_cancelled();
         metrics.inc_local_turn_timed_out();
+        metrics.inc_local_watchdog_restart();
+        metrics.inc_local_watchdog_failure();
+        metrics.inc_local_watchdog_exhausted();
         metrics.inc_local_active_sessions();
         metrics.inc_local_active_turns();
 
@@ -342,6 +375,9 @@ mod tests {
         assert_eq!(snap.counters["local_agent_turn_failed_total"], 1);
         assert_eq!(snap.counters["local_agent_turn_cancelled_total"], 1);
         assert_eq!(snap.counters["local_agent_turn_timed_out_total"], 1);
+        assert_eq!(snap.counters["local_agent_watchdog_restart_total"], 1);
+        assert_eq!(snap.counters["local_agent_watchdog_failure_total"], 1);
+        assert_eq!(snap.counters["local_agent_watchdog_exhausted_total"], 1);
         assert_eq!(snap.gauges["local_agent_active_sessions"], 1.0);
         assert_eq!(snap.gauges["local_agent_active_turns"], 1.0);
 

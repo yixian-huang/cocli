@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use cocli_agent::context::{classify_context_pressure, default_backstop_pct, ContextPressureTier};
 use cocli_agent::fork_reason::classify_fork_reason;
 use cocli_agent::state::Idle;
+use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
     RuntimeError, RuntimeForkResult, RuntimeInfo, RuntimeMetricsSnapshot, RuntimeService,
@@ -49,6 +50,8 @@ pub struct LocalRuntimeConfig {
     pub auth_token: String,
     /// Maximum time allowed for one initialization or task turn.
     pub turn_timeout: Duration,
+    /// Retry delays for the five watchdog restart attempts.
+    pub watchdog_backoff: [Duration; 5],
 }
 
 impl LocalRuntimeConfig {
@@ -59,6 +62,13 @@ impl LocalRuntimeConfig {
             server_url,
             auth_token: String::new(),
             turn_timeout: Duration::from_secs(120),
+            watchdog_backoff: [
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+                Duration::from_secs(10),
+                Duration::from_secs(30),
+            ],
         }
     }
 }
@@ -77,7 +87,7 @@ pub struct LocalRuntimeService {
 struct LocalSessionHandle {
     command_tx: mpsc::Sender<LocalSessionCommand>,
     status: Arc<RwLock<RuntimeSessionStatus>>,
-    started_at: Instant,
+    started_at: Arc<RwLock<Instant>>,
 }
 
 enum LocalSessionCommand {
@@ -105,6 +115,15 @@ struct ActiveReply {
     text: String,
     last_error: Option<String>,
     deadline: Option<Instant>,
+}
+
+struct LocalSessionContext {
+    status: Arc<RwLock<RuntimeSessionStatus>>,
+    started_at: Arc<RwLock<Instant>>,
+    registry: Arc<RuntimeRegistry>,
+    config: LocalRuntimeConfig,
+    agent: Agent,
+    metrics: Arc<AgentMetrics>,
 }
 
 impl LocalRuntimeService {
@@ -149,75 +168,37 @@ impl LocalRuntimeService {
     }
 
     async fn spawn_session(&self, agent: &Agent) -> Result<LocalSessionHandle, RuntimeError> {
-        let (_command_tx, command_rx) = mpsc::channel(4);
-        let (outbound_tx, _outbound_rx) = mpsc::channel(16);
-        let (state_tx, _state_rx) = mpsc::channel(4);
-        let (obs_tx, _obs_rx) = broadcast::channel(16);
-        let actor = AgentActor::<Idle> {
-            id: agent.id.to_string(),
-            mailbox: command_rx,
-            outbound: outbound_tx,
-            state_tx,
-            obs_tx,
-            state: Idle,
-        };
-        let start = actor.start(StartCfg {
-            registry: Arc::clone(&self.registry),
-            runtime_name: agent.runtime.clone(),
-            workspace_root: self.config.workspace_root.clone(),
-            server_url: self.config.server_url.clone(),
-            auth_token: self.config.auth_token.clone(),
-            channel_id: agent.channel_id,
-            channel_name: "local".to_owned(),
-            model: agent.model.clone().unwrap_or_default(),
-            launch_id: Uuid::new_v4().to_string(),
-            resume_session: None,
-            system_prompt: INITIALIZATION_PROMPT.to_owned(),
-            env_vars: HashMap::new(),
-        });
-        let mut running = tokio::time::timeout(self.config.turn_timeout, start)
-            .await
-            .map_err(|_| RuntimeError::Delivery("runtime startup timed out".to_owned()))?
-            .map_err(|error| RuntimeError::Delivery(error.to_string()))?;
-
-        if let Err(error) = wait_for_turn(&mut running, self.config.turn_timeout, false).await {
-            let _stopping = running.stop(true);
-            return Err(error);
-        }
-
-        let session_id = running.state.session_id.clone();
-        let driver = Arc::clone(&running.state.driver);
-        let context_window_tokens = driver.context_window_tokens().unwrap_or_default() as u64;
-        let status = Arc::new(RwLock::new(RuntimeSessionStatus {
-            agent_id: agent.id,
-            session_id,
-            runtime: agent.runtime.clone(),
-            model: agent.model.clone(),
-            running: true,
-            active_turn: false,
-            supports_turn_cancel: driver.supports_turn_cancel(),
-            supports_turn_steer: driver.supports_turn_steer(),
-            supports_thread_fork: driver.supports_thread_fork(),
-            input_tokens: 0,
-            context_window_tokens,
-            context_util_pct: 0.0,
-            tier: ContextPressureTier::Healthy.as_str().to_owned(),
-            fork_suggested: false,
-            session_age_seconds: 0,
-        }));
+        let running = start_running_actor(&self.registry, &self.config, agent).await?;
+        let status = Arc::new(RwLock::new(runtime_status_for_running(agent, &running)));
+        let started_at = Arc::new(RwLock::new(Instant::now()));
         let (command_tx, command_rx) = mpsc::channel(16);
         let status_for_task = Arc::clone(&status);
-        let timeout = self.config.turn_timeout;
+        let started_at_for_task = Arc::clone(&started_at);
+        let config = self.config.clone();
+        let registry = Arc::clone(&self.registry);
+        let agent = agent.clone();
         let metrics = Arc::clone(&self.metrics);
         metrics.inc_local_session_started();
         metrics.inc_local_active_sessions();
         tokio::spawn(async move {
-            run_local_session(running, command_rx, status_for_task, timeout, metrics).await;
+            run_local_session(
+                running,
+                command_rx,
+                LocalSessionContext {
+                    status: status_for_task,
+                    started_at: started_at_for_task,
+                    registry,
+                    config,
+                    agent,
+                    metrics,
+                },
+            )
+            .await;
         });
         Ok(LocalSessionHandle {
             command_tx,
             status,
-            started_at: Instant::now(),
+            started_at,
         })
     }
 
@@ -250,9 +231,12 @@ impl LocalRuntimeService {
 
     async fn live_session(&self, agent_id: Uuid) -> Option<LocalSessionHandle> {
         let handle = self.sessions.lock().await.get(&agent_id).cloned()?;
-        if !handle.command_tx.is_closed() && handle.status.read().await.running {
+        let status = handle.status.read().await;
+        if !handle.command_tx.is_closed() && (status.running || status.recovering) {
+            drop(status);
             return Some(handle);
         }
+        drop(status);
         self.sessions.lock().await.remove(&agent_id);
         None
     }
@@ -265,7 +249,7 @@ impl LocalRuntimeService {
 
     async fn snapshot(handle: &LocalSessionHandle) -> RuntimeSessionStatus {
         let mut status = handle.status.read().await.clone();
-        status.session_age_seconds = handle.started_at.elapsed().as_secs();
+        status.session_age_seconds = handle.started_at.read().await.elapsed().as_secs();
         status
     }
 
@@ -416,14 +400,190 @@ impl RuntimeService for LocalRuntimeService {
     }
 }
 
+async fn start_running_actor(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+) -> Result<AgentActor<cocli_agent::state::Running>, RuntimeError> {
+    let (_command_tx, command_rx) = mpsc::channel(4);
+    let (outbound_tx, _outbound_rx) = mpsc::channel(16);
+    let (state_tx, _state_rx) = mpsc::channel(4);
+    let (obs_tx, _obs_rx) = broadcast::channel(16);
+    let actor = AgentActor::<Idle> {
+        id: agent.id.to_string(),
+        mailbox: command_rx,
+        outbound: outbound_tx,
+        state_tx,
+        obs_tx,
+        state: Idle,
+    };
+    let start = actor.start(StartCfg {
+        registry: Arc::clone(registry),
+        runtime_name: agent.runtime.clone(),
+        workspace_root: config.workspace_root.clone(),
+        server_url: config.server_url.clone(),
+        auth_token: config.auth_token.clone(),
+        channel_id: agent.channel_id,
+        channel_name: "local".to_owned(),
+        model: agent.model.clone().unwrap_or_default(),
+        launch_id: Uuid::new_v4().to_string(),
+        resume_session: None,
+        system_prompt: INITIALIZATION_PROMPT.to_owned(),
+        env_vars: HashMap::new(),
+    });
+    let mut running = tokio::time::timeout(config.turn_timeout, start)
+        .await
+        .map_err(|_| RuntimeError::Delivery("runtime startup timed out".to_owned()))?
+        .map_err(|error| RuntimeError::Delivery(error.to_string()))?;
+
+    if let Err(error) = wait_for_turn(&mut running, config.turn_timeout, false).await {
+        let _stopping = running.stop(true);
+        return Err(error);
+    }
+    Ok(running)
+}
+
+fn runtime_status_for_running(
+    agent: &Agent,
+    running: &AgentActor<cocli_agent::state::Running>,
+) -> RuntimeSessionStatus {
+    let driver = &running.state.driver;
+    RuntimeSessionStatus {
+        agent_id: agent.id,
+        session_id: running.state.session_id.clone(),
+        runtime: agent.runtime.clone(),
+        model: agent.model.clone(),
+        running: true,
+        recovering: false,
+        active_turn: false,
+        supports_turn_cancel: driver.supports_turn_cancel(),
+        supports_turn_steer: driver.supports_turn_steer(),
+        supports_thread_fork: driver.supports_thread_fork(),
+        input_tokens: 0,
+        context_window_tokens: driver.context_window_tokens().unwrap_or_default() as u64,
+        context_util_pct: 0.0,
+        tier: ContextPressureTier::Healthy.as_str().to_owned(),
+        fork_suggested: false,
+        session_age_seconds: 0,
+    }
+}
+
+async fn restart_with_watchdog(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+    commands: &mut mpsc::Receiver<LocalSessionCommand>,
+    metrics: &AgentMetrics,
+) -> Option<AgentActor<cocli_agent::state::Running>> {
+    let agent_id = agent.id.to_string();
+    let mut watchdog = WatchdogStore::new();
+    watchdog.register_down(&agent_id, &agent.name);
+
+    loop {
+        let event = watchdog.plan_restart(&agent_id, &agent.name)?;
+        if event.action == "max_retries_exceeded" {
+            metrics.inc_local_watchdog_exhausted();
+            tracing::error!(
+                agent_id = %agent.id,
+                attempts = event.attempt,
+                "local runtime watchdog exhausted restart attempts"
+            );
+            return None;
+        }
+
+        let retry_index = event
+            .attempt
+            .saturating_sub(AUTO_RETRY_MAX + 1)
+            .min(config.watchdog_backoff.len() as i32 - 1) as usize;
+        let delay = config.watchdog_backoff[retry_index];
+        tracing::warn!(
+            agent_id = %agent.id,
+            attempt = event.attempt,
+            delay_ms = delay.as_millis(),
+            "local runtime exited; watchdog scheduled restart"
+        );
+
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            command = commands.recv() => {
+                if reject_command_during_recovery(command) {
+                    return None;
+                }
+                continue;
+            }
+        }
+
+        match start_running_actor(registry, config, agent).await {
+            Ok(running) => {
+                metrics.inc_local_watchdog_restart();
+                metrics.inc_local_session_started();
+                let _ = watchdog.mark_recovered(&agent_id);
+                tracing::info!(
+                    agent_id = %agent.id,
+                    attempt = event.attempt,
+                    "local runtime watchdog restart succeeded"
+                );
+                return Some(running);
+            }
+            Err(error) => {
+                metrics.inc_local_watchdog_failure();
+                let _ = watchdog.mark_restart_failed(&agent_id, error.to_string());
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    attempt = event.attempt,
+                    %error,
+                    "local runtime watchdog restart failed"
+                );
+            }
+        }
+    }
+}
+
+fn reject_command_during_recovery(command: Option<LocalSessionCommand>) -> bool {
+    match command {
+        Some(LocalSessionCommand::Reply { reply, .. }) => {
+            let _ = reply.send(Err(RuntimeError::Busy(
+                "agent runtime is recovering".to_owned(),
+            )));
+            false
+        }
+        Some(LocalSessionCommand::Cancel { reply })
+        | Some(LocalSessionCommand::Steer { reply, .. }) => {
+            let _ = reply.send(Err(RuntimeError::NotFound(
+                "agent runtime is recovering".to_owned(),
+            )));
+            false
+        }
+        Some(LocalSessionCommand::Fork { reply }) => {
+            let _ = reply.send(Err(RuntimeError::Busy(
+                "agent runtime is recovering".to_owned(),
+            )));
+            false
+        }
+        Some(LocalSessionCommand::Stop { reply }) => {
+            let _ = reply.send(());
+            true
+        }
+        None => true,
+    }
+}
+
 async fn run_local_session(
     mut running: AgentActor<cocli_agent::state::Running>,
     mut commands: mpsc::Receiver<LocalSessionCommand>,
-    status: Arc<RwLock<RuntimeSessionStatus>>,
-    turn_timeout: Duration,
-    metrics: Arc<AgentMetrics>,
+    context: LocalSessionContext,
 ) {
+    let LocalSessionContext {
+        status,
+        started_at,
+        registry,
+        config,
+        agent,
+        metrics,
+    } = context;
+    let turn_timeout = config.turn_timeout;
     let mut active: Option<ActiveReply> = None;
+    let mut event_rx_live = true;
     loop {
         let deadline = active
             .as_ref()
@@ -442,6 +602,9 @@ async fn run_local_session(
                     }
                     match running.deliver(delivery).await {
                         Ok(()) => {
+                            if running.state.respawn_ctx.is_some() {
+                                event_rx_live = true;
+                            }
                             metrics.inc_local_turn_started();
                             metrics.inc_local_active_turns();
                             active = Some(ActiveReply {
@@ -522,7 +685,7 @@ async fn run_local_session(
                     break;
                 }
             },
-            event = running.state.event_rx.recv() => match event {
+            event = running.state.event_rx.recv(), if event_rx_live => match event {
                 Some(DriverEvent::SessionStarted { session_id }) => {
                     running.state.session_id.clone_from(&session_id);
                     status.write().await.session_id = session_id;
@@ -578,6 +741,10 @@ async fn run_local_session(
                 }
                 Some(_) => {}
                 None => {
+                    if running.state.respawn_ctx.is_some() {
+                        event_rx_live = false;
+                        continue;
+                    }
                     if let Some(mut turn) = active.take() {
                         metrics.inc_local_turn_failed();
                         metrics.dec_local_active_turns();
@@ -589,10 +756,28 @@ async fn run_local_session(
                             )));
                         }
                     }
-                    let mut state = status.write().await;
-                    state.running = false;
-                    state.active_turn = false;
-                    break;
+                    {
+                        let mut state = status.write().await;
+                        state.running = false;
+                        state.recovering = true;
+                        state.active_turn = false;
+                    }
+                    match restart_with_watchdog(
+                        &registry,
+                        &config,
+                        &agent,
+                        &mut commands,
+                        &metrics,
+                    ).await {
+                        Some(restarted) => {
+                            running = restarted;
+                            *status.write().await = runtime_status_for_running(&agent, &running);
+                            *started_at.write().await = Instant::now();
+                            event_rx_live = true;
+                            continue;
+                        }
+                        None => break,
+                    }
                 }
             },
             _ = tokio::time::sleep_until(deadline), if deadline_live => {
@@ -623,6 +808,7 @@ async fn run_local_session(
     metrics.dec_local_active_sessions();
     let mut state = status.write().await;
     state.running = false;
+    state.recovering = false;
     state.active_turn = false;
 }
 
@@ -686,6 +872,7 @@ fn inactive_session_status(agent: &Agent) -> RuntimeSessionStatus {
         runtime: agent.runtime.clone(),
         model: agent.model.clone(),
         running: false,
+        recovering: false,
         active_turn: false,
         supports_turn_cancel: false,
         supports_turn_steer: false,
@@ -1130,6 +1317,207 @@ mod tests {
         }
     }
 
+    struct TurnExitDriver {
+        spawn_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Driver for TurnExitDriver {
+        fn name(&self) -> &str {
+            "turn-exit"
+        }
+
+        fn mcp_tool_prefix(&self) -> &str {
+            ""
+        }
+
+        fn busy_delivery_mode(&self) -> BusyDeliveryMode {
+            BusyDeliveryMode::None
+        }
+
+        fn requires_initial_prompt(&self) -> bool {
+            true
+        }
+
+        fn env_propagation(&self) -> EnvPropagation {
+            EnvPropagation::Inherit
+        }
+
+        fn skill_compatibility(&self) -> SkillCompatibility {
+            SkillCompatibility::Supported
+        }
+
+        fn prepare_workspace(
+            &self,
+            _work_dir: &Path,
+            _config: &DriverAgentConfig,
+            _agent_id: &str,
+            _system_prompt: &str,
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn spawn(&self, cfg: &SpawnConfig) -> Result<tokio::process::Child, DriverError> {
+            self.spawn_count.fetch_add(1, Ordering::Relaxed);
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg("printf 'session\\ntext:%s\\nturn\\n' \"$1\"")
+                .arg("turn-exit")
+                .arg(cfg.initial_prompt)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(DriverError::Io)
+        }
+
+        fn parse_event(&self, line: &str) -> Vec<DriverEvent> {
+            if line == "session" {
+                vec![DriverEvent::SessionStarted {
+                    session_id: "session-turn-exit".to_owned(),
+                }]
+            } else if let Some(text) = line.strip_prefix("text:") {
+                vec![DriverEvent::TextDelta {
+                    text: text.to_owned(),
+                }]
+            } else if line == "turn" {
+                vec![DriverEvent::TurnEnd {
+                    status: TurnStatus::Completed,
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cost_usd: 0.0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                    context_window_tokens: 1_000,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn encode_stdin_message(
+            &self,
+            _text: &str,
+            _session_id: Option<&str>,
+            _mode: MessageMode,
+        ) -> Option<String> {
+            None
+        }
+
+        fn supports_turn_cancel(&self) -> bool {
+            true
+        }
+
+        fn is_turn_exit(&self) -> bool {
+            true
+        }
+
+        fn skill_search_paths(&self, _workspace: &Path) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+
+    struct CrashOnceDriver {
+        spawn_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Driver for CrashOnceDriver {
+        fn name(&self) -> &str {
+            "crash-once"
+        }
+
+        fn mcp_tool_prefix(&self) -> &str {
+            ""
+        }
+
+        fn busy_delivery_mode(&self) -> BusyDeliveryMode {
+            BusyDeliveryMode::Direct
+        }
+
+        fn requires_initial_prompt(&self) -> bool {
+            true
+        }
+
+        fn env_propagation(&self) -> EnvPropagation {
+            EnvPropagation::Inherit
+        }
+
+        fn skill_compatibility(&self) -> SkillCompatibility {
+            SkillCompatibility::Supported
+        }
+
+        fn prepare_workspace(
+            &self,
+            _work_dir: &Path,
+            _config: &DriverAgentConfig,
+            _agent_id: &str,
+            _system_prompt: &str,
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn spawn(&self, _cfg: &SpawnConfig) -> Result<tokio::process::Child, DriverError> {
+            let spawn = self.spawn_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let script = if spawn == 1 {
+                "printf 'session\\n'; n=0; while IFS= read -r line; do n=$((n+1)); if [ \"$n\" -eq 1 ]; then printf 'text:%s\\nturn\\n' \"$line\"; else exit 1; fi; done"
+            } else {
+                "printf 'session\\n'; while IFS= read -r line; do printf 'text:%s\\nturn\\n' \"$line\"; done"
+            };
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(DriverError::Io)
+        }
+
+        fn parse_event(&self, line: &str) -> Vec<DriverEvent> {
+            if line == "session" {
+                vec![DriverEvent::SessionStarted {
+                    session_id: "session-crash-once".to_owned(),
+                }]
+            } else if let Some(text) = line.strip_prefix("text:") {
+                vec![DriverEvent::TextDelta {
+                    text: text.to_owned(),
+                }]
+            } else if line == "turn" {
+                vec![DriverEvent::TurnEnd {
+                    status: TurnStatus::Completed,
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cost_usd: 0.0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                    context_window_tokens: 1_000,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn encode_stdin_message(
+            &self,
+            text: &str,
+            _session_id: Option<&str>,
+            _mode: MessageMode,
+        ) -> Option<String> {
+            Some(text.to_owned())
+        }
+
+        fn supports_turn_cancel(&self) -> bool {
+            true
+        }
+
+        fn skill_search_paths(&self, _workspace: &Path) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+
     fn test_agent(runtime: &str) -> Agent {
         Agent {
             id: Uuid::new_v4(),
@@ -1173,6 +1561,7 @@ mod tests {
                 server_url: "http://127.0.0.1:8090".to_owned(),
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = Agent {
@@ -1229,6 +1618,7 @@ mod tests {
                 server_url: "http://127.0.0.1:8090".to_owned(),
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = Agent {
@@ -1278,6 +1668,7 @@ mod tests {
                 server_url: "http://127.0.0.1:8090".to_owned(),
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = test_agent("controllable");
@@ -1333,6 +1724,7 @@ mod tests {
                 server_url: "http://127.0.0.1:8090".to_owned(),
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
             },
         ));
         let agent = test_agent("controllable");
@@ -1418,6 +1810,7 @@ mod tests {
                 server_url: "http://127.0.0.1:8090".to_owned(),
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = test_agent("controllable");
@@ -1438,5 +1831,98 @@ mod tests {
                 .expect("runtime status")
                 .running
         );
+    }
+
+    #[tokio::test]
+    async fn turn_exit_runtime_parks_between_turns_without_watchdog_restart() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(TurnExitDriver {
+            spawn_count: Arc::clone(&spawn_count),
+        }));
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            RuntimeCatalog::default(),
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        let agent = test_agent("turn-exit");
+
+        let first = service
+            .reply(&agent, &test_message(&agent, 1, "first"))
+            .await
+            .expect("first reply");
+        let second = service
+            .reply(&agent, &test_message(&agent, 2, "second"))
+            .await
+            .expect("second reply");
+
+        assert!(first.contains("first"));
+        assert!(second.contains("second"));
+        assert_eq!(spawn_count.load(Ordering::Relaxed), 3);
+        let status = service.status(&agent).await.expect("runtime status");
+        assert!(status.running);
+        assert!(!status.recovering);
+        let metrics = service.metrics().await;
+        assert_eq!(metrics.counters["local_agent_watchdog_restart_total"], 0);
+        assert_eq!(metrics.gauges["local_agent_active_sessions"], 1.0);
+    }
+
+    #[tokio::test]
+    async fn watchdog_restarts_unexpectedly_exited_persistent_runtime() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(CrashOnceDriver {
+            spawn_count: Arc::clone(&spawn_count),
+        }));
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            RuntimeCatalog::default(),
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        let agent = test_agent("crash-once");
+        service.start(&agent).await.expect("session starts");
+
+        let first = service
+            .reply(&agent, &test_message(&agent, 1, "crash now"))
+            .await;
+        assert!(matches!(first, Err(RuntimeError::Delivery(_))));
+
+        for _ in 0..100 {
+            let status = service.status(&agent).await.expect("runtime status");
+            if status.running && !status.recovering && spawn_count.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let status = service.status(&agent).await.expect("runtime status");
+        assert!(status.running);
+        assert!(!status.recovering);
+        assert_eq!(spawn_count.load(Ordering::Relaxed), 2);
+
+        let reply = service
+            .reply(&agent, &test_message(&agent, 2, "after restart"))
+            .await
+            .expect("reply after watchdog restart");
+        assert!(reply.contains("after restart"));
+        let metrics = service.metrics().await;
+        assert_eq!(metrics.counters["local_agent_watchdog_restart_total"], 1);
+        assert_eq!(metrics.counters["local_agent_watchdog_failure_total"], 0);
+        assert_eq!(metrics.counters["local_agent_session_started_total"], 2);
     }
 }
