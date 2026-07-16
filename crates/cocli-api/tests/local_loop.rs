@@ -151,6 +151,12 @@ async fn runtime_control_routes_expose_status_and_typed_unsupported_errors() {
     assert_eq!(status["running"], false);
     assert_eq!(status["tier"], "healthy");
 
+    let (metrics_status, metrics) =
+        json_request(app.clone(), "GET", "/api/metrics", json!({})).await;
+    assert_eq!(metrics_status, StatusCode::OK);
+    assert_eq!(metrics["counters"], json!({}));
+    assert_eq!(metrics["gauges"], json!({}));
+
     let (steer_status, steer_error) = json_request(
         app.clone(),
         "POST",

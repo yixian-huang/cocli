@@ -18,6 +18,16 @@ pub struct AgentMetrics {
     recovery_probe_recovered_total: AtomicU64,
     recovery_probe_error_total: AtomicU64,
     recovery_tracked_agents: AtomicU64,
+    local_session_started_total: AtomicU64,
+    local_session_reused_total: AtomicU64,
+    local_session_stopped_total: AtomicU64,
+    local_turn_started_total: AtomicU64,
+    local_turn_completed_total: AtomicU64,
+    local_turn_failed_total: AtomicU64,
+    local_turn_cancelled_total: AtomicU64,
+    local_turn_timed_out_total: AtomicU64,
+    local_active_sessions: AtomicU64,
+    local_active_turns: AtomicU64,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -100,6 +110,61 @@ impl AgentMetrics {
             .store(count as u64, Ordering::Relaxed);
     }
 
+    pub fn inc_local_session_started(&self) {
+        self.local_session_started_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_session_reused(&self) {
+        self.local_session_reused_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_session_stopped(&self) {
+        self.local_session_stopped_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_turn_started(&self) {
+        self.local_turn_started_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_turn_completed(&self) {
+        self.local_turn_completed_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_turn_failed(&self) {
+        self.local_turn_failed_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_turn_cancelled(&self) {
+        self.local_turn_cancelled_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_turn_timed_out(&self) {
+        self.local_turn_timed_out_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_local_active_sessions(&self) {
+        self.local_active_sessions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_local_active_sessions(&self) {
+        saturating_decrement(&self.local_active_sessions);
+    }
+
+    pub fn inc_local_active_turns(&self) {
+        self.local_active_turns.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn dec_local_active_turns(&self) {
+        saturating_decrement(&self.local_active_turns);
+    }
+
     pub fn snapshot(&self) -> AgentMetricsSnapshot {
         let mut counters = BTreeMap::new();
         counters.insert(
@@ -150,6 +215,38 @@ impl AgentMetrics {
             "agent_recovery_probe_error_total".to_string(),
             saturating_i64(self.recovery_probe_error_total.load(Ordering::Relaxed)),
         );
+        counters.insert(
+            "local_agent_session_started_total".to_string(),
+            saturating_i64(self.local_session_started_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_session_reused_total".to_string(),
+            saturating_i64(self.local_session_reused_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_session_stopped_total".to_string(),
+            saturating_i64(self.local_session_stopped_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_turn_started_total".to_string(),
+            saturating_i64(self.local_turn_started_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_turn_completed_total".to_string(),
+            saturating_i64(self.local_turn_completed_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_turn_failed_total".to_string(),
+            saturating_i64(self.local_turn_failed_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_turn_cancelled_total".to_string(),
+            saturating_i64(self.local_turn_cancelled_total.load(Ordering::Relaxed)),
+        );
+        counters.insert(
+            "local_agent_turn_timed_out_total".to_string(),
+            saturating_i64(self.local_turn_timed_out_total.load(Ordering::Relaxed)),
+        );
 
         let mut gauges = BTreeMap::new();
         gauges.insert(
@@ -164,6 +261,14 @@ impl AgentMetrics {
             "agent_recovery_tracked_agents".to_string(),
             self.recovery_tracked_agents.load(Ordering::Relaxed) as f64,
         );
+        gauges.insert(
+            "local_agent_active_sessions".to_string(),
+            self.local_active_sessions.load(Ordering::Relaxed) as f64,
+        );
+        gauges.insert(
+            "local_agent_active_turns".to_string(),
+            self.local_active_turns.load(Ordering::Relaxed) as f64,
+        );
 
         AgentMetricsSnapshot { counters, gauges }
     }
@@ -171,6 +276,12 @@ impl AgentMetrics {
 
 fn saturating_i64(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn saturating_decrement(value: &AtomicU64) {
+    let _ = value.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_sub(1))
+    });
 }
 
 #[cfg(test)]
@@ -195,6 +306,16 @@ mod tests {
         metrics.inc_recovery_probe_recovered();
         metrics.inc_recovery_probe_error();
         metrics.set_recovery_tracked_agents(11);
+        metrics.inc_local_session_started();
+        metrics.inc_local_session_reused();
+        metrics.inc_local_session_stopped();
+        metrics.inc_local_turn_started();
+        metrics.inc_local_turn_completed();
+        metrics.inc_local_turn_failed();
+        metrics.inc_local_turn_cancelled();
+        metrics.inc_local_turn_timed_out();
+        metrics.inc_local_active_sessions();
+        metrics.inc_local_active_turns();
 
         let snap = metrics.snapshot();
 
@@ -213,5 +334,23 @@ mod tests {
         assert_eq!(snap.counters["agent_recovery_probe_recovered_total"], 1);
         assert_eq!(snap.counters["agent_recovery_probe_error_total"], 1);
         assert_eq!(snap.gauges["agent_recovery_tracked_agents"], 11.0);
+        assert_eq!(snap.counters["local_agent_session_started_total"], 1);
+        assert_eq!(snap.counters["local_agent_session_reused_total"], 1);
+        assert_eq!(snap.counters["local_agent_session_stopped_total"], 1);
+        assert_eq!(snap.counters["local_agent_turn_started_total"], 1);
+        assert_eq!(snap.counters["local_agent_turn_completed_total"], 1);
+        assert_eq!(snap.counters["local_agent_turn_failed_total"], 1);
+        assert_eq!(snap.counters["local_agent_turn_cancelled_total"], 1);
+        assert_eq!(snap.counters["local_agent_turn_timed_out_total"], 1);
+        assert_eq!(snap.gauges["local_agent_active_sessions"], 1.0);
+        assert_eq!(snap.gauges["local_agent_active_turns"], 1.0);
+
+        metrics.dec_local_active_sessions();
+        metrics.dec_local_active_sessions();
+        metrics.dec_local_active_turns();
+        metrics.dec_local_active_turns();
+        let snap = metrics.snapshot();
+        assert_eq!(snap.gauges["local_agent_active_sessions"], 0.0);
+        assert_eq!(snap.gauges["local_agent_active_turns"], 0.0);
     }
 }

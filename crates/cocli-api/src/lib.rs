@@ -1,5 +1,6 @@
 //! Local HTTP API and runtime-neutral application service.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -80,6 +81,13 @@ pub struct RuntimeForkResult {
     pub native: bool,
 }
 
+/// Process-local runtime metrics exposed by the local server.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct RuntimeMetricsSnapshot {
+    pub counters: BTreeMap<String, i64>,
+    pub gauges: BTreeMap<String, f64>,
+}
+
 /// Runtime failures surfaced to the HTTP application layer.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -145,6 +153,11 @@ pub trait RuntimeService: Send + Sync {
     async fn status(&self, agent: &Agent) -> Result<RuntimeSessionStatus, RuntimeError> {
         Ok(RuntimeSessionStatus::stateless(agent, false))
     }
+
+    /// Returns process-local runtime metrics.
+    async fn metrics(&self) -> RuntimeMetricsSnapshot {
+        RuntimeMetricsSnapshot::default()
+    }
 }
 
 /// Runtime service used when no local runtime registry is available.
@@ -197,6 +210,7 @@ struct AppState {
 pub fn router(store: Store, runtime: Arc<dyn RuntimeService>) -> Router {
     Router::new()
         .route("/healthz", get(health))
+        .route("/api/metrics", get(runtime_metrics))
         .route("/api/runtimes", get(list_runtimes))
         .route("/api/channels", get(list_channels).post(create_channel))
         .route(
@@ -224,6 +238,10 @@ async fn health() -> Json<HealthResponse> {
 
 async fn list_runtimes(State(state): State<AppState>) -> Json<Vec<RuntimeInfo>> {
     Json(state.runtime.list().await)
+}
+
+async fn runtime_metrics(State(state): State<AppState>) -> Json<RuntimeMetricsSnapshot> {
+    Json(state.runtime.metrics().await)
 }
 
 async fn list_channels(State(state): State<AppState>) -> Result<Json<Vec<Channel>>, ApiError> {

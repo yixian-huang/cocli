@@ -7,9 +7,10 @@ use async_trait::async_trait;
 use cocli_agent::context::{classify_context_pressure, default_backstop_pct, ContextPressureTier};
 use cocli_agent::fork_reason::classify_fork_reason;
 use cocli_agent::state::Idle;
-use cocli_agent::{AgentActor, StartCfg};
+use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
-    RuntimeError, RuntimeForkResult, RuntimeInfo, RuntimeService, RuntimeSessionStatus,
+    RuntimeError, RuntimeForkResult, RuntimeInfo, RuntimeMetricsSnapshot, RuntimeService,
+    RuntimeSessionStatus,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -69,6 +70,7 @@ pub struct LocalRuntimeService {
     config: LocalRuntimeConfig,
     sessions: Mutex<HashMap<Uuid, LocalSessionHandle>>,
     session_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
+    metrics: Arc<AgentMetrics>,
 }
 
 #[derive(Clone)]
@@ -142,6 +144,7 @@ impl LocalRuntimeService {
             config,
             sessions: Mutex::new(HashMap::new()),
             session_locks: Mutex::new(HashMap::new()),
+            metrics: Arc::new(AgentMetrics::default()),
         }
     }
 
@@ -205,8 +208,11 @@ impl LocalRuntimeService {
         let (command_tx, command_rx) = mpsc::channel(16);
         let status_for_task = Arc::clone(&status);
         let timeout = self.config.turn_timeout;
+        let metrics = Arc::clone(&self.metrics);
+        metrics.inc_local_session_started();
+        metrics.inc_local_active_sessions();
         tokio::spawn(async move {
-            run_local_session(running, command_rx, status_for_task, timeout).await;
+            run_local_session(running, command_rx, status_for_task, timeout, metrics).await;
         });
         Ok(LocalSessionHandle {
             command_tx,
@@ -226,12 +232,14 @@ impl LocalRuntimeService {
 
     async fn session_handle(&self, agent: &Agent) -> Result<LocalSessionHandle, RuntimeError> {
         if let Some(handle) = self.live_session(agent.id).await {
+            self.metrics.inc_local_session_reused();
             return Ok(handle);
         }
 
         let start_lock = self.session_lock(agent.id).await;
         let _guard = start_lock.lock().await;
         if let Some(handle) = self.live_session(agent.id).await {
+            self.metrics.inc_local_session_reused();
             return Ok(handle);
         }
 
@@ -393,10 +401,18 @@ impl RuntimeService for LocalRuntimeService {
     }
 
     async fn status(&self, agent: &Agent) -> Result<RuntimeSessionStatus, RuntimeError> {
-        let Some(handle) = self.sessions.lock().await.get(&agent.id).cloned() else {
+        let Some(handle) = self.live_session(agent.id).await else {
             return Ok(inactive_session_status(agent));
         };
         Ok(Self::snapshot(&handle).await)
+    }
+
+    async fn metrics(&self) -> RuntimeMetricsSnapshot {
+        let snapshot = self.metrics.snapshot();
+        RuntimeMetricsSnapshot {
+            counters: snapshot.counters,
+            gauges: snapshot.gauges,
+        }
     }
 }
 
@@ -405,6 +421,7 @@ async fn run_local_session(
     mut commands: mpsc::Receiver<LocalSessionCommand>,
     status: Arc<RwLock<RuntimeSessionStatus>>,
     turn_timeout: Duration,
+    metrics: Arc<AgentMetrics>,
 ) {
     let mut active: Option<ActiveReply> = None;
     loop {
@@ -425,6 +442,8 @@ async fn run_local_session(
                     }
                     match running.deliver(delivery).await {
                         Ok(()) => {
+                            metrics.inc_local_turn_started();
+                            metrics.inc_local_active_turns();
                             active = Some(ActiveReply {
                                 reply: Some(reply),
                                 text: String::new(),
@@ -486,6 +505,7 @@ async fn run_local_session(
                                 "agent runtime stopped during active turn".to_owned(),
                             )));
                         }
+                        metrics.inc_local_turn_cancelled();
                     }
                     let _stopping = running.stop(true);
                     let mut state = status.write().await;
@@ -529,6 +549,13 @@ async fn run_local_session(
                         input_tokens,
                         context_window_tokens,
                     ).await;
+                    match &turn_status {
+                        TurnStatus::Failed => metrics.inc_local_turn_failed(),
+                        TurnStatus::Cancelled => metrics.inc_local_turn_cancelled(),
+                        TurnStatus::Completed | TurnStatus::MaxSteps | TurnStatus::Unknown(_) => {
+                            metrics.inc_local_turn_completed();
+                        }
+                    }
                     if let Some(mut turn) = active.take() {
                         if let Some(reply) = turn.reply.take() {
                             let result = completed_turn_result(
@@ -539,6 +566,7 @@ async fn run_local_session(
                             let _ = reply.send(result);
                         }
                     }
+                    metrics.dec_local_active_turns();
                     status.write().await.active_turn = false;
                 }
                 Some(DriverEvent::Write { data }) => {
@@ -551,6 +579,8 @@ async fn run_local_session(
                 Some(_) => {}
                 None => {
                     if let Some(mut turn) = active.take() {
+                        metrics.inc_local_turn_failed();
+                        metrics.dec_local_active_turns();
                         if let Some(reply) = turn.reply.take() {
                             let _ = reply.send(Err(RuntimeError::Delivery(
                                 turn.last_error.unwrap_or_else(|| {
@@ -567,6 +597,7 @@ async fn run_local_session(
             },
             _ = tokio::time::sleep_until(deadline), if deadline_live => {
                 if let Some(turn) = active.as_mut() {
+                    metrics.inc_local_turn_timed_out();
                     turn.deadline = None;
                     if let Some(reply) = turn.reply.take() {
                         let _ = reply.send(Err(RuntimeError::Delivery(
@@ -585,6 +616,14 @@ async fn run_local_session(
             }
         }
     }
+    if active.is_some() {
+        metrics.dec_local_active_turns();
+    }
+    metrics.inc_local_session_stopped();
+    metrics.dec_local_active_sessions();
+    let mut state = status.write().await;
+    state.running = false;
+    state.active_turn = false;
 }
 
 async fn update_context_status(
@@ -1263,6 +1302,13 @@ mod tests {
         assert_eq!(status.context_window_tokens, 1_000);
         assert_eq!(status.tier, "warn");
         assert!(status.fork_suggested);
+        let metrics = service.metrics().await;
+        assert_eq!(metrics.counters["local_agent_session_started_total"], 1);
+        assert_eq!(metrics.counters["local_agent_session_reused_total"], 1);
+        assert_eq!(metrics.counters["local_agent_turn_started_total"], 2);
+        assert_eq!(metrics.counters["local_agent_turn_completed_total"], 2);
+        assert_eq!(metrics.gauges["local_agent_active_sessions"], 1.0);
+        assert_eq!(metrics.gauges["local_agent_active_turns"], 0.0);
     }
 
     #[tokio::test]
