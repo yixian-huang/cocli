@@ -123,7 +123,11 @@ impl Store {
         row.map(wiki_page_from_row).transpose()
     }
 
-    /// Lists pages by full-text substring and optional exact tag.
+    /// Lists user-authored knowledge pages by full-text substring and optional exact tag.
+    ///
+    /// Memory uses the same revision engine internally, but its generated and
+    /// typed namespace pages are intentionally excluded from the standalone
+    /// wiki browser.
     pub async fn list_wiki_pages(
         &self,
         search: Option<&str>,
@@ -138,6 +142,8 @@ impl Store {
             "SELECT id, path, title, content_md, tags, version, created_at, \
              updated_at, updated_by FROM wiki_pages \
              WHERE (? IS NULL OR path LIKE ? OR title LIKE ? OR content_md LIKE ?) \
+             AND path NOT LIKE 'agents/%/memory/%' \
+             AND path NOT LIKE 'channels/%/notes/%' \
              ORDER BY updated_at DESC, path LIMIT ?",
         )
         .bind(pattern.as_deref())

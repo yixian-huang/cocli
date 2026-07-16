@@ -97,6 +97,63 @@ export interface Task {
   updatedAt: string
 }
 
+export type MemoryScope = 'agent' | 'channel'
+export type MemoryType = 'user' | 'feedback' | 'project' | 'reference'
+
+export interface MemoryDocumentEntry {
+  path: string
+  body: string
+  version: number
+}
+
+export interface MemoryTopic {
+  type: MemoryType
+  topic: string
+  description: string
+  updated: string
+  body: string
+  path: string
+  version: number
+}
+
+export interface WikiPage {
+  id: string
+  path: string
+  title: string
+  content: string
+  tags: string[]
+  version: number
+  createdAt: string
+  updatedAt: string
+  updatedBy?: string
+}
+
+export interface WikiPageSummary {
+  path: string
+  title: string
+  tags: string[]
+  version: number
+  updatedAt: string
+  updatedBy?: string
+}
+
+export interface WikiRevision {
+  version: number
+  title: string
+  content: string
+  tags: string[]
+  createdAt: string
+  createdBy?: string
+  reason?: string
+}
+
+export interface WikiBacklink {
+  path: string
+  title: string
+  updatedAt: string
+  version: number
+}
+
 interface PostMessageResponse {
   message: Message
   replies: Message[]
@@ -248,6 +305,107 @@ export const localApi = {
       {
         method: 'DELETE',
         body: JSON.stringify({ dependsOn }),
+      },
+    ),
+  listMemory: (agentId: string, scope: MemoryScope, channelId?: string) => {
+    const params = new URLSearchParams({ scope })
+    if (channelId) params.set('channel_id', channelId)
+    return request<{ entries: MemoryDocumentEntry[] }>(
+      `/api/bridge/agents/${agentId}/memory/list?${params}`,
+    )
+  },
+  getMemoryTopic: (
+    agentId: string,
+    scope: MemoryScope,
+    type: MemoryType,
+    topic: string,
+    channelId?: string,
+  ) => {
+    const params = new URLSearchParams({ scope, type, topic })
+    if (channelId) params.set('channel_id', channelId)
+    return request<MemoryTopic>(
+      `/api/bridge/agents/${agentId}/memory/topic?${params}`,
+    )
+  },
+  writeMemoryTopic: (
+    agentId: string,
+    input: {
+      scope: MemoryScope
+      channelId?: string
+      type: MemoryType
+      topic: string
+      description: string
+      body: string
+      ifVersion?: number
+    },
+  ) =>
+    request<MemoryTopic>(`/api/bridge/agents/${agentId}/memory/topic`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  moveMemoryTopic: (
+    agentId: string,
+    input: {
+      fromScope: MemoryScope
+      fromChannelId?: string
+      toScope: MemoryScope
+      toChannelId?: string
+      type: MemoryType
+      topic: string
+    },
+  ) =>
+    request<{ from: string; to: string }>(
+      `/api/bridge/agents/${agentId}/memory/move`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          from_scope: input.fromScope,
+          from_channel_id: input.fromChannelId,
+          to_scope: input.toScope,
+          to_channel_id: input.toChannelId,
+          type: input.type,
+          topic: input.topic,
+        }),
+      },
+    ),
+  listWikiPages: (query?: string, tag?: string) => {
+    const params = new URLSearchParams()
+    if (query) params.set('q', query)
+    if (tag) params.set('tag', tag)
+    params.set('limit', '200')
+    return request<{ pages: WikiPageSummary[] }>(`/api/wiki/pages?${params}`)
+  },
+  getWikiPage: (path: string) =>
+    request<WikiPage>(`/api/wiki/pages/${encodeURIComponent(path)}`),
+  upsertWikiPage: (
+    path: string,
+    input: {
+      title: string
+      content: string
+      tags: string[]
+      updatedBy?: string
+      reason?: string
+      ifVersion?: number
+    },
+  ) =>
+    request<WikiPage>(`/api/wiki/pages/${encodeURIComponent(path)}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  listWikiRevisions: (path: string) =>
+    request<{ revisions: WikiRevision[] }>(
+      `/api/wiki/pages/${encodeURIComponent(path)}/revisions`,
+    ),
+  listWikiBacklinks: (path: string) =>
+    request<{ backlinks: WikiBacklink[] }>(
+      `/api/wiki/pages/${encodeURIComponent(path)}/backlinks`,
+    ),
+  revertWikiPage: (path: string, version: number) =>
+    request<{ page: WikiPage }>(
+      `/api/wiki/pages/${encodeURIComponent(path)}/revert`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ version, updatedBy: 'local-user' }),
       },
     ),
 }

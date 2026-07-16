@@ -6,7 +6,15 @@ import {
   useState,
   type FormEvent,
 } from 'react'
-import { Languages, ListTodo, MessageSquare, Moon, PackageOpen, Sun } from 'lucide-react'
+import {
+  BookOpen,
+  Languages,
+  ListTodo,
+  MessageSquare,
+  Moon,
+  PackageOpen,
+  Sun,
+} from 'lucide-react'
 import {
   localApi,
   type Agent,
@@ -16,6 +24,7 @@ import {
   type RuntimeInfo,
 } from './api'
 import { LocalSelect } from './LocalSelect'
+import { LocalKnowledgeWorkspace } from './LocalKnowledgeWorkspace'
 import { LocalSkillsWorkspace } from './LocalSkillsWorkspace'
 import { LocalTasksWorkspace } from './LocalTasksWorkspace'
 import {
@@ -27,7 +36,7 @@ import {
 } from './localization'
 
 type LocalTheme = 'light' | 'dark'
-type WorkspaceView = 'chat' | 'tasks' | 'skills'
+type WorkspaceView = 'chat' | 'tasks' | 'knowledge' | 'skills'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unexpected local service error'
@@ -298,6 +307,15 @@ export function LocalApp() {
           >
             <ListTodo size={14} aria-hidden="true" />
             {t('tasksWorkspace')}
+          </button>
+          <button
+            type="button"
+            className={workspaceView === 'knowledge' ? 'active' : ''}
+            aria-current={workspaceView === 'knowledge' ? 'page' : undefined}
+            onClick={() => setWorkspaceView('knowledge')}
+          >
+            <BookOpen size={14} aria-hidden="true" />
+            {t('knowledgeWorkspace')}
           </button>
           <button
             type="button"
@@ -580,6 +598,8 @@ export function LocalApp() {
           onChannelChange={setActiveChannelId}
           t={t}
         />
+      ) : workspaceView === 'knowledge' ? (
+        <LocalKnowledgeWorkspace agents={agents} channels={channels} t={t} />
       ) : (
         <LocalSkillsWorkspace agents={agents} t={t} />
       )}

@@ -42,6 +42,26 @@ describe('LocalApp', () => {
       updatedAt: string
     }> = []
     const taskDependencies: Record<number, number[]> = {}
+    let memoryTopic: {
+      type: 'project'
+      topic: string
+      description: string
+      updated: string
+      body: string
+      path: string
+      version: number
+    } | null = null
+    let wikiPages: Array<{
+      id: string
+      path: string
+      title: string
+      content: string
+      tags: string[]
+      version: number
+      createdAt: string
+      updatedAt: string
+      updatedBy?: string
+    }> = []
     localStorage.clear()
     window.matchMedia = vi.fn().mockReturnValue({
       matches: false,
@@ -137,6 +157,95 @@ describe('LocalApp', () => {
           content: '# Reviewer\n\nReview local changes.',
           binary: false,
         })
+      }
+      if (path === '/api/bridge/agents/agent-1/memory/list?scope=agent' && !init?.method) {
+        return jsonResponse({
+          entries: memoryTopic ? [{
+            path: memoryTopic.path,
+            body: memoryTopic.body,
+            version: memoryTopic.version,
+          }] : [],
+        })
+      }
+      if (
+        path.startsWith('/api/bridge/agents/agent-1/memory/topic?scope=agent')
+        && !init?.method
+      ) {
+        return memoryTopic
+          ? jsonResponse(memoryTopic)
+          : jsonResponse({ error: 'memory topic not found' }, 404)
+      }
+      if (path === '/api/bridge/agents/agent-1/memory/topic' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          type: 'project'
+          topic: string
+          description: string
+          body: string
+          ifVersion?: number
+        }
+        memoryTopic = {
+          type: body.type,
+          topic: body.topic,
+          description: body.description,
+          updated: '2026-07-16',
+          body: `---\ndescription: ${body.description}\ntype: ${body.type}\nupdated: 2026-07-16\n---\n\n${body.body}`,
+          path: `agents/agent-1/memory/${body.type}_${body.topic}.md`,
+          version: body.ifVersion ? body.ifVersion + 1 : 1,
+        }
+        return jsonResponse(memoryTopic)
+      }
+      if (path === '/api/wiki/pages?limit=200' && !init?.method) {
+        return jsonResponse({
+          pages: wikiPages.map((page) => ({
+            path: page.path,
+            title: page.title,
+            tags: page.tags,
+            version: page.version,
+            updatedAt: page.updatedAt,
+            updatedBy: page.updatedBy,
+          })),
+        })
+      }
+      if (path === '/api/wiki/pages/roadmap%2Flocal-loop' && init?.method === 'PUT') {
+        const body = JSON.parse(String(init.body)) as {
+          title: string
+          content: string
+          tags: string[]
+          ifVersion?: number
+        }
+        const nextVersion = body.ifVersion ? body.ifVersion + 1 : 1
+        const page = {
+          id: 'wiki-1',
+          path: 'roadmap/local-loop',
+          title: body.title,
+          content: body.content,
+          tags: body.tags,
+          version: nextVersion,
+          createdAt: '2026-07-16T09:10:00Z',
+          updatedAt: '2026-07-16T09:10:00Z',
+          updatedBy: 'local-user',
+        }
+        wikiPages = [page]
+        return jsonResponse(page)
+      }
+      if (path === '/api/wiki/pages/roadmap%2Flocal-loop' && !init?.method) {
+        return jsonResponse(wikiPages[0])
+      }
+      if (path === '/api/wiki/pages/roadmap%2Flocal-loop/revisions' && !init?.method) {
+        return jsonResponse({
+          revisions: wikiPages.length === 0 ? [] : [{
+            version: wikiPages[0].version,
+            title: wikiPages[0].title,
+            content: wikiPages[0].content,
+            tags: wikiPages[0].tags,
+            createdAt: wikiPages[0].updatedAt,
+            createdBy: 'local-user',
+            reason: 'Initial page',
+          }],
+        })
+      }
+      if (path === '/api/wiki/pages/roadmap%2Flocal-loop/backlinks' && !init?.method) {
+        return jsonResponse({ backlinks: [] })
       }
       if (path === `/api/channels/${channel.id}/tasks` && !init?.method) {
         return jsonResponse(taskState)
@@ -352,5 +461,51 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add dependency' }))
 
     expect(await screen.findByText('#1 Prepare release')).toBeInTheDocument()
+  })
+
+  it('creates durable Agent memory and a versioned wiki page', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+    expect(await screen.findByText('builder')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Knowledge' }))
+    expect(await screen.findByRole('heading', { name: 'Knowledge workspace' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'New topic' }))
+    fireEvent.change(screen.getByLabelText('Topic slug'), {
+      target: { value: 'local loop' },
+    })
+    fireEvent.change(screen.getByLabelText('Description'), {
+      target: { value: 'Local loop decisions' },
+    })
+    fireEvent.change(screen.getByLabelText('Markdown body'), {
+      target: { value: '# Decisions\n\nStay local-first.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create topic' }))
+
+    expect(await screen.findByRole('heading', { name: 'local_loop' })).toBeInTheDocument()
+    await waitFor(() => {
+      expect(screen.getByLabelText('Markdown body')).toHaveValue(
+        '# Decisions\n\nStay local-first.',
+      )
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Wiki' }))
+    fireEvent.click(screen.getByRole('button', { name: 'New page' }))
+    fireEvent.change(screen.getByLabelText('Page path'), {
+      target: { value: 'roadmap/local-loop' },
+    })
+    fireEvent.change(screen.getByLabelText('Title'), {
+      target: { value: 'Local product loop' },
+    })
+    fireEvent.change(screen.getByLabelText('Markdown content'), {
+      target: { value: '# Local product loop\n\nComplete.' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create page' }))
+
+    expect(await screen.findByRole('heading', { name: 'Local product loop' })).toBeInTheDocument()
+    expect(await screen.findByText('Complete.')).toBeInTheDocument()
   })
 })

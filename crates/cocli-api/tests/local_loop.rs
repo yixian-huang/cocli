@@ -657,6 +657,11 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
     assert_eq!(list_status, StatusCode::OK);
     assert_eq!(namespace["entries"].as_array().map(Vec::len), Some(2));
 
+    let (wiki_status, wiki_pages) =
+        json_request(app.clone(), "GET", "/api/wiki/pages", json!({})).await;
+    assert_eq!(wiki_status, StatusCode::OK);
+    assert_eq!(wiki_pages["pages"].as_array().map(Vec::len), Some(0));
+
     let (_, other_channel) = json_request(
         app.clone(),
         "POST",
