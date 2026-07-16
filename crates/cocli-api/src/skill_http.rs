@@ -215,14 +215,14 @@ async fn import_library(
         .try_fold(0_i64, i64::checked_add)
         .ok_or_else(|| ApiError::bad_request("skill byte count overflowed"))?;
     let file_count = fetched.files.len();
-    let display_name = if fetched.metadata.display_name.trim().is_empty() {
-        if source_name.trim().is_empty() {
-            name.clone()
-        } else {
-            source_name.trim().to_owned()
-        }
-    } else {
+    let display_name = if !fetched.metadata.display_name.trim().is_empty() {
         fetched.metadata.display_name.clone()
+    } else if !fetched.metadata.name.trim().is_empty() {
+        fetched.metadata.name.clone()
+    } else if !source_name.trim().is_empty() {
+        source_name.trim().to_owned()
+    } else {
+        name.clone()
     };
     let entry = state
         .store

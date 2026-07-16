@@ -36,6 +36,48 @@ export interface Message {
   created_at: string
 }
 
+export type RuntimeSkillCompatibility = 'supported' | 'uncertain' | 'unsupported' | 'unknown'
+
+export interface SkillLibraryEntry {
+  id: string
+  zoneId: string
+  name: string
+  displayName: string
+  description: string
+  userInvocable: boolean
+  sourceKind: 'git' | 'local'
+  sourceUrl: string
+  sourceSubpath?: string
+  sourceRef?: string
+  totalBytes: number
+  fileCount: number
+  importedBy: string
+  importedAt: string
+  updatedAt: string
+  inUseCount: number
+}
+
+export interface AgentSkill {
+  name: string
+  displayName: string
+  description: string
+  userInvocable: boolean
+  type: 'global' | 'workspace'
+  path?: string
+  installPath?: string
+  state: 'managed' | 'external' | 'broken'
+  installId?: string
+  libraryId?: string
+  sourceUrl?: string
+  sourceRef?: string
+}
+
+export interface SkillFileEntry {
+  name: string
+  isDir: boolean
+  size: number
+}
+
 interface PostMessageResponse {
   message: Message
   replies: Message[]
@@ -98,4 +140,47 @@ export const localApi = {
       method: 'POST',
       body: JSON.stringify({ content }),
     }),
+  listSkillCompatibility: () =>
+    request<Record<string, RuntimeSkillCompatibility>>('/api/runtimes/compatibility'),
+  listSkillLibrary: () =>
+    request<{ entries: SkillLibraryEntry[] }>('/api/zones/local/skills/library'),
+  importSkillLibrary: (input: { url: string; subPath?: string; name?: string }) =>
+    request<{ library_id: string; files: number; size: number }>(
+      '/api/zones/local/skills/library',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  reinstallSkillLibrary: (libraryId: string) =>
+    request<{ updated: boolean; source_ref?: string; files: number; size: number }>(
+      `/api/zones/local/skills/library/${libraryId}/reinstall`,
+      { method: 'POST' },
+    ),
+  deleteSkillLibrary: (libraryId: string) =>
+    request<{ deleted: string }>(`/api/zones/local/skills/library/${libraryId}`, {
+      method: 'DELETE',
+    }),
+  listAgentSkills: (agentId: string) =>
+    request<{ skills: AgentSkill[] }>(`/api/agents/${agentId}/skills`),
+  installAgentSkill: (agentId: string, libraryId: string) =>
+    request<{ installId: string; installPath: string; bytes: number }>(
+      `/api/agents/${agentId}/skills`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ libraryId }),
+      },
+    ),
+  uninstallAgentSkill: (agentId: string, installId: string) =>
+    request<{ ok: boolean }>(`/api/agents/${agentId}/skills/${installId}`, {
+      method: 'DELETE',
+    }),
+  listAgentSkillFiles: (agentId: string, installId: string) =>
+    request<{ installPath: string; files: SkillFileEntry[] }>(
+      `/api/agents/${agentId}/skills/${installId}/files`,
+    ),
+  readAgentSkillFile: (agentId: string, installId: string, relativePath: string) =>
+    request<{ content: string; binary: boolean }>(
+      `/api/agents/${agentId}/skills/${installId}/files/${encodeURIComponent(relativePath)}`,
+    ),
 }

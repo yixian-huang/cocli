@@ -1,11 +1,12 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
   useState,
   type FormEvent,
 } from 'react'
-import { Languages, Moon, Sun } from 'lucide-react'
+import { Languages, MessageSquare, Moon, PackageOpen, Sun } from 'lucide-react'
 import {
   localApi,
   type Agent,
@@ -15,6 +16,7 @@ import {
   type RuntimeInfo,
 } from './api'
 import { LocalSelect } from './LocalSelect'
+import { LocalSkillsWorkspace } from './LocalSkillsWorkspace'
 import {
   LANGUAGE_OPTIONS,
   resolveInitialLanguage,
@@ -24,6 +26,7 @@ import {
 } from './localization'
 
 type LocalTheme = 'light' | 'dark'
+type WorkspaceView = 'chat' | 'skills'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unexpected local service error'
@@ -42,6 +45,7 @@ function resolveInitialTheme(): LocalTheme {
 export function LocalApp() {
   const [language, setLanguage] = useState<LocalLanguage>(resolveInitialLanguage)
   const [theme, setTheme] = useState<LocalTheme>(resolveInitialTheme)
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>('chat')
   const [runtimes, setRuntimes] = useState<RuntimeInfo[]>([])
   const [channels, setChannels] = useState<Channel[]>([])
   const [agents, setAgents] = useState<Agent[]>([])
@@ -57,8 +61,11 @@ export function LocalApp() {
   const [pending, setPending] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const messageEndRef = useRef<HTMLDivElement>(null)
-  const t = (key: LocalCopyKey, values?: Record<string, string | number>) =>
-    translate(language, key, values)
+  const t = useCallback(
+    (key: LocalCopyKey, values?: Record<string, string | number>) =>
+      translate(language, key, values),
+    [language],
+  )
 
   const activeChannel = useMemo(
     () => channels.find((channel) => channel.id === activeChannelId) ?? null,
@@ -272,6 +279,27 @@ export function LocalApp() {
           <strong>{t('brand')}</strong>
         </div>
 
+        <nav className="local-primary-nav" aria-label={t('workspaceNavigation')}>
+          <button
+            type="button"
+            className={workspaceView === 'chat' ? 'active' : ''}
+            aria-current={workspaceView === 'chat' ? 'page' : undefined}
+            onClick={() => setWorkspaceView('chat')}
+          >
+            <MessageSquare size={14} aria-hidden="true" />
+            {t('chatWorkspace')}
+          </button>
+          <button
+            type="button"
+            className={workspaceView === 'skills' ? 'active' : ''}
+            aria-current={workspaceView === 'skills' ? 'page' : undefined}
+            onClick={() => setWorkspaceView('skills')}
+          >
+            <PackageOpen size={14} aria-hidden="true" />
+            {t('skillsWorkspace')}
+          </button>
+        </nav>
+
         <div className="topbar-actions">
           <div className="service-status">
             <span className="status-dot" aria-hidden="true" />
@@ -311,6 +339,7 @@ export function LocalApp() {
         </div>
       )}
 
+      {workspaceView === 'chat' ? (
       <div className="local-grid">
         <aside className="channel-rail" aria-label={t('channelsAndRuntimes')}>
           <section>
@@ -533,6 +562,9 @@ export function LocalApp() {
           </form>
         </aside>
       </div>
+      ) : (
+        <LocalSkillsWorkspace agents={agents} t={t} />
+      )}
     </main>
   )
 }

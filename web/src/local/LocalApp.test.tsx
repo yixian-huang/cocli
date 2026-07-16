@@ -27,6 +27,7 @@ function jsonResponse(body: unknown, status = 200) {
 
 describe('LocalApp', () => {
   beforeEach(() => {
+    let skillInstalled = false
     localStorage.clear()
     window.matchMedia = vi.fn().mockReturnValue({
       matches: false,
@@ -37,8 +38,31 @@ describe('LocalApp', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/runtimes') return jsonResponse([runtime])
+      if (path === '/api/runtimes/compatibility') {
+        return jsonResponse({ fake: 'supported' })
+      }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
       if (path === '/api/agents' && !init?.method) return jsonResponse([])
+      if (path === '/api/zones/local/skills/library' && !init?.method) {
+        return jsonResponse({
+          entries: [{
+            id: 'library-1',
+            zoneId: 'local',
+            name: 'reviewer',
+            displayName: 'Reviewer',
+            description: 'Review local changes',
+            userInvocable: true,
+            sourceKind: 'local',
+            sourceUrl: '/tmp/reviewer',
+            totalBytes: 128,
+            fileCount: 1,
+            importedBy: 'local',
+            importedAt: '2026-07-16T09:00:00Z',
+            updatedAt: '2026-07-16T09:00:00Z',
+            inUseCount: skillInstalled ? 1 : 0,
+          }],
+        })
+      }
       if (path === `/api/channels/${channel.id}/messages` && !init?.method) return jsonResponse([])
       if (path === '/api/agents' && init?.method === 'POST') {
         return jsonResponse({
@@ -50,6 +74,55 @@ describe('LocalApp', () => {
           status: 'running',
           created_at: '2026-07-16T09:01:00Z',
         }, 201)
+      }
+      if (path === '/api/agents/agent-1/skills' && !init?.method) {
+        return jsonResponse({
+          skills: skillInstalled ? [{
+            name: 'reviewer',
+            displayName: 'Reviewer',
+            description: 'Review local changes',
+            userInvocable: true,
+            type: 'workspace',
+            path: '.fake/skills/reviewer/SKILL.md',
+            installPath: '.fake/skills/reviewer',
+            state: 'managed',
+            installId: 'install-1',
+            libraryId: 'library-1',
+            sourceUrl: '/tmp/reviewer',
+          }, {
+            name: 'shell-helper',
+            displayName: 'Shell helper',
+            description: 'External runtime-native helper',
+            userInvocable: false,
+            type: 'global',
+            path: '~/.fake/skills/shell-helper/SKILL.md',
+            installPath: '~/.fake/skills/shell-helper',
+            state: 'external',
+            installId: null,
+            libraryId: null,
+            sourceUrl: null,
+          }] : [],
+        })
+      }
+      if (path === '/api/agents/agent-1/skills' && init?.method === 'POST') {
+        skillInstalled = true
+        return jsonResponse({
+          installId: 'install-1',
+          installPath: '.fake/skills/reviewer',
+          bytes: 128,
+        })
+      }
+      if (path === '/api/agents/agent-1/skills/install-1/files' && !init?.method) {
+        return jsonResponse({
+          installPath: '.fake/skills/reviewer',
+          files: [{ name: 'SKILL.md', isDir: false, size: 64 }],
+        })
+      }
+      if (path === '/api/agents/agent-1/skills/install-1/files/SKILL.md' && !init?.method) {
+        return jsonResponse({
+          content: '# Reviewer\n\nReview local changes.',
+          binary: false,
+        })
       }
       if (path === `/api/channels/${channel.id}/messages` && init?.method === 'POST') {
         return jsonResponse({
@@ -121,5 +194,34 @@ describe('LocalApp', () => {
     expect(screen.getByRole('listbox', { name: 'Runtime' })).toBeInTheDocument()
     fireEvent.keyDown(runtimeSelect, { key: 'Enter' })
     expect(runtimeSelect).toHaveAttribute('aria-expanded', 'false')
+  })
+
+  it('installs a catalog skill from the local Skills workspace', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+    expect(await screen.findByText('builder')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Skills' }))
+    expect(await screen.findByRole('heading', { name: 'Skills workspace' })).toBeInTheDocument()
+    expect(await screen.findByText('Review local changes')).toBeInTheDocument()
+
+    const installButtons = await screen.findAllByRole('button', { name: 'Install' })
+    fireEvent.click(installButtons[0])
+
+    expect(await screen.findByText('managed')).toBeInTheDocument()
+    expect(screen.getByText('Shell helper')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Filter Agent skills'), {
+      target: { value: 'managed' },
+    })
+    expect(screen.getAllByText('Reviewer').length).toBeGreaterThan(0)
+    expect(screen.queryByText('Shell helper')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'View files' }))
+    expect(await screen.findByRole('heading', { name: 'Reviewer' })).toBeInTheDocument()
+    expect(await screen.findByText(/Review local changes\./)).toBeInTheDocument()
   })
 })

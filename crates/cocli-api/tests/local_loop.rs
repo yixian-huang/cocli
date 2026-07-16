@@ -279,7 +279,10 @@ async fn skills_routes_complete_the_local_import_install_and_refresh_loop() {
         app.clone(),
         "POST",
         "/api/zones/local/skills/library",
-        json!({"url": source.path().to_str().expect("source path")}),
+        json!({
+            "url": source.path().to_str().expect("source path"),
+            "name": "demo-local"
+        }),
     )
     .await;
     assert_eq!(import_status, StatusCode::OK);
@@ -290,7 +293,10 @@ async fn skills_routes_complete_the_local_import_install_and_refresh_loop() {
         app.clone(),
         "POST",
         "/api/zones/local/skills/library",
-        json!({"url": source.path().to_str().expect("source path")}),
+        json!({
+            "url": source.path().to_str().expect("source path"),
+            "name": "demo-local"
+        }),
     )
     .await;
     assert_eq!(conflict_status, StatusCode::CONFLICT);
@@ -308,7 +314,8 @@ async fn skills_routes_complete_the_local_import_install_and_refresh_loop() {
     )
     .await;
     assert_eq!(list_status, StatusCode::OK);
-    assert_eq!(library["entries"][0]["name"], "demo-skill");
+    assert_eq!(library["entries"][0]["name"], "demo-local");
+    assert_eq!(library["entries"][0]["displayName"], "Demo Skill");
     assert_eq!(library["entries"][0]["sourceKind"], "local");
     assert_eq!(library["entries"][0]["zoneId"], "local");
 
@@ -320,7 +327,7 @@ async fn skills_routes_complete_the_local_import_install_and_refresh_loop() {
     )
     .await;
     assert_eq!(install_status, StatusCode::OK);
-    assert_eq!(installed["installPath"], ".fake/skills/demo-skill");
+    assert_eq!(installed["installPath"], ".fake/skills/demo-local");
     let install_id = installed["installId"].as_str().expect("install id");
 
     let (duplicate_status, duplicate_error) = json_request(
