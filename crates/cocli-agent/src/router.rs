@@ -22,7 +22,7 @@ use cocli_protocol::{
 
 use crate::actor::{AgentActor, StartCfg};
 use crate::obs::AgentObservationChanged;
-use crate::queue::DeliveryQueue;
+use crate::queue::{DeliveryQueue, EnqueueResult, MAX_PENDING_PER_AGENT};
 use crate::state::Idle;
 use crate::types::{AgentCmd, AgentStateChange};
 use crate::working::WorkingMemoryStore;
@@ -161,24 +161,10 @@ impl AgentRouter {
             return;
         }
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCmd>(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel::<AgentCmd>(MAX_PENDING_PER_AGENT);
         self.agents.insert(agent_id.clone(), cmd_tx.clone());
 
-        // Drain any deliveries that arrived before this agent finished
-        // starting (race: server's /messages handler can dispatch
-        // agent:deliver before /agents/start's goroutine sends agent:start;
-        // similarly the post-reconnect backlog flush precedes our spawn).
-        let buffered = self.delivery_queue.drain(&agent_id);
-        if !buffered.is_empty() {
-            tracing::info!(
-                agent_id = %agent_id,
-                count = buffered.len(),
-                "router: draining buffered delivers into starting agent"
-            );
-            for d in buffered {
-                let _ = cmd_tx.send(AgentCmd::Deliver(d)).await;
-            }
-        }
+        self.flush_delivery_queue_for_agent(&agent_id, &cmd_tx);
 
         // Update the shared registry immediately on registration so
         // ServerConnActor's reconnect path sees this agent as running
@@ -308,15 +294,30 @@ impl AgentRouter {
             content_len = m.message.content.len(),
             "router: handle_deliver"
         );
-        if let Some(tx) = self.agents.get(&m.agent_id) {
+        if let Some(tx) = self.agents.get(&m.agent_id).cloned() {
             let agent_id = m.agent_id.clone();
+            self.flush_delivery_queue_for_agent(&agent_id, &tx);
             let seq = m.seq;
-            if tx.send(AgentCmd::Deliver(m)).await.is_err() {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    seq,
-                    "router: agent mailbox closed; delivery dropped"
-                );
+            match tx.try_send(AgentCmd::Deliver(m)) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(AgentCmd::Deliver(m))) => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        seq,
+                        "router: agent mailbox full; delivery buffered"
+                    );
+                    self.buffer_delivery(&agent_id, m);
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(AgentCmd::Deliver(m))) => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        seq,
+                        "router: agent mailbox closed; delivery buffered"
+                    );
+                    self.buffer_delivery(&agent_id, m);
+                    self.agents.remove(&agent_id);
+                }
+                Err(_) => unreachable!("deliver path only sends AgentCmd::Deliver"),
             }
         } else {
             // Agent not yet started (race: server's /messages handler
@@ -330,7 +331,58 @@ impl AgentRouter {
                 "router: deliver buffered (agent not yet running)"
             );
             let aid = m.agent_id.clone();
-            self.delivery_queue.enqueue(&aid, m);
+            self.buffer_delivery(&aid, m);
+        }
+    }
+
+    fn buffer_delivery(&mut self, agent_id: &str, delivery: AgentDeliverMsg) {
+        if self.delivery_queue.enqueue(agent_id, delivery) == EnqueueResult::RejectedFull {
+            tracing::warn!(
+                agent_id,
+                capacity = MAX_PENDING_PER_AGENT,
+                "router: local delivery queue full; delivery remains unaccepted"
+            );
+        }
+    }
+
+    fn flush_delivery_queue_for_agent(&mut self, agent_id: &str, tx: &mpsc::Sender<AgentCmd>) {
+        let buffered = self.delivery_queue.drain(agent_id);
+        if buffered.is_empty() {
+            return;
+        }
+
+        let mut pending = buffered.into_iter();
+        while let Some(delivery) = pending.next() {
+            let seq = delivery.seq;
+            match tx.try_send(AgentCmd::Deliver(delivery)) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(AgentCmd::Deliver(delivery))) => {
+                    let mut remaining = vec![delivery];
+                    remaining.extend(pending);
+                    self.delivery_queue.prepend(agent_id, remaining);
+                    tracing::debug!(
+                        agent_id,
+                        seq,
+                        "router: buffered delivery flush paused; actor mailbox full"
+                    );
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(AgentCmd::Deliver(
+                    delivery,
+                ))) => {
+                    let mut remaining = vec![delivery];
+                    remaining.extend(pending);
+                    self.delivery_queue.prepend(agent_id, remaining);
+                    self.agents.remove(agent_id);
+                    tracing::info!(
+                        agent_id,
+                        seq,
+                        "router: buffered delivery flush found closed mailbox"
+                    );
+                    break;
+                }
+                Err(_) => unreachable!("delivery flush only sends AgentCmd::Deliver"),
+            }
         }
     }
 
@@ -835,5 +887,77 @@ mod tests {
             reg,
         );
         assert!(r.running_agents_snapshot().is_empty());
+    }
+
+    fn make_delivery(agent_id: &str, seq: i64) -> AgentDeliverMsg {
+        AgentDeliverMsg {
+            agent_id: agent_id.to_string(),
+            seq,
+            attempt: 1,
+            message: cocli_protocol::types::DeliveryMessage {
+                channel_id: uuid::Uuid::new_v4(),
+                content: format!("message-{seq}"),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn deliver_to_full_mailbox_returns_without_blocking_and_buffers() {
+        let (_inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let (state_tx, state_rx) = mpsc::channel(1);
+        let (obs_tx, _obs_rx) = broadcast::channel(1);
+        let reg = Arc::new(RwLock::new(HashSet::new()));
+        let mut router = AgentRouter::new(
+            make_cfg(),
+            inbound_rx,
+            outbound_tx,
+            state_rx,
+            state_tx,
+            obs_tx,
+            reg,
+        );
+        let (agent_tx, _agent_rx) = mpsc::channel(1);
+        agent_tx.try_send(AgentCmd::TurnCancel).unwrap();
+        router.agents.insert("agent-full".to_string(), agent_tx);
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            router.handle_deliver(make_delivery("agent-full", 42)),
+        )
+        .await
+        .expect("full mailbox must not block the router");
+
+        assert_eq!(router.delivery_queue.len("agent-full"), 1);
+    }
+
+    #[tokio::test]
+    async fn deliver_to_closed_mailbox_rebuffers_and_removes_stale_sender() {
+        let (_inbound_tx, inbound_rx) = mpsc::channel(1);
+        let (outbound_tx, _outbound_rx) = mpsc::channel(1);
+        let (state_tx, state_rx) = mpsc::channel(1);
+        let (obs_tx, _obs_rx) = broadcast::channel(1);
+        let reg = Arc::new(RwLock::new(HashSet::new()));
+        let mut router = AgentRouter::new(
+            make_cfg(),
+            inbound_rx,
+            outbound_tx,
+            state_rx,
+            state_tx,
+            obs_tx,
+            reg,
+        );
+        let (agent_tx, agent_rx) = mpsc::channel(1);
+        drop(agent_rx);
+        router.agents.insert("agent-closed".to_string(), agent_tx);
+
+        router
+            .handle_deliver(make_delivery("agent-closed", 43))
+            .await;
+
+        assert_eq!(router.delivery_queue.len("agent-closed"), 1);
+        assert!(!router.agents.contains_key("agent-closed"));
     }
 }

@@ -217,10 +217,10 @@ function ExecutionTimelineSection({
                 <span className="text-[11px] text-muted-foreground ml-auto">{intent.scope}</span>
               </div>
               <div className="text-[11px] text-muted-foreground">
-                created {fmtDateTime(intent.createdAt)} · runs {intent.runs.length}
+                created {fmtDateTime(intent.createdAt)} · runs {(intent.runs ?? []).length}
               </div>
               <div className="space-y-1.5">
-                {intent.runs.map((run) => (
+                {(intent.runs ?? []).map((run) => (
                   <TimelineRun
                     key={run.id}
                     run={run}
@@ -228,7 +228,7 @@ function ExecutionTimelineSection({
                     onToggle={() => onToggleRun(run.id)}
                   />
                 ))}
-                {intent.runs.length === 0 && (
+                {(intent.runs ?? []).length === 0 && (
                   <div className="text-[11px] text-muted-foreground">No runs for this intent</div>
                 )}
               </div>

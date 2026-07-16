@@ -6,6 +6,7 @@ members = [
     "crates/cocli-pidfile",
     "crates/cocli-reaper",
     "crates/cocli-driver",
+    "crates/cocli-driver-core",
     "crates/cocli-runtime-pool",
     "crates/cocli-driver-claude",
     "crates/cocli-bridge-config",

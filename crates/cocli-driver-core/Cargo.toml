@@ -1,0 +1,19 @@
+[package]
+name              = "cocli-driver-core"
+version           = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description       = "Runtime-neutral driver contract shared by cocli runtime adapters"
+documentation     = "https://docs.rs/cocli-driver-core"
+readme            = "README.md"
+keywords          = ["agents", "cli", "runtime", "driver"]
+categories        = ["asynchronous", "development-tools"]
+
+[dependencies]
+tokio       = { workspace = true }
+thiserror   = { workspace = true }
+async-trait = { workspace = true }
+serde_json  = { workspace = true }

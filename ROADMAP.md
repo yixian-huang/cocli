@@ -16,12 +16,12 @@ bootstrap  channels  first    tasks +    polish +    plugin     brew +    stable
 |-----------|----------|--------|
 | M0        | repo bootstrap, workspace skeleton | **in progress** (2026-05) |
 | M0.0.1    | channels + messages (no agent) | planned |
-| M0.0.2    | first agent reply (claude only) | planned |
+| M0.0.2    | first local runtime replies (Claude, Cursor, Codex, Gemini) | planned |
 | M0.0.3    | tasks + sessions + workspace UI | planned |
 | M0.0.4    | polish + soft launch | planned |
 | M0.1.0    | plugin protocol + Rust/TS SDK | planned |
 | M0.2.0    | Telegram reference adapter + brew + Docker | planned |
-| M1.0.0    | stable + multi-runtime + HN launch | planned |
+| M1.0.0    | stable runtime API + HN launch | planned |
 
 ## Stability
 

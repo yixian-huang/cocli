@@ -50,16 +50,14 @@ A GitHub Action checks that every commit in a PR carries the
 
 ## Daemon / driver layer scope
 
-`crates/cocli-driver` (the runtime trait) and `crates/cocli-driver-claude`
-are the canonical driver-layer crates for cocli local. The closed-source
-cocli cloud daemon uses a different internal trait shape (different crate
-names, additional drivers). The two codebases share Phase 0 heritage but
-**there is no sync mechanism** — patches to this repo are evaluated on
-their merits here, not cherry-picked from cloud.
+The canonical shared driver layer lives in this repository. M0 targets four
+first-party runtime adapters: Claude, Cursor, Codex, and Gemini. Shared
+runtime fixes should land here first with contract fixtures; cloud consumes
+an explicit OSS revision or release and keeps SaaS-only adapters private.
 
-If you're considering a PR that adds a non-claude runtime driver (codex /
-gemini / kimi / etc.), please open an `rfc:proposed` issue first — that's
-out of M0 scope (claude-only) and needs scoping before code lands.
+New runtime families beyond the initial four require an `rfc:proposed`
+issue. Changes to an existing adapter do not require an RFC when they preserve
+the shared driver contract and include parser/spawn regression tests.
 
 ## Plugin authors
 

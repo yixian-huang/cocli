@@ -355,6 +355,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cocli-driver-core"
+version = "0.0.1"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "cocli-health"
 version = "0.0.0"
 dependencies = [

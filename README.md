@@ -1,8 +1,8 @@
 # cocli local
 
-> Open-source, local-first multi-agent platform. Run Claude agents in a
-> Slack-like workspace on your own machine. No cloud, no signup, no data
-> leaves your laptop.
+> Open-source, local-first multi-agent platform. Run Claude, Cursor, Codex,
+> and Gemini agents in a Slack-like workspace on your own machine. No cloud,
+> no signup, no data leaves your laptop.
 
 **Status:** pre-alpha — not yet runnable. This repo is being bootstrapped.
 See [ROADMAP.md](ROADMAP.md) for what's coming.
@@ -23,13 +23,14 @@ This repo is cocli local — the open-source, local-first version. Same
 agent runtime, same UX core, different deployment model. Cloud is closed-source
 and commercial; local is open-source and yours forever.
 
-**Code-sharing scope:** cocli local and cocli cloud share a Phase 0
-heritage (protocol types, pidfile/reaper, the claude driver) but their
-daemon layers have diverged. cocli local's driver layer
-(`crates/cocli-driver*`) is independently maintained here and scoped to
-the local product (claude-only through M0); cloud's daemon uses a
-different internal trait shape. **No upstream sync exists in either
-direction** — PRs to this repo stay in this repo.
+**Code-sharing scope:** `cocli` is the intended upstream for the reusable
+runtime/driver layer. The first supported runtime set is Claude, Cursor,
+Codex, and Gemini. `cocli-cloud/daemon-rs` remains the production reference
+during extraction and will consume versioned OSS crates once the shared
+contract is stable. Cloud-only remote connection, tenant authentication,
+Postgres, quota, billing, and operations code stay outside this repository.
+The repositories do not auto-merge: shared fixes land upstream here and
+cloud upgrades an explicit revision or release.
 
 ## License
 
