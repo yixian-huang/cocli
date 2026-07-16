@@ -17,6 +17,10 @@ pub use memory::{
     MemoryDocument, MemoryDocumentEntry, MemoryMoveResult, MemoryNamespace, MemoryScope,
     MemoryTopic,
 };
+mod skills;
+pub use skills::{
+    AgentSkillInstall, NewSkillLibrary, SkillLibraryEntry, SkillLibraryFile, SkillLibraryFileMeta,
+};
 
 /// Errors returned by the local SQLite store.
 #[derive(Debug, thiserror::Error)]
@@ -129,6 +133,34 @@ pub enum StoreError {
     /// A memory move cannot target the same namespace.
     #[error("source and destination memory namespaces are identical")]
     MemoryMoveSameNamespace,
+    /// A skill name is not a safe local slug.
+    #[error("invalid skill name: {0}")]
+    InvalidSkillName(String),
+    /// A skill file or install path is unsafe.
+    #[error("invalid skill file path: {0}")]
+    InvalidSkillFilePath(String),
+    /// A skill file's declared size does not match its body.
+    #[error("invalid skill file size for {path}: declared={declared}, actual={actual}")]
+    InvalidSkillFileSize {
+        path: String,
+        declared: i64,
+        actual: usize,
+    },
+    /// A skill library entry exceeds the local aggregate size cap.
+    #[error("skill library is too large: {bytes} bytes exceeds {limit} bytes")]
+    SkillLibraryTooLarge { bytes: usize, limit: usize },
+    /// A skill name is already present in the local catalog.
+    #[error("skill name already exists: {0}")]
+    SkillNameConflict(String),
+    /// A requested skill library entry does not exist.
+    #[error("skill library entry not found: {0}")]
+    SkillLibraryNotFound(Uuid),
+    /// A requested managed install does not exist.
+    #[error("agent skill install not found: {0}")]
+    SkillInstallNotFound(Uuid),
+    /// The same library is already installed for an agent.
+    #[error("skill library {library_id} is already installed for agent {agent_id}")]
+    SkillAlreadyInstalled { agent_id: Uuid, library_id: Uuid },
 }
 
 /// A local conversation channel.
@@ -2192,6 +2224,7 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
         include_str!("../migrations/0004_tasks.sql"),
         include_str!("../migrations/0005_runtime_history.sql"),
         include_str!("../migrations/0006_wiki.sql"),
+        include_str!("../migrations/0007_skills.sql"),
     ] {
         for statement in migration.split(';') {
             let statement = statement.trim();
