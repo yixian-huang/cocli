@@ -53,6 +53,13 @@ pub struct DueProbe {
     pub attempt_count: u32,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryStatus {
+    pub provider: String,
+    pub stop_reason: String,
+    pub attempt_count: u32,
+}
+
 #[derive(Debug, Default)]
 pub struct RecoveryStore {
     entries: HashMap<String, RecoveryEntry>,
@@ -140,6 +147,14 @@ impl RecoveryStore {
         self.entries.is_empty()
     }
 
+    pub fn status(&self, agent_id: &str) -> Option<RecoveryStatus> {
+        self.entries.get(agent_id).map(|entry| RecoveryStatus {
+            provider: entry.provider.clone(),
+            stop_reason: entry.stop_reason.clone(),
+            attempt_count: entry.attempt_count,
+        })
+    }
+
     pub fn due_probes(&mut self, now: Instant) -> Vec<DueProbe> {
         let mut out = Vec::new();
         for (agent_id, entry) in self.entries.iter_mut() {
@@ -179,6 +194,7 @@ impl RecoveryStore {
         entry.probe_in_flight = false;
         if result != ProbeResult::NoState {
             entry.attempt_count = entry.attempt_count.saturating_add(1);
+            entry.expected_recovery_at = None;
             entry.last_probe_at = Some(now);
         }
     }
@@ -232,6 +248,19 @@ mod tests {
         let (result, detail) = store.probe_now("agent-1");
         assert_eq!(result, ProbeResult::NoState);
         assert!(detail.is_empty());
+    }
+
+    #[test]
+    fn status_returns_provider_reason_and_attempt_count() {
+        let mut store = RecoveryStore::new();
+        store.register("agent-1", "gemini", "stopped_by_quota");
+        let _ = store.probe_now("agent-1");
+
+        let status = store.status("agent-1").expect("recovery status");
+
+        assert_eq!(status.provider, "gemini");
+        assert_eq!(status.stop_reason, "stopped_by_quota");
+        assert_eq!(status.attempt_count, 1);
     }
 
     #[test]
@@ -302,5 +331,28 @@ mod tests {
         let (result, detail) = store.probe_now("agent-1");
         assert_eq!(result, ProbeResult::NoState);
         assert!(detail.is_empty());
+    }
+
+    #[test]
+    fn failed_expected_time_probe_switches_to_backoff_schedule() {
+        let mut store = RecoveryStore::new();
+        let now = Instant::now();
+        store.register_with_expected_recovery_at(
+            "agent-1",
+            "gemini",
+            "stopped_by_quota",
+            Some(now),
+        );
+        assert_eq!(store.due_probes(now).len(), 1);
+
+        store.complete_probe("agent-1", now, ProbeResult::Error);
+
+        assert!(store
+            .due_probes(now + Duration::from_secs(9 * 60))
+            .is_empty());
+        assert_eq!(
+            store.due_probes(now + Duration::from_secs(10 * 60)).len(),
+            1
+        );
     }
 }

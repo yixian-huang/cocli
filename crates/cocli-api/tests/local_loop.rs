@@ -171,7 +171,7 @@ async fn runtime_control_routes_expose_status_and_typed_unsupported_errors() {
         .contains("not supported"));
 
     let (fork_status, fork_error) = json_request(
-        app,
+        app.clone(),
         "POST",
         &format!("/api/agents/{agent_id}/thread/fork"),
         json!({}),
@@ -181,5 +181,18 @@ async fn runtime_control_routes_expose_status_and_typed_unsupported_errors() {
     assert!(fork_error["error"]
         .as_str()
         .expect("fork error")
+        .contains("not supported"));
+
+    let (probe_status, probe_error) = json_request(
+        app,
+        "POST",
+        &format!("/api/agents/{agent_id}/recovery/probe"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(probe_status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(probe_error["error"]
+        .as_str()
+        .expect("probe error")
         .contains("not supported"));
 }

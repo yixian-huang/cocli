@@ -51,6 +51,7 @@ pub struct RuntimeSessionStatus {
     pub tier: String,
     pub fork_suggested: bool,
     pub session_age_seconds: u64,
+    pub recovery: Option<RuntimeRecoveryStatus>,
 }
 
 impl RuntimeSessionStatus {
@@ -72,8 +73,24 @@ impl RuntimeSessionStatus {
             tier: "healthy".to_owned(),
             fork_suggested: false,
             session_age_seconds: 0,
+            recovery: None,
         }
     }
+}
+
+/// Quota/rate-limit recovery state for one local runtime session.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RuntimeRecoveryStatus {
+    pub provider: String,
+    pub reason: String,
+    pub expected_recovery_at_ms: i64,
+}
+
+/// Result returned by an explicit local recovery probe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RuntimeRecoveryProbeResult {
+    pub result: String,
+    pub detail: String,
 }
 
 /// Result of a native or restart-backed local thread fork.
@@ -160,6 +177,16 @@ pub trait RuntimeService: Send + Sync {
     async fn metrics(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot::default()
     }
+
+    /// Returns or advances quota-recovery state for one agent.
+    async fn probe_recovery(
+        &self,
+        _agent: &Agent,
+    ) -> Result<RuntimeRecoveryProbeResult, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime recovery probes are not supported".to_owned(),
+        ))
+    }
 }
 
 /// Runtime service used when no local runtime registry is available.
@@ -226,6 +253,7 @@ pub fn router(store: Store, runtime: Arc<dyn RuntimeService>) -> Router {
         .route("/api/agents/:agent_id/turn/cancel", post(cancel_turn))
         .route("/api/agents/:agent_id/turn/steer", post(steer_turn))
         .route("/api/agents/:agent_id/thread/fork", post(fork_thread))
+        .route("/api/agents/:agent_id/recovery/probe", post(probe_recovery))
         .with_state(AppState { store, runtime })
 }
 
@@ -380,6 +408,14 @@ async fn fork_thread(
         .map(|Json(request)| request.reason.trim())
         .unwrap_or_default();
     Ok(Json(state.runtime.fork(&agent, reason).await?))
+}
+
+async fn probe_recovery(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<RuntimeRecoveryProbeResult>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    Ok(Json(state.runtime.probe_recovery(&agent).await?))
 }
 
 async fn require_agent(store: &Store, agent_id: Uuid) -> Result<Agent, ApiError> {

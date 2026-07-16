@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant as StdInstant};
 
 use async_trait::async_trait;
 use cocli_agent::context::{classify_context_pressure, default_backstop_pct, ContextPressureTier};
 use cocli_agent::fork_reason::classify_fork_reason;
+use cocli_agent::recovery::{ProbeResult, RecoveryStore};
 use cocli_agent::state::Idle;
 use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
-    RuntimeError, RuntimeForkResult, RuntimeInfo, RuntimeMetricsSnapshot, RuntimeService,
-    RuntimeSessionStatus,
+    RuntimeError, RuntimeForkResult, RuntimeInfo, RuntimeMetricsSnapshot,
+    RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -52,6 +53,8 @@ pub struct LocalRuntimeConfig {
     pub turn_timeout: Duration,
     /// Retry delays for the five watchdog restart attempts.
     pub watchdog_backoff: [Duration; 5],
+    /// Retry delays for quota/rate-limit recovery probes.
+    pub recovery_backoff: [Duration; 5],
 }
 
 impl LocalRuntimeConfig {
@@ -69,6 +72,13 @@ impl LocalRuntimeConfig {
                 Duration::from_secs(10),
                 Duration::from_secs(30),
             ],
+            recovery_backoff: [
+                Duration::from_secs(5 * 60),
+                Duration::from_secs(10 * 60),
+                Duration::from_secs(30 * 60),
+                Duration::from_secs(60 * 60),
+                Duration::from_secs(120 * 60),
+            ],
         }
     }
 }
@@ -81,6 +91,7 @@ pub struct LocalRuntimeService {
     sessions: Mutex<HashMap<Uuid, LocalSessionHandle>>,
     session_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
     metrics: Arc<AgentMetrics>,
+    recovery: Arc<Mutex<RecoveryStore>>,
 }
 
 #[derive(Clone)]
@@ -124,6 +135,11 @@ struct LocalSessionContext {
     config: LocalRuntimeConfig,
     agent: Agent,
     metrics: Arc<AgentMetrics>,
+    recovery: Arc<Mutex<RecoveryStore>>,
+}
+
+struct QuotaRecovery {
+    expected_at: Option<StdInstant>,
 }
 
 impl LocalRuntimeService {
@@ -164,6 +180,7 @@ impl LocalRuntimeService {
             sessions: Mutex::new(HashMap::new()),
             session_locks: Mutex::new(HashMap::new()),
             metrics: Arc::new(AgentMetrics::default()),
+            recovery: Arc::new(Mutex::new(RecoveryStore::new())),
         }
     }
 
@@ -178,6 +195,7 @@ impl LocalRuntimeService {
         let registry = Arc::clone(&self.registry);
         let agent = agent.clone();
         let metrics = Arc::clone(&self.metrics);
+        let recovery = Arc::clone(&self.recovery);
         metrics.inc_local_session_started();
         metrics.inc_local_active_sessions();
         tokio::spawn(async move {
@@ -191,6 +209,7 @@ impl LocalRuntimeService {
                     config,
                     agent,
                     metrics,
+                    recovery,
                 },
             )
             .await;
@@ -386,7 +405,15 @@ impl RuntimeService for LocalRuntimeService {
 
     async fn status(&self, agent: &Agent) -> Result<RuntimeSessionStatus, RuntimeError> {
         let Some(handle) = self.live_session(agent.id).await else {
-            return Ok(inactive_session_status(agent));
+            let mut status = inactive_session_status(agent);
+            if let Some(recovery) = self.recovery.lock().await.status(&agent.id.to_string()) {
+                status.recovery = Some(RuntimeRecoveryStatus {
+                    provider: recovery.provider,
+                    reason: recovery.stop_reason,
+                    expected_recovery_at_ms: 0,
+                });
+            }
+            return Ok(status);
         };
         Ok(Self::snapshot(&handle).await)
     }
@@ -396,6 +423,44 @@ impl RuntimeService for LocalRuntimeService {
         RuntimeMetricsSnapshot {
             counters: snapshot.counters,
             gauges: snapshot.gauges,
+        }
+    }
+
+    async fn probe_recovery(
+        &self,
+        agent: &Agent,
+    ) -> Result<RuntimeRecoveryProbeResult, RuntimeError> {
+        let agent_id = agent.id.to_string();
+        if !self.recovery.lock().await.contains(&agent_id) {
+            return Ok(RuntimeRecoveryProbeResult {
+                result: ProbeResult::NoState.as_wire().to_owned(),
+                detail: String::new(),
+            });
+        }
+
+        self.metrics.inc_recovery_probe_scheduled();
+        self.stop(agent.id).await?;
+        match self.session_handle(agent).await {
+            Ok(_) => {
+                let mut recovery = self.recovery.lock().await;
+                recovery.clear(&agent_id);
+                self.metrics.inc_recovery_probe_recovered();
+                self.metrics.set_recovery_tracked_agents(recovery.len());
+                Ok(RuntimeRecoveryProbeResult {
+                    result: ProbeResult::Recovered.as_wire().to_owned(),
+                    detail: "local runtime restarted successfully".to_owned(),
+                })
+            }
+            Err(error) => {
+                let mut recovery = self.recovery.lock().await;
+                recovery.complete_probe(&agent_id, StdInstant::now(), ProbeResult::Error);
+                self.metrics.inc_recovery_probe_error();
+                self.metrics.set_recovery_tracked_agents(recovery.len());
+                Ok(RuntimeRecoveryProbeResult {
+                    result: ProbeResult::Error.as_wire().to_owned(),
+                    detail: error.to_string(),
+                })
+            }
         }
     }
 }
@@ -465,6 +530,7 @@ fn runtime_status_for_running(
         tier: ContextPressureTier::Healthy.as_str().to_owned(),
         fork_suggested: false,
         session_age_seconds: 0,
+        recovery: None,
     }
 }
 
@@ -539,6 +605,77 @@ async fn restart_with_watchdog(
     }
 }
 
+async fn recover_from_quota(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+    commands: &mut mpsc::Receiver<LocalSessionCommand>,
+    metrics: &AgentMetrics,
+    recovery: &Mutex<RecoveryStore>,
+    expected_at: Option<StdInstant>,
+) -> Option<AgentActor<cocli_agent::state::Running>> {
+    let agent_id = agent.id.to_string();
+    let mut delay = expected_at
+        .map(|expected| expected.saturating_duration_since(StdInstant::now()))
+        .unwrap_or(config.recovery_backoff[0]);
+
+    for attempt in 0..config.recovery_backoff.len() {
+        tracing::warn!(
+            agent_id = %agent.id,
+            attempt = attempt + 1,
+            delay_ms = delay.as_millis(),
+            "quota recovery probe scheduled"
+        );
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => {}
+            command = commands.recv() => {
+                if reject_command_during_recovery(command) {
+                    return None;
+                }
+                continue;
+            }
+        }
+
+        let due = recovery.lock().await.due_probes(StdInstant::now());
+        if !due.iter().any(|probe| probe.agent_id == agent_id) {
+            delay = config.recovery_backoff[(attempt + 1).min(config.recovery_backoff.len() - 1)];
+            continue;
+        }
+
+        metrics.inc_recovery_probe_scheduled();
+        match start_running_actor(registry, config, agent).await {
+            Ok(running) => {
+                let mut recovery = recovery.lock().await;
+                recovery.complete_probe(&agent_id, StdInstant::now(), ProbeResult::Recovered);
+                metrics.inc_recovery_probe_recovered();
+                metrics.set_recovery_tracked_agents(recovery.len());
+                metrics.inc_local_session_started();
+                tracing::info!(
+                    agent_id = %agent.id,
+                    attempt = attempt + 1,
+                    "quota recovery probe succeeded"
+                );
+                return Some(running);
+            }
+            Err(error) => {
+                let mut recovery = recovery.lock().await;
+                recovery.complete_probe(&agent_id, StdInstant::now(), ProbeResult::Error);
+                metrics.inc_recovery_probe_error();
+                metrics.set_recovery_tracked_agents(recovery.len());
+                tracing::warn!(
+                    agent_id = %agent.id,
+                    attempt = attempt + 1,
+                    %error,
+                    "quota recovery probe failed"
+                );
+                delay =
+                    config.recovery_backoff[(attempt + 1).min(config.recovery_backoff.len() - 1)];
+            }
+        }
+    }
+    None
+}
+
 fn reject_command_during_recovery(command: Option<LocalSessionCommand>) -> bool {
     match command {
         Some(LocalSessionCommand::Reply { reply, .. }) => {
@@ -568,6 +705,36 @@ fn reject_command_during_recovery(command: Option<LocalSessionCommand>) -> bool 
     }
 }
 
+fn rate_limit_is_limited(status: &str, overage_status: Option<&str>) -> bool {
+    status.trim().eq_ignore_ascii_case("limited")
+        || status.trim().eq_ignore_ascii_case("rejected")
+        || overage_status.is_some_and(|value| value.trim().eq_ignore_ascii_case("limited"))
+}
+
+fn terminal_stop_reason(provider: &str) -> String {
+    match provider.trim().to_lowercase().as_str() {
+        "gemini" => "gemini_quota_terminal".to_owned(),
+        "claude" => "claude_quota_terminal".to_owned(),
+        "codex" => "codex_quota_terminal".to_owned(),
+        other if !other.is_empty() => format!("terminal_driver_error:{other}"),
+        _ => "terminal_driver_error".to_owned(),
+    }
+}
+
+fn expected_recovery_time(resets_at: i64) -> (i64, Option<StdInstant>) {
+    if resets_at <= 0 {
+        return (0, None);
+    }
+    let expected_ms = resets_at.saturating_mul(1_000);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let expected_at = if expected_ms <= now_ms {
+        StdInstant::now()
+    } else {
+        StdInstant::now() + Duration::from_millis((expected_ms - now_ms) as u64)
+    };
+    (expected_ms, Some(expected_at))
+}
+
 async fn run_local_session(
     mut running: AgentActor<cocli_agent::state::Running>,
     mut commands: mpsc::Receiver<LocalSessionCommand>,
@@ -580,10 +747,12 @@ async fn run_local_session(
         config,
         agent,
         metrics,
+        recovery,
     } = context;
     let turn_timeout = config.turn_timeout;
     let mut active: Option<ActiveReply> = None;
     let mut event_rx_live = true;
+    let mut quota_recovery: Option<QuotaRecovery> = None;
     loop {
         let deadline = active
             .as_ref()
@@ -700,6 +869,41 @@ async fn run_local_session(
                         turn.last_error = Some(message);
                     }
                 }
+                Some(DriverEvent::RateLimit {
+                    limit_type,
+                    status: limit_status,
+                    resets_at,
+                    overage_status,
+                    ..
+                }) => {
+                    if rate_limit_is_limited(&limit_status, overage_status.as_deref()) {
+                        let provider = running.state.driver.name().trim().to_owned();
+                        let reason = terminal_stop_reason(&provider);
+                        let (expected_recovery_at_ms, expected_at) =
+                            expected_recovery_time(resets_at);
+                        {
+                            let mut recovery = recovery.lock().await;
+                            recovery.register_with_expected_recovery_at(
+                                agent.id.to_string(),
+                                &provider,
+                                &reason,
+                                expected_at,
+                            );
+                            metrics.set_recovery_tracked_agents(recovery.len());
+                        }
+                        status.write().await.recovery = Some(RuntimeRecoveryStatus {
+                            provider,
+                            reason,
+                            expected_recovery_at_ms,
+                        });
+                        quota_recovery = Some(QuotaRecovery { expected_at });
+                        if let Some(turn) = active.as_mut() {
+                            turn.last_error = Some(format!(
+                                "rate limited: type={limit_type} status={limit_status}"
+                            ));
+                        }
+                    }
+                }
                 Some(DriverEvent::TurnEnd {
                     status: turn_status,
                     input_tokens,
@@ -731,6 +935,33 @@ async fn run_local_session(
                     }
                     metrics.dec_local_active_turns();
                     status.write().await.active_turn = false;
+                    if let Some(quota) = quota_recovery.take() {
+                        let _stopping = running.stop(true);
+                        {
+                            let mut state = status.write().await;
+                            state.running = false;
+                            state.recovering = true;
+                        }
+                        match recover_from_quota(
+                            &registry,
+                            &config,
+                            &agent,
+                            &mut commands,
+                            &metrics,
+                            &recovery,
+                            quota.expected_at,
+                        ).await {
+                            Some(restarted) => {
+                                running = restarted;
+                                *status.write().await =
+                                    runtime_status_for_running(&agent, &running);
+                                *started_at.write().await = Instant::now();
+                                event_rx_live = true;
+                                continue;
+                            }
+                            None => break,
+                        }
+                    }
                 }
                 Some(DriverEvent::Write { data }) => {
                     if let Err(error) = running.write_driver_request(&data).await {
@@ -741,6 +972,44 @@ async fn run_local_session(
                 }
                 Some(_) => {}
                 None => {
+                    if let Some(quota) = quota_recovery.take() {
+                        if let Some(mut turn) = active.take() {
+                            metrics.inc_local_turn_failed();
+                            metrics.dec_local_active_turns();
+                            if let Some(reply) = turn.reply.take() {
+                                let _ = reply.send(Err(RuntimeError::Delivery(
+                                    turn.last_error.unwrap_or_else(|| {
+                                        "runtime exited while rate limited".to_owned()
+                                    }),
+                                )));
+                            }
+                        }
+                        {
+                            let mut state = status.write().await;
+                            state.running = false;
+                            state.recovering = true;
+                            state.active_turn = false;
+                        }
+                        match recover_from_quota(
+                            &registry,
+                            &config,
+                            &agent,
+                            &mut commands,
+                            &metrics,
+                            &recovery,
+                            quota.expected_at,
+                        ).await {
+                            Some(restarted) => {
+                                running = restarted;
+                                *status.write().await =
+                                    runtime_status_for_running(&agent, &running);
+                                *started_at.write().await = Instant::now();
+                                event_rx_live = true;
+                                continue;
+                            }
+                            None => break,
+                        }
+                    }
                     if running.state.respawn_ctx.is_some() {
                         event_rx_live = false;
                         continue;
@@ -883,6 +1152,7 @@ fn inactive_session_status(agent: &Agent) -> RuntimeSessionStatus {
         tier: ContextPressureTier::Healthy.as_str().to_owned(),
         fork_suggested: false,
         session_age_seconds: 0,
+        recovery: None,
     }
 }
 
@@ -1518,6 +1788,125 @@ mod tests {
         }
     }
 
+    struct QuotaOnceDriver {
+        spawn_count: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Driver for QuotaOnceDriver {
+        fn name(&self) -> &str {
+            "quota-once"
+        }
+
+        fn mcp_tool_prefix(&self) -> &str {
+            ""
+        }
+
+        fn busy_delivery_mode(&self) -> BusyDeliveryMode {
+            BusyDeliveryMode::Direct
+        }
+
+        fn requires_initial_prompt(&self) -> bool {
+            true
+        }
+
+        fn env_propagation(&self) -> EnvPropagation {
+            EnvPropagation::Inherit
+        }
+
+        fn skill_compatibility(&self) -> SkillCompatibility {
+            SkillCompatibility::Supported
+        }
+
+        fn prepare_workspace(
+            &self,
+            _work_dir: &Path,
+            _config: &DriverAgentConfig,
+            _agent_id: &str,
+            _system_prompt: &str,
+        ) -> Result<(), DriverError> {
+            Ok(())
+        }
+
+        fn spawn(&self, _cfg: &SpawnConfig) -> Result<tokio::process::Child, DriverError> {
+            let spawn = self.spawn_count.fetch_add(1, Ordering::Relaxed) + 1;
+            let script = if spawn == 1 {
+                "printf 'session\\n'; n=0; while IFS= read -r line; do n=$((n+1)); if [ \"$n\" -eq 1 ]; then printf 'text:%s\\nturn\\n' \"$line\"; else printf 'rate\\nturn-failed\\n'; while IFS= read -r _; do :; done; fi; done"
+            } else {
+                "printf 'session\\n'; while IFS= read -r line; do printf 'text:%s\\nturn\\n' \"$line\"; done"
+            };
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(script)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(DriverError::Io)
+        }
+
+        fn parse_event(&self, line: &str) -> Vec<DriverEvent> {
+            if line == "session" {
+                vec![DriverEvent::SessionStarted {
+                    session_id: "session-quota-once".to_owned(),
+                }]
+            } else if let Some(text) = line.strip_prefix("text:") {
+                vec![DriverEvent::TextDelta {
+                    text: text.to_owned(),
+                }]
+            } else if line == "rate" {
+                vec![DriverEvent::RateLimit {
+                    limit_type: "requests".to_owned(),
+                    status: "limited".to_owned(),
+                    resets_at: chrono::Utc::now().timestamp(),
+                    overage_status: None,
+                    overage_resets: None,
+                    is_using_overage: false,
+                }]
+            } else if line == "turn-failed" {
+                vec![DriverEvent::TurnEnd {
+                    status: TurnStatus::Failed,
+                    input_tokens: 10,
+                    output_tokens: 0,
+                    cost_usd: 0.0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                    context_window_tokens: 1_000,
+                }]
+            } else if line == "turn" {
+                vec![DriverEvent::TurnEnd {
+                    status: TurnStatus::Completed,
+                    input_tokens: 10,
+                    output_tokens: 2,
+                    cost_usd: 0.0,
+                    cache_creation_tokens: 0,
+                    cache_read_tokens: 0,
+                    context_window_tokens: 1_000,
+                }]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn encode_stdin_message(
+            &self,
+            text: &str,
+            _session_id: Option<&str>,
+            _mode: MessageMode,
+        ) -> Option<String> {
+            Some(text.to_owned())
+        }
+
+        fn supports_turn_cancel(&self) -> bool {
+            true
+        }
+
+        fn skill_search_paths(&self, _workspace: &Path) -> Vec<PathBuf> {
+            Vec::new()
+        }
+    }
+
     fn test_agent(runtime: &str) -> Agent {
         Agent {
             id: Uuid::new_v4(),
@@ -1562,6 +1951,7 @@ mod tests {
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
                 watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = Agent {
@@ -1619,6 +2009,7 @@ mod tests {
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
                 watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = Agent {
@@ -1669,6 +2060,7 @@ mod tests {
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
                 watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = test_agent("controllable");
@@ -1725,6 +2117,7 @@ mod tests {
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
                 watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
             },
         ));
         let agent = test_agent("controllable");
@@ -1811,6 +2204,7 @@ mod tests {
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
                 watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = test_agent("controllable");
@@ -1851,6 +2245,7 @@ mod tests {
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
                 watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = test_agent("turn-exit");
@@ -1893,6 +2288,7 @@ mod tests {
                 auth_token: String::new(),
                 turn_timeout: Duration::from_secs(2),
                 watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
             },
         );
         let agent = test_agent("crash-once");
@@ -1924,5 +2320,67 @@ mod tests {
         assert_eq!(metrics.counters["local_agent_watchdog_restart_total"], 1);
         assert_eq!(metrics.counters["local_agent_watchdog_failure_total"], 0);
         assert_eq!(metrics.counters["local_agent_session_started_total"], 2);
+    }
+
+    #[tokio::test]
+    async fn quota_limit_enters_recovery_and_restarts_after_expected_time() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(QuotaOnceDriver {
+            spawn_count: Arc::clone(&spawn_count),
+        }));
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            RuntimeCatalog::default(),
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        let agent = test_agent("quota-once");
+        service.start(&agent).await.expect("session starts");
+
+        let limited = service
+            .reply(&agent, &test_message(&agent, 1, "hit quota"))
+            .await;
+        assert!(matches!(limited, Err(RuntimeError::Delivery(_))));
+
+        for _ in 0..100 {
+            let status = service.status(&agent).await.expect("runtime status");
+            if status.running && !status.recovering && spawn_count.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let status = service.status(&agent).await.expect("runtime status");
+        assert!(status.running);
+        assert!(!status.recovering);
+        assert!(status.recovery.is_none());
+        assert_eq!(spawn_count.load(Ordering::Relaxed), 2);
+
+        let reply = service
+            .reply(&agent, &test_message(&agent, 2, "after quota"))
+            .await
+            .expect("reply after quota recovery");
+        assert!(reply.contains("after quota"));
+
+        let metrics = service.metrics().await;
+        assert_eq!(metrics.counters["agent_recovery_probe_scheduled_total"], 1);
+        assert_eq!(metrics.counters["agent_recovery_probe_recovered_total"], 1);
+        assert_eq!(metrics.counters["agent_recovery_probe_error_total"], 0);
+        assert_eq!(metrics.gauges["agent_recovery_tracked_agents"], 0.0);
+        assert_eq!(metrics.counters["local_agent_session_started_total"], 2);
+
+        let probe = service
+            .probe_recovery(&agent)
+            .await
+            .expect("recovery probe");
+        assert_eq!(probe.result, "no_state");
     }
 }
