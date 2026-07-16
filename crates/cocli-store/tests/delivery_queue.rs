@@ -172,3 +172,40 @@ async fn reopening_releases_in_flight_deliveries_for_retry() {
     drop(reopened);
     std::fs::remove_file(database_path).expect("remove temporary database");
 }
+
+#[tokio::test]
+async fn stopped_agents_keep_pending_deliveries_without_spending_retry_budget() {
+    let (store, _channel, agent, message) = fixture().await;
+    store
+        .enqueue_deliveries(&message, &[agent.id])
+        .await
+        .expect("enqueue");
+    store
+        .set_agent_status(agent.id, AgentStatus::Stopped)
+        .await
+        .expect("stop agent");
+
+    assert!(store
+        .reserve_due_deliveries(1, 3, Utc::now())
+        .await
+        .expect("reserve while stopped")
+        .is_empty());
+    let pending = store
+        .list_message_deliveries(message.id)
+        .await
+        .expect("pending delivery");
+    assert_eq!(pending[0].attempts, 0);
+    assert_eq!(pending[0].state, DeliveryState::Pending);
+
+    store
+        .set_agent_status(agent.id, AgentStatus::Running)
+        .await
+        .expect("start agent");
+    store.nudge_agent_deliveries(agent.id).await.expect("nudge");
+    let reserved = store
+        .reserve_due_deliveries(1, 3, Utc::now())
+        .await
+        .expect("reserve after start");
+    assert_eq!(reserved.len(), 1);
+    assert_eq!(reserved[0].attempts, 1);
+}

@@ -1,7 +1,9 @@
 //! Local HTTP API and runtime-neutral application service.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::extract::{Path, State};
@@ -9,8 +11,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cocli_store::{Agent, AgentStatus, Channel, Message, MessageRole, Store, StoreError};
+use chrono::Utc;
+use cocli_store::{
+    Agent, AgentStatus, Channel, Delivery, DeliveryStats, Message, MessageRole, Store, StoreError,
+};
 use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 /// Runtime discovery information consumed by the local product surface.
@@ -233,13 +239,227 @@ impl RuntimeService for EchoRuntimeService {
 struct AppState {
     store: Store,
     runtime: Arc<dyn RuntimeService>,
+    deliveries: Arc<DeliveryCoordinator>,
+}
+
+/// Tuning for the local SQLite-backed delivery worker.
+#[derive(Clone, Copy, Debug)]
+pub struct DeliveryConfig {
+    pub batch_size: i64,
+    pub max_attempts: i64,
+    pub poll_interval: Duration,
+    pub attempt_timeout: Duration,
+    pub base_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 32,
+            max_attempts: 10,
+            poll_interval: Duration::from_secs(3),
+            attempt_timeout: Duration::from_secs(3 * 60),
+            base_backoff: Duration::from_secs(2),
+            max_backoff: Duration::from_secs(5 * 60),
+        }
+    }
+}
+
+/// Coordinates durable SQLite deliveries with the runtime service.
+pub struct DeliveryCoordinator {
+    store: Store,
+    runtime: Arc<dyn RuntimeService>,
+    config: DeliveryConfig,
+    wake: Notify,
+    ready: AtomicBool,
+    ready_notify: Notify,
+}
+
+#[derive(Default)]
+struct DeliveryBatchResult {
+    replies: Vec<Message>,
+}
+
+impl DeliveryCoordinator {
+    fn new(store: Store, runtime: Arc<dyn RuntimeService>, config: DeliveryConfig) -> Arc<Self> {
+        Arc::new(Self {
+            store,
+            runtime,
+            config,
+            wake: Notify::new(),
+            ready: AtomicBool::new(false),
+            ready_notify: Notify::new(),
+        })
+    }
+
+    fn spawn(self: &Arc<Self>) {
+        let coordinator = Arc::clone(self);
+        tokio::spawn(async move {
+            if let Err(error) = coordinator.store.release_in_flight_deliveries().await {
+                tracing::error!(%error, "failed to release in-flight deliveries at startup");
+            }
+            coordinator.ready.store(true, Ordering::Release);
+            coordinator.ready_notify.notify_waiters();
+            coordinator.run().await;
+        });
+    }
+
+    async fn wait_until_ready(&self) {
+        while !self.ready.load(Ordering::Acquire) {
+            let notified = self.ready_notify.notified();
+            if self.ready.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    async fn run(self: Arc<Self>) {
+        let mut interval = tokio::time::interval(self.config.poll_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                _ = self.wake.notified() => {}
+            }
+            if let Err(error) = self.dispatch_due().await {
+                tracing::error!(%error, "durable delivery dispatch failed");
+            }
+        }
+    }
+
+    async fn dispatch_message(&self, message_id: Uuid) -> Result<DeliveryBatchResult, StoreError> {
+        self.wait_until_ready().await;
+        let queued = self.store.list_message_deliveries(message_id).await?;
+        let mut reserved = Vec::with_capacity(queued.len());
+        let now = Utc::now();
+        for delivery in queued {
+            if let Some(delivery) = self
+                .store
+                .reserve_delivery(delivery.id, self.config.max_attempts, now)
+                .await?
+            {
+                reserved.push(delivery);
+            }
+        }
+        let result = self.process(reserved).await?;
+        self.wake.notify_one();
+        Ok(result)
+    }
+
+    async fn dispatch_due(&self) -> Result<(), StoreError> {
+        let reserved = self
+            .store
+            .reserve_due_deliveries(self.config.batch_size, self.config.max_attempts, Utc::now())
+            .await?;
+        let _ = self.process(reserved).await?;
+        Ok(())
+    }
+
+    async fn process(&self, deliveries: Vec<Delivery>) -> Result<DeliveryBatchResult, StoreError> {
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut task_deliveries = HashMap::new();
+        for (index, delivery) in deliveries.into_iter().enumerate() {
+            let Some(agent) = self.store.get_agent(delivery.agent_id).await? else {
+                continue;
+            };
+            let Some(message) = self.store.get_message(delivery.message_id).await? else {
+                continue;
+            };
+            let runtime = Arc::clone(&self.runtime);
+            let attempt_timeout = self.config.attempt_timeout;
+            let task_delivery = delivery.clone();
+            let handle = tasks.spawn(async move {
+                tokio::time::timeout(attempt_timeout, runtime.reply(&agent, &message))
+                    .await
+                    .unwrap_or_else(|_| {
+                        Err(RuntimeError::Delivery(
+                            "durable delivery attempt timed out".to_owned(),
+                        ))
+                    })
+            });
+            task_deliveries.insert(handle.id(), (index, task_delivery));
+        }
+
+        let mut completed = Vec::new();
+        while let Some(result) = tasks.join_next_with_id().await {
+            match result {
+                Ok((task_id, result)) => {
+                    if let Some((index, delivery)) = task_deliveries.remove(&task_id) {
+                        completed.push((index, delivery, result));
+                    }
+                }
+                Err(error) => {
+                    if let Some((index, delivery)) = task_deliveries.remove(&error.id()) {
+                        completed.push((
+                            index,
+                            delivery,
+                            Err(RuntimeError::Delivery(format!(
+                                "durable delivery runtime task failed: {error}"
+                            ))),
+                        ));
+                    }
+                    tracing::error!(%error, "durable delivery runtime task failed");
+                }
+            }
+        }
+        completed.sort_by_key(|(index, _, _)| *index);
+
+        let mut batch = DeliveryBatchResult::default();
+        for (_, delivery, result) in completed {
+            match result {
+                Ok(content) => {
+                    batch
+                        .replies
+                        .push(self.store.complete_delivery(&delivery, &content).await?);
+                }
+                Err(error) => {
+                    let next_attempt_at = Utc::now()
+                        + chrono::Duration::from_std(self.backoff(delivery.attempts))
+                            .unwrap_or_else(|_| chrono::Duration::minutes(5));
+                    let _ = self
+                        .store
+                        .defer_delivery(
+                            delivery.id,
+                            &error.to_string(),
+                            next_attempt_at,
+                            self.config.max_attempts,
+                        )
+                        .await?;
+                }
+            }
+        }
+        Ok(batch)
+    }
+
+    fn backoff(&self, attempts: i64) -> Duration {
+        let exponent = attempts.saturating_sub(1).min(8) as u32;
+        self.config
+            .base_backoff
+            .saturating_mul(1_u32 << exponent)
+            .min(self.config.max_backoff)
+    }
 }
 
 /// Builds the local HTTP router.
 pub fn router(store: Store, runtime: Arc<dyn RuntimeService>) -> Router {
+    router_with_delivery_config(store, runtime, DeliveryConfig::default())
+}
+
+/// Builds the local HTTP router with explicit durable-delivery tuning.
+pub fn router_with_delivery_config(
+    store: Store,
+    runtime: Arc<dyn RuntimeService>,
+    delivery_config: DeliveryConfig,
+) -> Router {
+    let deliveries = DeliveryCoordinator::new(store.clone(), Arc::clone(&runtime), delivery_config);
+    deliveries.spawn();
     Router::new()
         .route("/healthz", get(health))
         .route("/api/metrics", get(runtime_metrics))
+        .route("/api/deliveries/stats", get(delivery_stats))
         .route("/api/runtimes", get(list_runtimes))
         .route("/api/channels", get(list_channels).post(create_channel))
         .route(
@@ -254,7 +474,11 @@ pub fn router(store: Store, runtime: Arc<dyn RuntimeService>) -> Router {
         .route("/api/agents/:agent_id/turn/steer", post(steer_turn))
         .route("/api/agents/:agent_id/thread/fork", post(fork_thread))
         .route("/api/agents/:agent_id/recovery/probe", post(probe_recovery))
-        .with_state(AppState { store, runtime })
+        .with_state(AppState {
+            store,
+            runtime,
+            deliveries,
+        })
 }
 
 #[derive(Serialize)]
@@ -272,6 +496,10 @@ async fn list_runtimes(State(state): State<AppState>) -> Json<Vec<RuntimeInfo>> 
 
 async fn runtime_metrics(State(state): State<AppState>) -> Json<RuntimeMetricsSnapshot> {
     Json(state.runtime.metrics().await)
+}
+
+async fn delivery_stats(State(state): State<AppState>) -> Result<Json<DeliveryStats>, ApiError> {
+    Ok(Json(state.store.delivery_stats(Utc::now()).await?))
 }
 
 async fn list_channels(State(state): State<AppState>) -> Result<Json<Vec<Channel>>, ApiError> {
@@ -342,7 +570,10 @@ async fn start_agent(
 ) -> Result<Json<Agent>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
     state.runtime.start(&agent).await?;
-    set_agent_status(&state.store, agent_id, AgentStatus::Running).await
+    let result = set_agent_status(&state.store, agent_id, AgentStatus::Running).await?;
+    state.store.nudge_agent_deliveries(agent_id).await?;
+    state.deliveries.wake.notify_one();
+    Ok(result)
 }
 
 async fn stop_agent(
@@ -453,6 +684,7 @@ struct PostMessageRequest {
 struct PostMessageResponse {
     message: Message,
     replies: Vec<Message>,
+    pending_deliveries: Vec<Delivery>,
 }
 
 async fn post_message(
@@ -466,40 +698,26 @@ async fn post_message(
         .append_message(channel_id, None, MessageRole::User, content)
         .await?;
     let agents = state.store.list_channel_agents(channel_id).await?;
-    let mut tasks = tokio::task::JoinSet::new();
-    for (index, agent) in agents
+    let agent_ids: Vec<Uuid> = agents
         .into_iter()
         .filter(|agent| agent.status == AgentStatus::Running)
-        .enumerate()
-    {
-        let runtime = Arc::clone(&state.runtime);
-        let message = message.clone();
-        tasks.spawn(async move {
-            let result = runtime.reply(&agent, &message).await;
-            (index, agent, result)
-        });
-    }
-    let mut completed = Vec::new();
-    while let Some(result) = tasks.join_next().await {
-        completed.push(result.map_err(|error| {
-            RuntimeError::Delivery(format!("runtime reply task failed: {error}"))
-        })?);
-    }
-    completed.sort_by_key(|(index, _, _)| *index);
-
-    let mut replies = Vec::with_capacity(completed.len());
-    for (_, agent, result) in completed {
-        let content = result?;
-        replies.push(
-            state
-                .store
-                .append_message(channel_id, Some(agent.id), MessageRole::Assistant, &content)
-                .await?,
-        );
-    }
+        .map(|agent| agent.id)
+        .collect();
+    state.store.enqueue_deliveries(&message, &agent_ids).await?;
+    let replies = state.deliveries.dispatch_message(message.id).await?.replies;
+    let pending_deliveries = state.store.list_message_deliveries(message.id).await?;
+    let status = if pending_deliveries.is_empty() {
+        StatusCode::CREATED
+    } else {
+        StatusCode::ACCEPTED
+    };
     Ok((
-        StatusCode::CREATED,
-        Json(PostMessageResponse { message, replies }),
+        status,
+        Json(PostMessageResponse {
+            message,
+            replies,
+            pending_deliveries,
+        }),
     ))
 }
 

@@ -629,6 +629,9 @@ impl Store {
              next_attempt_at, last_error, created_at, updated_at \
              FROM delivery_queue \
              WHERE state = 'pending' AND next_attempt_at <= ? AND attempts < ? \
+               AND EXISTS (SELECT 1 FROM agents \
+                           WHERE agents.id = delivery_queue.agent_id \
+                             AND agents.status = 'running') \
              ORDER BY next_attempt_at, created_at, id LIMIT ?",
         )
         .bind(now)
@@ -663,6 +666,62 @@ impl Store {
         }
         transaction.commit().await?;
         Ok(reserved)
+    }
+
+    /// Reserves one specific pending delivery when it is due.
+    ///
+    /// Returns `None` when another worker already reserved it, it is delayed,
+    /// or its retry budget is exhausted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update or follow-up query fails.
+    pub async fn reserve_delivery(
+        &self,
+        delivery_id: Uuid,
+        max_attempts: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Option<Delivery>, StoreError> {
+        let result = query(
+            "UPDATE delivery_queue \
+             SET state = 'in_flight', attempts = attempts + 1, \
+                 last_error = NULL, updated_at = ? \
+             WHERE id = ? AND state = 'pending' \
+               AND next_attempt_at <= ? AND attempts < ? \
+               AND EXISTS (SELECT 1 FROM agents \
+                           WHERE agents.id = delivery_queue.agent_id \
+                             AND agents.status = 'running')",
+        )
+        .bind(now)
+        .bind(delivery_id)
+        .bind(now)
+        .bind(max_attempts.max(1))
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Ok(None);
+        }
+        self.get_delivery(delivery_id).await
+    }
+
+    /// Makes pending deliveries for a started agent immediately retryable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update fails.
+    pub async fn nudge_agent_deliveries(&self, agent_id: Uuid) -> Result<u64, StoreError> {
+        let now = Utc::now();
+        let result = query(
+            "UPDATE delivery_queue \
+             SET next_attempt_at = ?, updated_at = ? \
+             WHERE agent_id = ? AND state = 'pending'",
+        )
+        .bind(now)
+        .bind(now)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
     }
 
     /// Returns an in-flight delivery to the retry queue or exhausts it.
