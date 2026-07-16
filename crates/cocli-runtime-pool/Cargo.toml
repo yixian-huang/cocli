@@ -4,13 +4,18 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+description       = "Runtime registry and local discovery catalog for cocli drivers"
+readme            = "README.md"
 
 [dependencies]
 cocli-driver-core = { path = "../cocli-driver-core" }
+serde             = { workspace = true }
 
 [dev-dependencies]
 async-trait         = { workspace = true }
 tokio               = { workspace = true }
+serde_json          = { workspace = true }
+tempfile            = { workspace = true }
 cocli-driver-claude = { path = "../cocli-driver-claude" }
 cocli-driver-cursor = { path = "../cocli-driver-cursor" }
 cocli-driver-codex  = { path = "../cocli-driver-codex" }

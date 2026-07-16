@@ -10,7 +10,19 @@ use cocli_driver_core::types::{
 use cocli_driver_core::{Driver, DriverError, DriverEvent};
 use cocli_driver_cursor::CursorDriver;
 use cocli_driver_gemini::GeminiDriver;
-use cocli_runtime_pool::RuntimeRegistry;
+use cocli_runtime_pool::{initial_oss_runtime_specs, RuntimeProbe, RuntimeRegistry};
+
+struct InstalledProbe;
+
+impl RuntimeProbe for InstalledProbe {
+    fn resolve_binary(&self, command: &Path) -> Option<PathBuf> {
+        Some(PathBuf::from("/resolved").join(command))
+    }
+
+    fn detect_version(&self, _binary: &Path, _args: &[String]) -> Option<String> {
+        Some("test-version".to_string())
+    }
+}
 
 struct FakeDriver(&'static str);
 
@@ -130,4 +142,33 @@ fn initial_oss_adapter_matrix_registers_through_core_trait_objects() {
     for runtime in ["claude", "cursor", "codex", "gemini"] {
         assert_eq!(registry.get(runtime).unwrap().name(), runtime);
     }
+
+    let catalog = registry.discover(&initial_oss_runtime_specs(), &InstalledProbe);
+    assert_eq!(
+        catalog.installed_names(),
+        vec![
+            "claude".to_string(),
+            "codex".to_string(),
+            "cursor".to_string(),
+            "gemini".to_string(),
+        ]
+    );
+    assert!(
+        catalog
+            .get("codex")
+            .unwrap()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .process_factory
+    );
+    assert!(
+        catalog
+            .get("gemini")
+            .unwrap()
+            .capabilities
+            .as_ref()
+            .unwrap()
+            .is_turn_exit
+    );
 }

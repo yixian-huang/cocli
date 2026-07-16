@@ -519,6 +519,9 @@ dependencies = [
  "cocli-driver-core",
  "cocli-driver-cursor",
  "cocli-driver-gemini",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 
