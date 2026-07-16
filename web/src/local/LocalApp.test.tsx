@@ -428,6 +428,35 @@ describe('LocalApp', () => {
     await waitFor(() => expect(screen.getByText('Ship the loop')).toBeInTheDocument())
   })
 
+  it('refreshes the active channel so durable background replies appear', async () => {
+    const baseFetch = vi.mocked(fetch)
+    let messageReads = 0
+    vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path === `/api/channels/${channel.id}/messages` && !init?.method) {
+        messageReads += 1
+        return jsonResponse(messageReads === 1 ? [] : [{
+          id: 'message-background',
+          channel_id: channel.id,
+          seq: 1,
+          agent_id: 'agent-1',
+          role: 'assistant',
+          content: 'durable retry completed',
+          created_at: '2026-07-16T09:02:01Z',
+        }])
+      }
+      return baseFetch(input, init)
+    }))
+
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    expect(
+      await screen.findByText('durable retry completed', {}, { timeout: 3_500 }),
+    ).toBeInTheDocument()
+    expect(messageReads).toBeGreaterThanOrEqual(2)
+  })
+
   it('persists light mode and switches the workspace to Chinese', async () => {
     render(<LocalApp />)
 
@@ -587,7 +616,11 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'History' }))
     expect(await screen.findByRole('heading', { name: 'Runtime history' })).toBeInTheDocument()
     expect(await screen.findByText('session-1')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: /Turn #1/ }))
+    fireEvent.click(await screen.findByRole(
+      'button',
+      { name: /Turn #1/ },
+      { timeout: 5_000 },
+    ))
     expect(await screen.findByText('Recorded locally.')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Open source message #1' }))

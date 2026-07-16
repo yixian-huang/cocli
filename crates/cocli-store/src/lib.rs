@@ -884,6 +884,65 @@ impl Store {
             .transpose()
     }
 
+    /// Deletes one agent and all dependent local state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the delete fails.
+    pub async fn delete_agent(&self, agent_id: Uuid) -> Result<(), StoreError> {
+        query("DELETE FROM agents WHERE id = ?")
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Returns the stable local capability token for one agent, creating it
+    /// atomically on first use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the token cannot be persisted or loaded.
+    pub async fn ensure_agent_bridge_token(&self, agent_id: Uuid) -> Result<String, StoreError> {
+        let now = Utc::now();
+        let candidate = format!(
+            "cocli_bridge_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        let mut transaction = self.pool.begin().await?;
+        query(
+            "INSERT INTO agent_bridge_tokens (agent_id, token, created_at, rotated_at) \
+             VALUES (?, ?, ?, ?) ON CONFLICT(agent_id) DO NOTHING",
+        )
+        .bind(agent_id)
+        .bind(candidate)
+        .bind(now)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        let token: String =
+            query_scalar("SELECT token FROM agent_bridge_tokens WHERE agent_id = ?")
+                .bind(agent_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        transaction.commit().await?;
+        Ok(token)
+    }
+
+    /// Loads one agent's bridge capability token.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn agent_bridge_token(&self, agent_id: Uuid) -> Result<Option<String>, StoreError> {
+        query_scalar("SELECT token FROM agent_bridge_tokens WHERE agent_id = ?")
+            .bind(agent_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(StoreError::from)
+    }
+
     /// Appends a message with the next sequence number in its channel.
     ///
     /// # Errors
@@ -897,28 +956,84 @@ impl Store {
         content: &str,
     ) -> Result<Message, StoreError> {
         let mut transaction = self.pool.begin().await?;
-        let seq: i64 =
-            query_scalar("SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE channel_id = ?")
-                .bind(channel_id)
-                .fetch_one(&mut *transaction)
-                .await?;
         let row = query(
             "INSERT INTO messages \
              (id, channel_id, seq, agent_id, role, content, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ? \
+             FROM messages WHERE channel_id = ? \
              RETURNING id, channel_id, seq, agent_id, role, content, created_at",
         )
         .bind(Uuid::new_v4())
         .bind(channel_id)
-        .bind(seq)
         .bind(agent_id)
         .bind(role.as_str())
         .bind(content)
         .bind(Utc::now())
+        .bind(channel_id)
         .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;
         message_row_from_sqlite(row)?.try_into()
+    }
+
+    /// Atomically appends a user message and queues it for every running
+    /// agent in the channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when either the message or any delivery cannot
+    /// be persisted. The whole transaction is rolled back on failure.
+    pub async fn append_user_message_with_deliveries(
+        &self,
+        channel_id: Uuid,
+        content: &str,
+    ) -> Result<Message, StoreError> {
+        let now = Utc::now();
+        let mut transaction = self.pool.begin().await?;
+        let row = query(
+            "INSERT INTO messages \
+             (id, channel_id, seq, agent_id, role, content, created_at) \
+             SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, NULL, ?, ?, ? \
+             FROM messages WHERE channel_id = ? \
+             RETURNING id, channel_id, seq, agent_id, role, content, created_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(channel_id)
+        .bind(MessageRole::User.as_str())
+        .bind(content)
+        .bind(now)
+        .bind(channel_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let message: Message = message_row_from_sqlite(row)?.try_into()?;
+        let agent_ids: Vec<Uuid> = query_scalar(
+            "SELECT id FROM agents WHERE channel_id = ? AND status = ? ORDER BY created_at",
+        )
+        .bind(channel_id)
+        .bind(AgentStatus::Running.as_str())
+        .fetch_all(&mut *transaction)
+        .await?;
+        for agent_id in agent_ids {
+            query(
+                "INSERT INTO delivery_queue \
+                 (id, agent_id, channel_id, message_id, seq, state, attempts, \
+                  next_attempt_at, last_error, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(agent_id)
+            .bind(message.channel_id)
+            .bind(message.id)
+            .bind(message.seq)
+            .bind(DeliveryState::Pending.as_str())
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(message)
     }
 
     /// Lists a channel's messages in sequence order.
@@ -1752,24 +1867,20 @@ impl Store {
             Utc::now(),
         )
         .await?;
-        let seq: i64 =
-            query_scalar("SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE channel_id = ?")
-                .bind(delivery.channel_id)
-                .fetch_one(&mut *transaction)
-                .await?;
         let row = query(
             "INSERT INTO messages \
              (id, channel_id, seq, agent_id, role, content, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             SELECT ?, ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ? \
+             FROM messages WHERE channel_id = ? \
              RETURNING id, channel_id, seq, agent_id, role, content, created_at",
         )
         .bind(Uuid::new_v4())
         .bind(delivery.channel_id)
-        .bind(seq)
         .bind(delivery.agent_id)
         .bind(MessageRole::Assistant.as_str())
         .bind(content)
         .bind(Utc::now())
+        .bind(delivery.channel_id)
         .fetch_one(&mut *transaction)
         .await?;
         transaction.commit().await?;
@@ -1886,6 +1997,25 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() == 1)
+    }
+
+    /// Closes every runtime session left open by a previous server process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when reconciliation fails.
+    pub async fn close_stale_agent_sessions(
+        &self,
+        reason: &str,
+        ended_at: DateTime<Utc>,
+    ) -> Result<u64, StoreError> {
+        let result =
+            query("UPDATE agent_sessions SET end_reason = ?, ended_at = ? WHERE ended_at IS NULL")
+                .bind(reason)
+                .bind(ended_at)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected())
     }
 
     /// Lists recent sessions for one agent, optionally filtered by type.
@@ -2217,21 +2347,69 @@ impl Store {
 }
 
 async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
-    for migration in [
-        include_str!("../migrations/0001_local_loop.sql"),
-        include_str!("../migrations/0002_delivery_queue.sql"),
-        include_str!("../migrations/0003_agent_bridge_state.sql"),
-        include_str!("../migrations/0004_tasks.sql"),
-        include_str!("../migrations/0005_runtime_history.sql"),
-        include_str!("../migrations/0006_wiki.sql"),
-        include_str!("../migrations/0007_skills.sql"),
+    query(
+        "CREATE TABLE IF NOT EXISTS cocli_schema_migrations (\
+            version INTEGER PRIMARY KEY NOT NULL,\
+            name TEXT NOT NULL,\
+            applied_at TEXT NOT NULL\
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    for (version, name, migration) in [
+        (
+            1_i64,
+            "local_loop",
+            include_str!("../migrations/0001_local_loop.sql"),
+        ),
+        (
+            2,
+            "delivery_queue",
+            include_str!("../migrations/0002_delivery_queue.sql"),
+        ),
+        (
+            3,
+            "agent_bridge_state",
+            include_str!("../migrations/0003_agent_bridge_state.sql"),
+        ),
+        (4, "tasks", include_str!("../migrations/0004_tasks.sql")),
+        (
+            5,
+            "runtime_history",
+            include_str!("../migrations/0005_runtime_history.sql"),
+        ),
+        (6, "wiki", include_str!("../migrations/0006_wiki.sql")),
+        (7, "skills", include_str!("../migrations/0007_skills.sql")),
+        (
+            8,
+            "bridge_security",
+            include_str!("../migrations/0008_bridge_security.sql"),
+        ),
     ] {
+        let already_applied: bool =
+            query_scalar("SELECT EXISTS(SELECT 1 FROM cocli_schema_migrations WHERE version = ?)")
+                .bind(version)
+                .fetch_one(pool)
+                .await?;
+        if already_applied {
+            continue;
+        }
+
+        let mut transaction = pool.begin().await?;
         for statement in migration.split(';') {
             let statement = statement.trim();
             if !statement.is_empty() {
-                query(statement).execute(pool).await?;
+                query(statement).execute(&mut *transaction).await?;
             }
         }
+        query("INSERT INTO cocli_schema_migrations (version, name, applied_at) VALUES (?, ?, ?)")
+            .bind(version)
+            .bind(name)
+            .bind(Utc::now())
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
     }
     Ok(())
 }

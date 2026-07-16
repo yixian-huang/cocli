@@ -150,24 +150,45 @@ async fn fetch_local(
 }
 
 async fn fetch_git(source: &str, subpath: Option<&str>) -> Result<FetchedSkill, SkillImportError> {
-    validate_public_https(source).await?;
+    let validated = validate_public_https(source).await?;
     let temp =
         TempDir::new().map_err(|error| import_io("create temporary skill checkout", &error))?;
     let destination = temp.path().to_owned();
+    let global_config = temp.path().join("empty-gitconfig");
+    std::fs::write(&global_config, [])
+        .map_err(|error| import_io("create isolated git config", &error))?;
+    let resolve = validated.curl_resolve();
     let mut command = Command::new("git");
     command
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", &global_config)
         .env("GIT_SSH_COMMAND", "false")
         .env("GIT_LFS_SKIP_SMUDGE", "1")
+        .env_remove("ALL_PROXY")
+        .env_remove("all_proxy")
+        .env_remove("HTTP_PROXY")
+        .env_remove("http_proxy")
+        .env_remove("HTTPS_PROXY")
+        .env_remove("https_proxy")
+        .env("NO_PROXY", "*")
         .args([
+            "-c",
+            "protocol.allow=never",
+            "-c",
+            "protocol.https.allow=always",
             "-c",
             "protocol.file.allow=never",
             "-c",
             "protocol.ext.allow=never",
             "-c",
             "http.followRedirects=false",
+            "-c",
+            "http.proxy=",
+            "-c",
+            &format!("http.curloptResolve={resolve}"),
             "clone",
             "--depth=1",
             "--no-tags",
@@ -390,7 +411,21 @@ fn parse_metadata(files: &[SkillLibraryFile]) -> SkillMetadata {
     metadata
 }
 
-async fn validate_public_https(source: &str) -> Result<(), SkillImportError> {
+struct ValidatedHttps {
+    host: String,
+    address: IpAddr,
+}
+
+impl ValidatedHttps {
+    fn curl_resolve(&self) -> String {
+        match self.address {
+            IpAddr::V4(address) => format!("{}:443:{address}", self.host),
+            IpAddr::V6(address) => format!("{}:443:[{address}]", self.host),
+        }
+    }
+}
+
+async fn validate_public_https(source: &str) -> Result<ValidatedHttps, SkillImportError> {
     let url = Url::parse(source)
         .map_err(|error| SkillImportError::Invalid(format!("invalid skill URL: {error}")))?;
     if url.scheme() != "https" {
@@ -423,22 +458,22 @@ async fn validate_public_https(source: &str) -> Result<(), SkillImportError> {
         .map_err(|error| {
             SkillImportError::Invalid(format!("skill URL DNS lookup failed: {error}"))
         })?;
-    let mut found = false;
+    let mut selected = None;
     for address in addresses {
-        found = true;
         if blocked_ip(address.ip()) {
             return Err(SkillImportError::Invalid(format!(
                 "skill URL resolves to a blocked address: {}",
                 address.ip()
             )));
         }
+        selected.get_or_insert(address.ip());
     }
-    if !found {
-        return Err(SkillImportError::Invalid(
-            "skill URL host has no addresses".to_owned(),
-        ));
-    }
-    Ok(())
+    let address = selected
+        .ok_or_else(|| SkillImportError::Invalid("skill URL host has no addresses".to_owned()))?;
+    Ok(ValidatedHttps {
+        host: host.to_owned(),
+        address,
+    })
 }
 
 fn blocked_ip(ip: IpAddr) -> bool {

@@ -225,6 +225,11 @@ export interface RuntimeActivity {
 interface PostMessageResponse {
   message: Message
   replies: Message[]
+  pending_deliveries?: Array<{
+    id: string
+    state: 'pending' | 'in_flight' | 'exhausted'
+    attempts: number
+  }>
 }
 
 interface ApiErrorBody {

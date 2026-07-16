@@ -1,13 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use axum::extract::{Path, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cocli_store::{
-    Agent, AgentSkillInstall, NewSkillLibrary, SkillLibraryEntry, SkillLibraryFileMeta, StoreError,
+    Agent, AgentSkillInstall, NewSkillLibrary, SkillLibraryEntry, SkillLibraryFileMeta, Store,
+    StoreError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use tokio::sync::OwnedMutexGuard;
 use uuid::Uuid;
 
 use super::skill_import::{
@@ -258,6 +261,7 @@ async fn reinstall_library(
     State(state): State<AppState>,
     Path((_zone_id, library_id)): Path<(String, Uuid)>,
 ) -> Result<Json<ReinstallLibraryResponse>, ApiError> {
+    let _mutation_guard = skill_mutation_guard(&state, library_id).await;
     let current = require_library(&state, library_id).await?;
     let fetched = fetch_skill(&current.source_url, current.source_subpath.as_deref())
         .await
@@ -268,40 +272,97 @@ async fn reinstall_library(
         .map(|file| file.size)
         .try_fold(0_i64, i64::checked_add)
         .ok_or_else(|| ApiError::bad_request("skill byte count overflowed"))?;
-    if fetched.source_ref.is_some() && fetched.source_ref == current.source_ref {
-        return Ok(Json(ReinstallLibraryResponse {
-            updated: false,
-            source_ref: fetched.source_ref,
-            files: fetched.files.len(),
-            size: total,
-        }));
-    }
     let previous_files = state.store.load_skill_library_files(library_id).await?;
-    state
-        .store
-        .replace_skill_library_files(library_id, fetched.source_ref.as_deref(), &fetched.files)
-        .await?;
-    if let Err(error) = refresh_installed_skills(&state, &current, &fetched, &previous_files).await
-    {
-        if let Err(rollback_error) = state
+    let updated = fetched.source_ref != current.source_ref || fetched.files != previous_files;
+    let refreshed = refresh_installed_skills(&state, &current, &fetched, &previous_files).await?;
+    if updated {
+        if let Err(error) = state
             .store
-            .replace_skill_library_files(library_id, current.source_ref.as_deref(), &previous_files)
+            .replace_skill_library_files(library_id, fetched.source_ref.as_deref(), &fetched.files)
             .await
         {
-            tracing::error!(
-                %rollback_error,
-                library_id = %library_id,
-                "failed to restore local skill library snapshot"
-            );
+            let rollback_errors =
+                rollback_runtime_refreshes(&state, &current, &previous_files, &refreshed).await;
+            if !rollback_errors.is_empty() {
+                return Err(ApiError::conflict(format!(
+                    "catalog update failed ({error}); runtime rollback also failed: {}",
+                    rollback_errors.join("; ")
+                )));
+            }
+            return Err(error.into());
         }
-        return Err(error);
     }
     Ok(Json(ReinstallLibraryResponse {
-        updated: true,
+        updated,
         source_ref: fetched.source_ref,
         files: fetched.files.len(),
         size: total,
     }))
+}
+
+pub(crate) async fn reconcile_skill_state(
+    store: &Store,
+    runtime: &Arc<dyn super::RuntimeService>,
+) -> Result<(), super::RuntimeError> {
+    let agents = store
+        .list_agents()
+        .await
+        .map_err(skill_reconcile_store_error)?;
+    for agent in agents {
+        let installs = store
+            .list_agent_skill_installs(agent.id)
+            .await
+            .map_err(skill_reconcile_store_error)?;
+        let managed_paths: std::collections::HashSet<&str> = installs
+            .iter()
+            .map(|install| install.install_path.as_str())
+            .collect();
+        for skill in runtime.list_skills(&agent).await? {
+            let Some(install_path) = skill.install_path.as_deref() else {
+                continue;
+            };
+            if skill.skill_type != "workspace" || managed_paths.contains(install_path) {
+                continue;
+            }
+            let marker = runtime
+                .read_skill_file(&agent, install_path, ".cocli-managed")
+                .await;
+            if marker
+                .as_ref()
+                .is_ok_and(|marker| !marker.binary && marker.content.trim() == skill.name)
+            {
+                runtime.uninstall_skill(&agent, install_path).await?;
+            }
+        }
+        for install in installs {
+            let library = store
+                .get_skill_library(install.library_id)
+                .await
+                .map_err(skill_reconcile_store_error)?
+                .ok_or_else(|| {
+                    super::RuntimeError::Delivery(format!(
+                        "managed skill install {} references missing library {}",
+                        install.id, install.library_id
+                    ))
+                })?;
+            let files = store
+                .load_skill_library_files(install.library_id)
+                .await
+                .map_err(skill_reconcile_store_error)?;
+            let installed_path = runtime.install_skill(&agent, &library.name, &files).await?;
+            if installed_path != install.install_path {
+                return Err(super::RuntimeError::Delivery(format!(
+                    "managed skill {} reconciled to {} instead of {}",
+                    library.name, installed_path, install.install_path
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn skill_reconcile_store_error(error: StoreError) -> super::RuntimeError {
+    super::RuntimeError::Delivery(format!("failed to reconcile managed skills: {error}"))
 }
 
 async fn refresh_installed_skills(
@@ -309,7 +370,7 @@ async fn refresh_installed_skills(
     library: &SkillLibraryEntry,
     fetched: &FetchedSkill,
     previous_files: &[cocli_store::SkillLibraryFile],
-) -> Result<(), ApiError> {
+) -> Result<Vec<(Agent, AgentSkillInstall)>, ApiError> {
     let mut refreshed: Vec<(Agent, AgentSkillInstall)> = Vec::new();
     for install in state.store.list_skill_library_installs(library.id).await? {
         let refresh = async {
@@ -337,12 +398,20 @@ async fn refresh_installed_skills(
         match refresh {
             Ok(agent) => refreshed.push((agent, install)),
             Err(error) => {
-                rollback_runtime_refreshes(state, library, previous_files, &refreshed).await;
+                let rollback_errors =
+                    rollback_runtime_refreshes(state, library, previous_files, &refreshed).await;
+                if !rollback_errors.is_empty() {
+                    return Err(ApiError::conflict(format!(
+                        "{}; runtime rollback also failed: {}",
+                        error.message,
+                        rollback_errors.join("; ")
+                    )));
+                }
                 return Err(error);
             }
         }
     }
-    Ok(())
+    Ok(refreshed)
 }
 
 async fn rollback_runtime_refreshes(
@@ -350,7 +419,8 @@ async fn rollback_runtime_refreshes(
     library: &SkillLibraryEntry,
     previous_files: &[cocli_store::SkillLibraryFile],
     refreshed: &[(Agent, AgentSkillInstall)],
-) {
+) -> Vec<String> {
+    let mut errors = Vec::new();
     for (agent, install) in refreshed {
         match state
             .runtime
@@ -358,18 +428,14 @@ async fn rollback_runtime_refreshes(
             .await
         {
             Ok(path) if path == install.install_path => {}
-            Ok(path) => tracing::error!(
-                %path,
-                expected = %install.install_path,
-                "runtime skill rollback used an unexpected path"
-            ),
-            Err(error) => tracing::error!(
-                %error,
-                agent_id = %agent.id,
-                "failed to roll back refreshed runtime skill"
-            ),
+            Ok(path) => errors.push(format!(
+                "agent {} restored to unexpected path {} (expected {})",
+                agent.id, path, install.install_path
+            )),
+            Err(error) => errors.push(format!("agent {}: {error}", agent.id)),
         }
     }
+    errors
 }
 
 #[derive(Debug, Serialize)]
@@ -381,7 +447,10 @@ async fn delete_library(
     State(state): State<AppState>,
     Path((_zone_id, library_id)): Path<(String, Uuid)>,
 ) -> Result<Json<DeleteLibraryResponse>, ApiError> {
-    require_library(&state, library_id).await?;
+    let _mutation_guard = skill_mutation_guard(&state, library_id).await;
+    let library = require_library(&state, library_id).await?;
+    let files = state.store.load_skill_library_files(library_id).await?;
+    let mut removed: Vec<(Agent, AgentSkillInstall)> = Vec::new();
     for install in state.store.list_skill_library_installs(library_id).await? {
         if let Some(agent) = state.store.get_agent(install.agent_id).await? {
             if let Err(error) = state
@@ -389,16 +458,34 @@ async fn delete_library(
                 .uninstall_skill(&agent, &install.install_path)
                 .await
             {
-                tracing::warn!(
-                    %error,
-                    agent_id = %agent.id,
-                    install_id = %install.id,
-                    "could not remove installed skill while deleting local catalog entry"
-                );
+                let rollback_errors =
+                    rollback_runtime_refreshes(&state, &library, &files, &removed).await;
+                let rollback_detail = if rollback_errors.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "; previously removed installs could not be restored: {}",
+                        rollback_errors.join("; ")
+                    )
+                };
+                return Err(ApiError::conflict(format!(
+                    "could not remove skill from agent {}: {error}{rollback_detail}",
+                    agent.id
+                )));
             }
+            removed.push((agent, install));
         }
     }
-    state.store.delete_skill_library(library_id).await?;
+    if let Err(error) = state.store.delete_skill_library(library_id).await {
+        let rollback_errors = rollback_runtime_refreshes(&state, &library, &files, &removed).await;
+        if !rollback_errors.is_empty() {
+            return Err(ApiError::conflict(format!(
+                "catalog delete failed ({error}); runtime rollback also failed: {}",
+                rollback_errors.join("; ")
+            )));
+        }
+        return Err(error.into());
+    }
     Ok(Json(DeleteLibraryResponse {
         deleted: library_id,
     }))
@@ -552,6 +639,7 @@ async fn install_agent_skill(
     Path(agent_id): Path<Uuid>,
     Json(request): Json<InstallAgentSkillRequest>,
 ) -> Result<Json<InstallAgentSkillResponse>, ApiError> {
+    let _mutation_guard = skill_mutation_guard(&state, request.library_id).await;
     let agent = require_agent(&state.store, agent_id).await?;
     if state.runtime.skill_compatibility(&agent.runtime) == RuntimeSkillCompatibility::Unsupported {
         return Err(ApiError::bad_request(format!(
@@ -613,7 +701,9 @@ async fn install_agent_skill(
                 if let Err(rollback_error) =
                     state.runtime.uninstall_skill(&agent, &install_path).await
                 {
-                    tracing::warn!(%rollback_error, "failed to roll back skill install");
+                    return Err(ApiError::conflict(format!(
+                        "{error}; runtime install rollback failed: {rollback_error}"
+                    )));
                 }
             }
             Err(error.into())
@@ -632,15 +722,54 @@ async fn uninstall_agent_skill(
 ) -> Result<Json<OkResponse>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
     let install = require_agent_install(&state, agent_id, install_id).await?;
+    let _mutation_guard = skill_mutation_guard(&state, install.library_id).await;
+    let install = require_agent_install(&state, agent_id, install_id).await?;
     state
         .runtime
         .uninstall_skill(&agent, &install.install_path)
         .await?;
-    state
+    if let Err(error) = state
         .store
         .delete_agent_skill_install(agent_id, install_id)
-        .await?;
+        .await
+    {
+        let library = require_library(&state, install.library_id).await?;
+        let files = state
+            .store
+            .load_skill_library_files(install.library_id)
+            .await?;
+        match state
+            .runtime
+            .install_skill(&agent, &library.name, &files)
+            .await
+        {
+            Ok(path) if path == install.install_path => return Err(error.into()),
+            Ok(path) => {
+                return Err(ApiError::conflict(format!(
+                    "{error}; runtime uninstall rollback used {path} instead of {}",
+                    install.install_path
+                )));
+            }
+            Err(rollback_error) => {
+                return Err(ApiError::conflict(format!(
+                    "{error}; runtime uninstall rollback failed: {rollback_error}"
+                )));
+            }
+        }
+    }
     Ok(Json(OkResponse { ok: true }))
+}
+
+async fn skill_mutation_guard(state: &AppState, library_id: Uuid) -> OwnedMutexGuard<()> {
+    let lock = {
+        let mut locks = state.skill_mutation_locks.lock().await;
+        Arc::clone(
+            locks
+                .entry(library_id)
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    lock.lock_owned().await
 }
 
 #[derive(Debug, Serialize)]

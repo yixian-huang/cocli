@@ -57,6 +57,24 @@ impl HttpToolBackend {
         if url.scheme() != "http" {
             return Err(BridgeError::HttpsUnsupported);
         }
+        let host = url
+            .host()
+            .ok_or_else(|| BridgeError::Config("server URL is missing a host".to_owned()))?;
+        let is_loopback = match host {
+            url::Host::Ipv4(address) => address.is_loopback(),
+            url::Host::Ipv6(address) => address.is_loopback(),
+            url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        };
+        if !is_loopback {
+            return Err(BridgeError::Config(
+                "server URL must use a loopback host".to_owned(),
+            ));
+        }
+        if config.auth_token.trim().is_empty() {
+            return Err(BridgeError::Config(
+                "bridge capability token is required".to_owned(),
+            ));
+        }
         Ok(Self { config })
     }
 
@@ -80,6 +98,7 @@ impl HttpToolBackend {
         let port = base
             .port_or_known_default()
             .ok_or_else(|| BridgeError::Config("server URL is missing a port".to_owned()))?;
+        let authority = http_authority(&base, port)?;
         let base_path = base.path().trim_end_matches('/');
         let target = format!("{base_path}{path}");
         let body_bytes = body
@@ -90,7 +109,7 @@ impl HttpToolBackend {
         let mut request = String::new();
         write!(
             request,
-            "{method} {target} HTTP/1.1\r\nHost: {host}:{port}\r\nAccept: application/json\r\nConnection: close\r\n"
+            "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json\r\nConnection: close\r\n"
         )
         .expect("write to string");
         if !self.config.auth_token.is_empty() {
@@ -121,6 +140,17 @@ impl HttpToolBackend {
         let mut response = Vec::new();
         stream.read_to_end(&mut response)?;
         parse_http_json(&response)
+    }
+}
+
+fn http_authority(url: &Url, port: u16) -> Result<String, BridgeError> {
+    match url
+        .host()
+        .ok_or_else(|| BridgeError::Config("server URL is missing a host".to_owned()))?
+    {
+        url::Host::Ipv6(address) => Ok(format!("[{address}]:{port}")),
+        url::Host::Ipv4(address) => Ok(format!("{address}:{port}")),
+        url::Host::Domain(domain) => Ok(format!("{domain}:{port}")),
     }
 }
 
@@ -1710,7 +1740,7 @@ mod tests {
         let backend = HttpToolBackend::new(BridgeConfig {
             agent_id: "agent-knowledge".to_owned(),
             server_url: format!("http://{address}"),
-            auth_token: String::new(),
+            auth_token: "test-token".to_owned(),
         })
         .expect("bridge backend");
         let page = backend
@@ -1731,7 +1761,7 @@ mod tests {
         let backend = HttpToolBackend::new(BridgeConfig {
             agent_id: "agent-knowledge".to_owned(),
             server_url: format!("http://{address}"),
-            auth_token: String::new(),
+            auth_token: "test-token".to_owned(),
         })
         .expect("bridge backend");
         backend
@@ -1832,5 +1862,39 @@ mod tests {
         assert!(request.starts_with("POST /api/bridge/agents/agent-123/messages HTTP/1.1\r\n"));
         assert!(request.contains("Authorization: Bearer scoped-token\r\n"));
         assert!(request.ends_with(r##"{"content":"done","target":"#ops"}"##));
+    }
+
+    #[test]
+    fn http_backend_rejects_remote_hosts_and_missing_tokens() {
+        let remote = HttpToolBackend::new(BridgeConfig {
+            agent_id: "agent-123".to_owned(),
+            server_url: "http://example.com:8090".to_owned(),
+            auth_token: "scoped-token".to_owned(),
+        })
+        .expect_err("remote bridge target must be rejected");
+        assert!(remote.to_string().contains("loopback"));
+
+        let missing_token = HttpToolBackend::new(BridgeConfig {
+            agent_id: "agent-123".to_owned(),
+            server_url: "http://127.0.0.1:8090".to_owned(),
+            auth_token: String::new(),
+        })
+        .expect_err("empty bridge token must be rejected");
+        assert!(missing_token.to_string().contains("token"));
+    }
+
+    #[test]
+    fn http_authority_brackets_ipv6_loopback_hosts() {
+        let ipv6 = Url::parse("http://[::1]:8090").expect("IPv6 loopback URL");
+        assert_eq!(
+            http_authority(&ipv6, 8090).expect("IPv6 authority"),
+            "[::1]:8090"
+        );
+
+        let ipv4 = Url::parse("http://127.0.0.1:8090").expect("IPv4 loopback URL");
+        assert_eq!(
+            http_authority(&ipv4, 8090).expect("IPv4 authority"),
+            "127.0.0.1:8090"
+        );
     }
 }

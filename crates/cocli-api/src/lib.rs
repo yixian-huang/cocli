@@ -6,8 +6,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::{Path, Query, Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -20,11 +21,23 @@ use cocli_store::{
     WikiRevision,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::Notify;
+use tokio::sync::{watch, Mutex, Notify};
 use uuid::Uuid;
 
 mod skill_http;
 mod skill_import;
+
+/// Reconciles SQLite-managed skill installs with runtime workspace files.
+///
+/// This runs before the local listener starts so interrupted install,
+/// refresh, uninstall, and delete operations cannot leave a split-brain
+/// catalog visible to the next process.
+pub async fn reconcile_skill_state(
+    store: &Store,
+    runtime: &Arc<dyn RuntimeService>,
+) -> Result<(), RuntimeError> {
+    skill_http::reconcile_skill_state(store, runtime).await
+}
 
 /// Runtime discovery information consumed by the local product surface.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -238,6 +251,38 @@ pub struct RuntimeKnowledgeSnapshot {
 #[async_trait]
 pub trait RuntimeKnowledgeProvider: Send + Sync {
     async fn snapshot(&self, agent: &Agent) -> Result<RuntimeKnowledgeSnapshot, RuntimeError>;
+}
+
+/// Runtime-neutral source for per-agent local bridge capability tokens.
+#[async_trait]
+pub trait RuntimeBridgeTokenProvider: Send + Sync {
+    async fn token(&self, agent_id: Uuid) -> Result<String, RuntimeError>;
+}
+
+/// SQLite bridge token provider installed by the local server.
+#[derive(Clone, Debug)]
+pub struct SqliteRuntimeBridgeTokenProvider {
+    store: Store,
+}
+
+impl SqliteRuntimeBridgeTokenProvider {
+    pub fn new(store: Store) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl RuntimeBridgeTokenProvider for SqliteRuntimeBridgeTokenProvider {
+    async fn token(&self, agent_id: Uuid) -> Result<String, RuntimeError> {
+        self.store
+            .ensure_agent_bridge_token(agent_id)
+            .await
+            .map_err(|error| {
+                RuntimeError::Delivery(format!(
+                    "failed to load local bridge capability token: {error}"
+                ))
+            })
+    }
 }
 
 /// SQLite knowledge provider installed by the local server.
@@ -489,6 +534,9 @@ pub trait RuntimeService: Send + Sync {
     /// Installs the durable knowledge provider after the local store is available.
     fn set_knowledge_provider(&self, _provider: Arc<dyn RuntimeKnowledgeProvider>) {}
 
+    /// Installs the scoped bridge-token provider after local storage opens.
+    fn set_bridge_token_provider(&self, _provider: Arc<dyn RuntimeBridgeTokenProvider>) {}
+
     /// Returns the current runtime catalog.
     async fn list(&self) -> Vec<RuntimeInfo>;
 
@@ -652,7 +700,11 @@ pub(crate) struct AppState {
     store: Store,
     runtime: Arc<dyn RuntimeService>,
     deliveries: Arc<DeliveryCoordinator>,
+    _delivery_worker: Arc<DeliveryWorker>,
+    skill_mutation_locks: SkillMutationLocks,
 }
+
+type SkillMutationLocks = Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>;
 
 /// Tuning for the local SQLite-backed delivery worker.
 #[derive(Clone, Copy, Debug)]
@@ -693,6 +745,15 @@ struct DeliveryBatchResult {
     replies: Vec<Message>,
 }
 
+enum DeliveryAttemptError {
+    Retryable(RuntimeError),
+    Indeterminate(String),
+}
+
+struct DeliveryWorker {
+    _shutdown: watch::Sender<()>,
+}
+
 impl DeliveryCoordinator {
     fn new(store: Store, runtime: Arc<dyn RuntimeService>, config: DeliveryConfig) -> Arc<Self> {
         Arc::new(Self {
@@ -705,16 +766,20 @@ impl DeliveryCoordinator {
         })
     }
 
-    fn spawn(self: &Arc<Self>) {
+    fn spawn(self: &Arc<Self>) -> Arc<DeliveryWorker> {
         let coordinator = Arc::clone(self);
+        let (shutdown, mut shutdown_rx) = watch::channel(());
         tokio::spawn(async move {
             if let Err(error) = coordinator.store.release_in_flight_deliveries().await {
                 tracing::error!(%error, "failed to release in-flight deliveries at startup");
             }
             coordinator.ready.store(true, Ordering::Release);
             coordinator.ready_notify.notify_waiters();
-            coordinator.run().await;
+            coordinator.run(&mut shutdown_rx).await;
         });
+        Arc::new(DeliveryWorker {
+            _shutdown: shutdown,
+        })
     }
 
     async fn wait_until_ready(&self) {
@@ -727,7 +792,7 @@ impl DeliveryCoordinator {
         }
     }
 
-    async fn run(self: Arc<Self>) {
+    async fn run(self: Arc<Self>, shutdown: &mut watch::Receiver<()>) {
         let mut interval = tokio::time::interval(self.config.poll_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
@@ -735,6 +800,11 @@ impl DeliveryCoordinator {
             tokio::select! {
                 _ = interval.tick() => {}
                 _ = self.wake.notified() => {}
+                result = shutdown.changed() => {
+                    if result.is_err() {
+                        break;
+                    }
+                }
             }
             if let Err(error) = self.dispatch_due().await {
                 tracing::error!(%error, "durable delivery dispatch failed");
@@ -784,13 +854,18 @@ impl DeliveryCoordinator {
             let attempt_timeout = self.config.attempt_timeout;
             let task_delivery = delivery.clone();
             let handle = tasks.spawn(async move {
-                tokio::time::timeout(attempt_timeout, runtime.reply(&agent, &message))
-                    .await
-                    .unwrap_or_else(|_| {
-                        Err(RuntimeError::Delivery(
-                            "durable delivery attempt timed out".to_owned(),
-                        ))
-                    })
+                match tokio::time::timeout(attempt_timeout, runtime.reply(&agent, &message)).await {
+                    Ok(result) => result.map_err(DeliveryAttemptError::Retryable),
+                    Err(_) => match runtime.stop(agent.id).await {
+                        Ok(()) => Err(DeliveryAttemptError::Retryable(RuntimeError::Delivery(
+                            "durable delivery attempt timed out; runtime was stopped before retry"
+                                .to_owned(),
+                        ))),
+                        Err(stop_error) => Err(DeliveryAttemptError::Indeterminate(format!(
+                            "durable delivery attempt timed out and runtime stop failed; refusing automatic retry: {stop_error}"
+                        ))),
+                    },
+                }
             });
             task_deliveries.insert(handle.id(), (index, task_delivery));
         }
@@ -808,8 +883,8 @@ impl DeliveryCoordinator {
                         completed.push((
                             index,
                             delivery,
-                            Err(RuntimeError::Delivery(format!(
-                                "durable delivery runtime task failed: {error}"
+                            Err(DeliveryAttemptError::Retryable(RuntimeError::Delivery(
+                                format!("durable delivery runtime task failed: {error}"),
                             ))),
                         ));
                     }
@@ -827,7 +902,7 @@ impl DeliveryCoordinator {
                         .replies
                         .push(self.store.complete_delivery(&delivery, &content).await?);
                 }
-                Err(error) => {
+                Err(DeliveryAttemptError::Retryable(error)) => {
                     let next_attempt_at = Utc::now()
                         + chrono::Duration::from_std(self.backoff(delivery.attempts))
                             .unwrap_or_else(|_| chrono::Duration::minutes(5));
@@ -839,6 +914,12 @@ impl DeliveryCoordinator {
                             next_attempt_at,
                             self.config.max_attempts,
                         )
+                        .await?;
+                }
+                Err(DeliveryAttemptError::Indeterminate(error)) => {
+                    let _ = self
+                        .store
+                        .defer_delivery(delivery.id, &error, Utc::now(), delivery.attempts)
                         .await?;
                 }
             }
@@ -867,9 +948,79 @@ pub fn router_with_delivery_config(
     delivery_config: DeliveryConfig,
 ) -> Router {
     let deliveries = DeliveryCoordinator::new(store.clone(), Arc::clone(&runtime), delivery_config);
-    deliveries.spawn();
+    let delivery_worker = deliveries.spawn();
+    let bridge_router = Router::new()
+        .route(
+            "/api/bridge/agents/:agent_id/messages",
+            post(bridge_send_message),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/inbox",
+            get(bridge_check_messages),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/history",
+            get(bridge_read_history),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks",
+            get(bridge_list_tasks).post(bridge_create_tasks),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/claim",
+            post(bridge_claim_tasks),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/unclaim",
+            post(bridge_unclaim_task),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/update-status",
+            post(bridge_update_task_status),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/dependencies",
+            get(bridge_get_task_dependencies).post(bridge_add_task_dependency),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/working",
+            get(bridge_get_working_state).post(bridge_set_working_state),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/working/clear",
+            post(bridge_clear_working_state),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/index",
+            get(bridge_get_memory_index),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/list",
+            get(bridge_list_memory_namespace),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/topic",
+            get(bridge_get_memory_topic).post(bridge_write_memory_topic),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/move",
+            post(bridge_move_memory_topic),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/wiki/pages",
+            get(bridge_list_wiki_pages),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/wiki/pages/:path",
+            get(bridge_get_wiki_page).put(bridge_upsert_wiki_page),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            store.clone(),
+            authorize_bridge_request,
+        ));
     Router::new()
         .merge(skill_http::router())
+        .merge(bridge_router)
         .route("/healthz", get(health))
         .route("/api/metrics", get(runtime_metrics))
         .route("/api/deliveries/stats", get(delivery_stats))
@@ -945,75 +1096,54 @@ pub fn router_with_delivery_config(
         .route("/api/wiki/pages/:path/revisions", get(list_wiki_revisions))
         .route("/api/wiki/pages/:path/backlinks", get(list_wiki_backlinks))
         .route("/api/wiki/pages/:path/revert", post(revert_wiki_page))
-        .route(
-            "/api/bridge/agents/:agent_id/messages",
-            post(bridge_send_message),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/inbox",
-            get(bridge_check_messages),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/history",
-            get(bridge_read_history),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/tasks",
-            get(bridge_list_tasks).post(bridge_create_tasks),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/tasks/claim",
-            post(bridge_claim_tasks),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/tasks/unclaim",
-            post(bridge_unclaim_task),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/tasks/update-status",
-            post(bridge_update_task_status),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/tasks/dependencies",
-            get(bridge_get_task_dependencies).post(bridge_add_task_dependency),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/working",
-            get(bridge_get_working_state).post(bridge_set_working_state),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/working/clear",
-            post(bridge_clear_working_state),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/memory/index",
-            get(bridge_get_memory_index),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/memory/list",
-            get(bridge_list_memory_namespace),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/memory/topic",
-            get(bridge_get_memory_topic).post(bridge_write_memory_topic),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/memory/move",
-            post(bridge_move_memory_topic),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/wiki/pages",
-            get(bridge_list_wiki_pages),
-        )
-        .route(
-            "/api/bridge/agents/:agent_id/wiki/pages/:path",
-            get(bridge_get_wiki_page).put(bridge_upsert_wiki_page),
-        )
         .with_state(AppState {
             store,
             runtime,
             deliveries,
+            _delivery_worker: delivery_worker,
+            skill_mutation_locks: Arc::new(Mutex::new(HashMap::new())),
         })
+}
+
+async fn authorize_bridge_request(
+    State(store): State<Store>,
+    request: Request,
+    next: Next,
+) -> Result<Response, ApiError> {
+    let agent_id = request
+        .uri()
+        .path()
+        .strip_prefix("/api/bridge/agents/")
+        .and_then(|path| path.split('/').next())
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or_else(|| ApiError::unauthorized("invalid bridge agent scope"))?;
+    let supplied = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::unauthorized("bridge capability token is required"))?;
+    let expected = store
+        .agent_bridge_token(agent_id)
+        .await?
+        .ok_or_else(|| ApiError::unauthorized("bridge capability token is not provisioned"))?;
+    if !constant_time_eq(supplied.as_bytes(), expected.as_bytes()) {
+        return Err(ApiError::unauthorized("bridge capability token is invalid"));
+    }
+    Ok(next.run(request).await)
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0_u8, |difference, (left, right)| {
+            difference | (left ^ right)
+        })
+        == 0
 }
 
 #[derive(Serialize)]
@@ -1093,9 +1223,50 @@ async fn create_agent(
             name,
             runtime_name,
             request.model.as_deref(),
-            AgentStatus::Running,
+            AgentStatus::Stopped,
         )
         .await?;
+    if let Err(error) = state.store.ensure_agent_bridge_token(agent.id).await {
+        if let Err(rollback_error) = state.store.delete_agent(agent.id).await {
+            return Err(ApiError::conflict(format!(
+                "bridge token provisioning failed ({error}); agent rollback also failed: {rollback_error}"
+            )));
+        }
+        return Err(error.into());
+    }
+    if let Err(error) = state.runtime.start(&agent).await {
+        state.store.delete_agent(agent.id).await?;
+        return Err(error.into());
+    }
+    let agent = match set_agent_status(&state.store, agent.id, AgentStatus::Running).await {
+        Ok(Json(agent)) => agent,
+        Err(status_error) => match state.runtime.stop(agent.id).await {
+            Ok(()) => {
+                if let Err(delete_error) = state.store.delete_agent(agent.id).await {
+                    tracing::warn!(
+                        agent_id = %agent.id,
+                        status_error = %status_error.message,
+                        %delete_error,
+                        "agent startup rolled back to stopped state but row deletion failed"
+                    );
+                    agent
+                } else {
+                    return Err(status_error);
+                }
+            }
+            Err(stop_error) => {
+                match set_agent_status(&state.store, agent.id, AgentStatus::Running).await {
+                    Ok(Json(agent)) => agent,
+                    Err(recovery_error) => {
+                        return Err(ApiError::conflict(format!(
+                            "agent status update failed ({}); runtime stop also failed ({stop_error}); status recovery failed: {}",
+                            status_error.message, recovery_error.message
+                        )));
+                    }
+                }
+            }
+        },
+    };
     Ok((StatusCode::CREATED, Json(agent)))
 }
 
@@ -1104,8 +1275,25 @@ async fn start_agent(
     Path(agent_id): Path<Uuid>,
 ) -> Result<Json<Agent>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
+    state.store.ensure_agent_bridge_token(agent.id).await?;
     state.runtime.start(&agent).await?;
-    let result = set_agent_status(&state.store, agent_id, AgentStatus::Running).await?;
+    let result = match set_agent_status(&state.store, agent_id, AgentStatus::Running).await {
+        Ok(result) => result,
+        Err(status_error) => match state.runtime.stop(agent.id).await {
+            Ok(()) => return Err(status_error),
+            Err(stop_error) => {
+                match set_agent_status(&state.store, agent_id, AgentStatus::Running).await {
+                    Ok(result) => result,
+                    Err(recovery_error) => {
+                        return Err(ApiError::conflict(format!(
+                            "agent status update failed ({}); runtime stop also failed ({stop_error}); status recovery failed: {}",
+                            status_error.message, recovery_error.message
+                        )));
+                    }
+                }
+            }
+        },
+    };
     state.store.nudge_agent_deliveries(agent_id).await?;
     state.deliveries.wake.notify_one();
     Ok(result)
@@ -2501,15 +2689,8 @@ async fn post_message(
     let content = non_empty("message content", &request.content)?;
     let message = state
         .store
-        .append_message(channel_id, None, MessageRole::User, content)
+        .append_user_message_with_deliveries(channel_id, content)
         .await?;
-    let agents = state.store.list_channel_agents(channel_id).await?;
-    let agent_ids: Vec<Uuid> = agents
-        .into_iter()
-        .filter(|agent| agent.status == AgentStatus::Running)
-        .map(|agent| agent.id)
-        .collect();
-    state.store.enqueue_deliveries(&message, &agent_ids).await?;
     let replies = state.deliveries.dispatch_message(message.id).await?.replies;
     let pending_deliveries = state.store.list_message_deliveries(message.id).await?;
     let status = if pending_deliveries.is_empty() {
@@ -2598,6 +2779,14 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+            body: None,
+        }
+    }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
             message: message.into(),
             body: None,
         }

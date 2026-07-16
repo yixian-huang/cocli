@@ -131,6 +131,36 @@ async fn completion_appends_reply_and_removes_delivery_atomically() {
 }
 
 #[tokio::test]
+async fn user_message_and_running_agent_deliveries_are_created_together() {
+    let store = Store::in_memory().await.expect("store opens");
+    let channel = store.create_channel("atomic-post").await.expect("channel");
+    let running = store
+        .create_agent(channel.id, "running", "fake", None, AgentStatus::Running)
+        .await
+        .expect("running agent");
+    store
+        .create_agent(channel.id, "stopped", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("stopped agent");
+
+    let message = store
+        .append_user_message_with_deliveries(channel.id, "deliver atomically")
+        .await
+        .expect("atomic append");
+    let deliveries = store
+        .list_message_deliveries(message.id)
+        .await
+        .expect("deliveries");
+
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].agent_id, running.id);
+    assert_eq!(
+        store.list_messages(channel.id).await.expect("messages"),
+        vec![message]
+    );
+}
+
+#[tokio::test]
 async fn reopening_releases_in_flight_deliveries_for_retry() {
     let database_path =
         std::env::temp_dir().join(format!("cocli-delivery-{}.sqlite3", uuid::Uuid::new_v4()));

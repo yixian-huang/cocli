@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
-use cocli_api::{router, RuntimeService, SqliteRuntimeHistorySink, SqliteRuntimeKnowledgeProvider};
+use cocli_api::{
+    reconcile_skill_state, router, RuntimeService, SqliteRuntimeBridgeTokenProvider,
+    SqliteRuntimeHistorySink, SqliteRuntimeKnowledgeProvider,
+};
 use cocli_store::{Store, StoreError};
 use tokio::net::TcpListener;
 
@@ -43,12 +46,24 @@ impl Server {
         config: ServerConfig,
         runtime: Arc<dyn RuntimeService>,
     ) -> Result<Self, ServerError> {
+        if !config.bind.ip().is_loopback() {
+            return Err(ServerError::NonLoopbackBind(config.bind));
+        }
         tokio::fs::create_dir_all(&config.data_dir).await?;
+        let listener = TcpListener::bind(config.bind).await?;
         let store = Store::open(database_path(&config.data_dir)).await?;
+        store
+            .close_stale_agent_sessions("process_restart", chrono::Utc::now())
+            .await?;
         runtime.set_history_sink(Arc::new(SqliteRuntimeHistorySink::new(store.clone())));
         runtime
             .set_knowledge_provider(Arc::new(SqliteRuntimeKnowledgeProvider::new(store.clone())));
-        let listener = TcpListener::bind(config.bind).await?;
+        runtime.set_bridge_token_provider(Arc::new(SqliteRuntimeBridgeTokenProvider::new(
+            store.clone(),
+        )));
+        reconcile_skill_state(&store, &runtime)
+            .await
+            .map_err(ServerError::Runtime)?;
         Ok(Self {
             listener,
             app: router(store, runtime).merge(cocli_web::router(config.web_dir)),
@@ -88,10 +103,45 @@ fn database_path(data_dir: &Path) -> PathBuf {
 /// Errors emitted while binding or running the local server.
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
+    /// The local single-user server may only listen on a loopback interface.
+    #[error("refusing non-loopback bind address {0}; cocli local only supports loopback")]
+    NonLoopbackBind(SocketAddr),
     /// Filesystem, socket, or HTTP serving failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
     /// SQLite initialization failed.
     #[error(transparent)]
     Store(#[from] StoreError),
+    /// Runtime-backed startup reconciliation failed.
+    #[error(transparent)]
+    Runtime(#[from] cocli_api::RuntimeError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cocli_api::EchoRuntimeService;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    #[tokio::test]
+    async fn rejects_non_loopback_bind_addresses() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let error = Server::bind(
+            ServerConfig {
+                bind,
+                data_dir: temp.path().join("data"),
+                web_dir: None,
+            },
+            Arc::new(EchoRuntimeService),
+        )
+        .await
+        .expect_err("non-loopback bind must be rejected");
+
+        assert!(matches!(error, ServerError::NonLoopbackBind(address) if address == bind));
+        assert!(
+            !temp.path().join("data").exists(),
+            "validation should happen before local state is created"
+        );
+    }
 }

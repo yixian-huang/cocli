@@ -21,4 +21,5 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 dirs = { workspace = true }
 cocli-api = { path = "../../crates/cocli-api" }
+cocli-reaper = { path = "../../crates/cocli-reaper" }
 cocli-server = { path = "../../crates/cocli-server" }

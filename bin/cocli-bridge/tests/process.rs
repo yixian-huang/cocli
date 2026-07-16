@@ -13,7 +13,12 @@ fn bridge_binary() -> &'static str {
 #[test]
 fn stdio_process_initializes_and_lists_tools() {
     let mut child = Command::new(bridge_binary())
-        .args(["--agent-id", "agent-smoke"])
+        .args([
+            "--agent-id",
+            "agent-smoke",
+            "--auth-token",
+            "process-test-token",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

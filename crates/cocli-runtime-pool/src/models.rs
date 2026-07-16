@@ -752,9 +752,36 @@ openai/gpt-5.4
                 loop {
                     match listener.accept() {
                         Ok((mut stream, _)) => {
-                            let mut buf = [0_u8; 4096];
-                            let n = stream.read(&mut buf).unwrap_or(0);
-                            let request = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+                            stream
+                                .set_read_timeout(Some(Duration::from_secs(1)))
+                                .unwrap();
+                            let mut request_bytes = Vec::new();
+                            let mut buf = [0_u8; 1024];
+                            while request_bytes.len() < 16 * 1024 {
+                                match stream.read(&mut buf) {
+                                    Ok(0) => break,
+                                    Ok(n) => {
+                                        request_bytes.extend_from_slice(&buf[..n]);
+                                        if request_bytes
+                                            .windows(4)
+                                            .any(|window| window == b"\r\n\r\n")
+                                        {
+                                            break;
+                                        }
+                                    }
+                                    Err(err)
+                                        if matches!(
+                                            err.kind(),
+                                            std::io::ErrorKind::WouldBlock
+                                                | std::io::ErrorKind::TimedOut
+                                        ) =>
+                                    {
+                                        break;
+                                    }
+                                    Err(_) => break,
+                                }
+                            }
+                            let request = String::from_utf8_lossy(&request_bytes).to_lowercase();
                             let response = format!(
                                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                                 body.len(),

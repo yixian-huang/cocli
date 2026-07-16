@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Plus, RefreshCw, Search, Trash2, RotateCw, Eye, Download, Loader2, AlertCircle } from 'lucide-react'
 import { Button, Input, Badge, EmptyState } from '@/components/ui'
 import { zoneSkillLibrary } from '@/api/client'
@@ -28,20 +28,34 @@ export function SkillsLibraryTab({ zoneId }: { zoneId: string }) {
   const [query, setQuery] = useState('')
   const [importOpen, setImportOpen] = useState(false)
   const [detailFor, setDetailFor] = useState<SkillLibraryEntry | null>(null)
+  const refreshGeneration = useRef(0)
 
-  const refresh = () => {
-    let cancelled = false
+  const refresh = useCallback(async () => {
+    const generation = ++refreshGeneration.current
     setLoading(true)
     setError(null)
-    zoneSkillLibrary
-      .list(zoneId)
-      .then((r) => { if (!cancelled) setEntries(r.entries || []) })
-      .catch((e) => { if (!cancelled) setError((e as Error)?.message || 'Failed to load library') })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
-  }
+    try {
+      const response = await zoneSkillLibrary.list(zoneId)
+      if (generation === refreshGeneration.current) {
+        setEntries(response.entries || [])
+      }
+    } catch (error) {
+      if (generation === refreshGeneration.current) {
+        setError((error as Error)?.message || 'Failed to load library')
+      }
+    } finally {
+      if (generation === refreshGeneration.current) {
+        setLoading(false)
+      }
+    }
+  }, [zoneId])
 
-  useEffect(refresh, [zoneId]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    void refresh()
+    return () => {
+      refreshGeneration.current += 1
+    }
+  }, [refresh])
 
   const filtered = useMemo(() => {
     if (!query.trim()) return entries
@@ -57,7 +71,7 @@ export function SkillsLibraryTab({ zoneId }: { zoneId: string }) {
   const onReinstall = async (id: string) => {
     try {
       await zoneSkillLibrary.reinstall(zoneId, id)
-      refresh()
+      await refresh()
     } catch (e) {
       setError((e as Error).message)
     }
@@ -67,7 +81,7 @@ export function SkillsLibraryTab({ zoneId }: { zoneId: string }) {
     if (!window.confirm('Delete this library entry? Installed agents will lose the skill on their next sync.')) return
     try {
       await zoneSkillLibrary.remove(zoneId, id)
-      refresh()
+      await refresh()
     } catch (e) {
       setError((e as Error).message)
     }

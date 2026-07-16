@@ -171,19 +171,28 @@ export function LocalApp() {
       return
     }
     let cancelled = false
-    setMessagesLoading(true)
-    localApi.listMessages(activeChannelId)
-      .then((nextMessages) => {
+    let refreshing = false
+    const refreshMessages = async (showLoading: boolean) => {
+      if (refreshing) return
+      refreshing = true
+      if (showLoading) setMessagesLoading(true)
+      try {
+        const nextMessages = await localApi.listMessages(activeChannelId)
         if (!cancelled) setMessages(nextMessages)
-      })
-      .catch((nextError: unknown) => {
+      } catch (nextError: unknown) {
         if (!cancelled) setError(errorMessage(nextError))
-      })
-      .finally(() => {
-        if (!cancelled) setMessagesLoading(false)
-      })
+      } finally {
+        refreshing = false
+        if (!cancelled && showLoading) setMessagesLoading(false)
+      }
+    }
+    void refreshMessages(true)
+    const interval = window.setInterval(() => {
+      void refreshMessages(false)
+    }, 2_000)
     return () => {
       cancelled = true
+      window.clearInterval(interval)
     }
   }, [activeChannelId])
 

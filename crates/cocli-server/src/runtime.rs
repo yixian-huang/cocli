@@ -16,10 +16,11 @@ use cocli_agent::state::Idle;
 use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
-    RuntimeError, RuntimeForkResult, RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo,
-    RuntimeKnowledgeProvider, RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot,
-    RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus,
-    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
+    RuntimeBridgeTokenProvider, RuntimeError, RuntimeForkResult, RuntimeHistoryEvent,
+    RuntimeHistorySink, RuntimeInfo, RuntimeKnowledgeProvider, RuntimeKnowledgeSnapshot,
+    RuntimeMetricsSnapshot, RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService,
+    RuntimeSessionStatus, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent,
+    RuntimeSkillFileEntry,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -96,6 +97,7 @@ pub struct LocalRuntimeService {
     recovery: Arc<Mutex<RecoveryStore>>,
     history_sink: OnceLock<Arc<dyn RuntimeHistorySink>>,
     knowledge_provider: OnceLock<Arc<dyn RuntimeKnowledgeProvider>>,
+    bridge_token_provider: OnceLock<Arc<dyn RuntimeBridgeTokenProvider>>,
 }
 
 #[derive(Clone)]
@@ -121,7 +123,7 @@ enum LocalSessionCommand {
         reply: oneshot::Sender<Result<String, RuntimeError>>,
     },
     Stop {
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
 }
 
@@ -146,6 +148,7 @@ struct LocalSessionContext {
     recovery: Arc<Mutex<RecoveryStore>>,
     history_sink: Option<Arc<dyn RuntimeHistorySink>>,
     knowledge_provider: Option<Arc<dyn RuntimeKnowledgeProvider>>,
+    bridge_token_provider: Option<Arc<dyn RuntimeBridgeTokenProvider>>,
 }
 
 #[derive(Default)]
@@ -167,6 +170,7 @@ struct RuntimeRestartContext<'a> {
     agent: &'a Agent,
     metrics: &'a AgentMetrics,
     knowledge_provider: Option<&'a Arc<dyn RuntimeKnowledgeProvider>>,
+    bridge_token_provider: Option<&'a Arc<dyn RuntimeBridgeTokenProvider>>,
 }
 
 impl LocalRuntimeService {
@@ -210,16 +214,19 @@ impl LocalRuntimeService {
             recovery: Arc::new(Mutex::new(RecoveryStore::new())),
             history_sink: OnceLock::new(),
             knowledge_provider: OnceLock::new(),
+            bridge_token_provider: OnceLock::new(),
         }
     }
 
     async fn spawn_session(&self, agent: &Agent) -> Result<LocalSessionHandle, RuntimeError> {
         let knowledge_provider = self.knowledge_provider.get().cloned();
+        let bridge_token_provider = self.bridge_token_provider.get().cloned();
         let running = start_running_actor(
             &self.registry,
             &self.config,
             agent,
             knowledge_provider.as_ref(),
+            bridge_token_provider.as_ref(),
         )
         .await?;
         let status = Arc::new(RwLock::new(runtime_status_for_running(agent, &running)));
@@ -233,11 +240,23 @@ impl LocalRuntimeService {
         let metrics = Arc::clone(&self.metrics);
         let recovery = Arc::clone(&self.recovery);
         let history_sink = self.history_sink.get().cloned();
-        record_session_start(&history_sink, &agent, &running).await;
+        if let Err(error) = record_session_start(&history_sink, &agent, &running).await {
+            if let Err(stop_error) = running.stop(true).await {
+                tracing::error!(
+                    agent_id = %agent.id,
+                    %stop_error,
+                    "failed to reap runtime after durable session-start failure"
+                );
+            }
+            return Err(error);
+        }
+        let agent_id = agent.id;
         metrics.inc_local_session_started();
         metrics.inc_local_active_sessions();
+        let cleanup_status = Arc::clone(&status_for_task);
+        let cleanup_metrics = Arc::clone(&metrics);
         tokio::spawn(async move {
-            run_local_session(
+            let result = run_local_session(
                 running,
                 command_rx,
                 LocalSessionContext {
@@ -250,9 +269,22 @@ impl LocalRuntimeService {
                     recovery,
                     history_sink,
                     knowledge_provider,
+                    bridge_token_provider,
                 },
             )
             .await;
+            if let Err(error) = result {
+                tracing::error!(%agent_id, %error, "local runtime session stopped after durable history failure");
+            }
+            let mut state = cleanup_status.write().await;
+            if state.active_turn {
+                cleanup_metrics.dec_local_active_turns();
+            }
+            cleanup_metrics.inc_local_session_stopped();
+            cleanup_metrics.dec_local_active_sessions();
+            state.running = false;
+            state.recovering = false;
+            state.active_turn = false;
         });
         Ok(LocalSessionHandle {
             command_tx,
@@ -365,6 +397,10 @@ impl RuntimeService for LocalRuntimeService {
         let _ = self.knowledge_provider.set(provider);
     }
 
+    fn set_bridge_token_provider(&self, provider: Arc<dyn RuntimeBridgeTokenProvider>) {
+        let _ = self.bridge_token_provider.set(provider);
+    }
+
     async fn list(&self) -> Vec<RuntimeInfo> {
         self.catalog.clone()
     }
@@ -379,17 +415,42 @@ impl RuntimeService for LocalRuntimeService {
     }
 
     async fn stop(&self, agent_id: Uuid) -> Result<(), RuntimeError> {
-        let Some(handle) = self.sessions.lock().await.remove(&agent_id) else {
+        let stop_lock = self.session_lock(agent_id).await;
+        let _guard = stop_lock.lock().await;
+        let Some(handle) = self.sessions.lock().await.get(&agent_id).cloned() else {
             return Ok(());
         };
         let (reply_tx, reply_rx) = oneshot::channel();
-        handle
+        if handle
             .command_tx
             .send(LocalSessionCommand::Stop { reply: reply_tx })
             .await
-            .map_err(|_| RuntimeError::NotFound("agent runtime session exited".to_owned()))?;
-        let _ = tokio::time::timeout(Duration::from_secs(5), reply_rx).await;
-        Ok(())
+            .is_err()
+        {
+            self.live_session(agent_id).await;
+            return Err(RuntimeError::NotFound(
+                "agent runtime session exited".to_owned(),
+            ));
+        }
+        let result = match tokio::time::timeout(stop_reply_timeout(), reply_rx).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(RuntimeError::NotFound(
+                "agent runtime stop reply channel closed".to_owned(),
+            )),
+            Err(_) => Err(RuntimeError::Delivery(
+                "agent runtime stop timed out".to_owned(),
+            )),
+        };
+        if result.is_ok() {
+            let mut sessions = self.sessions.lock().await;
+            if sessions
+                .get(&agent_id)
+                .is_some_and(|registered| registered.command_tx.same_channel(&handle.command_tx))
+            {
+                sessions.remove(&agent_id);
+            }
+        }
+        result
     }
 
     async fn cancel(&self, agent_id: Uuid) -> Result<(), RuntimeError> {
@@ -578,6 +639,14 @@ impl RuntimeService for LocalRuntimeService {
 const MEMORY_MANIFEST_PATH: &str = "memory/.cocli-memory-manifest.json";
 const MAX_PROMPT_MEMORY_INDEX_CHARS: usize = 16 * 1024;
 
+fn stop_reply_timeout() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(100)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 async fn materialize_runtime_knowledge(
     config: &LocalRuntimeConfig,
     agent: &Agent,
@@ -758,6 +827,7 @@ async fn start_running_actor(
     config: &LocalRuntimeConfig,
     agent: &Agent,
     knowledge_provider: Option<&Arc<dyn RuntimeKnowledgeProvider>>,
+    bridge_token_provider: Option<&Arc<dyn RuntimeBridgeTokenProvider>>,
 ) -> Result<AgentActor<cocli_agent::state::Running>, RuntimeError> {
     let (_command_tx, command_rx) = mpsc::channel(4);
     let (outbound_tx, _outbound_rx) = mpsc::channel(16);
@@ -795,12 +865,16 @@ async fn start_running_actor(
     });
     let initial_prompt =
         compose_session_bootstrap_prompt(&system_prompt, LOCAL_INITIALIZATION_PROMPT);
+    let auth_token = match bridge_token_provider {
+        Some(provider) => provider.token(agent.id).await?,
+        None => config.auth_token.clone(),
+    };
     let start = actor.start(StartCfg {
         registry: Arc::clone(registry),
         runtime_name: agent.runtime.clone(),
         workspace_root: config.workspace_root.clone(),
         server_url: config.server_url.clone(),
-        auth_token: config.auth_token.clone(),
+        auth_token,
         channel_id: agent.channel_id,
         channel_name: "local".to_owned(),
         model: model.to_owned(),
@@ -816,7 +890,7 @@ async fn start_running_actor(
         .map_err(|error| RuntimeError::Delivery(error.to_string()))?;
 
     if let Err(error) = wait_for_turn(&mut running, config.turn_timeout, false).await {
-        let _stopping = running.stop(true);
+        let _stopping = running.stop(true).await;
         return Err(error);
     }
     Ok(running)
@@ -858,6 +932,7 @@ async fn restart_with_watchdog(
         agent,
         metrics,
         knowledge_provider,
+        bridge_token_provider,
     } = context;
     let agent_id = agent.id.to_string();
     let mut watchdog = WatchdogStore::new();
@@ -897,7 +972,15 @@ async fn restart_with_watchdog(
             }
         }
 
-        match start_running_actor(registry, config, agent, knowledge_provider).await {
+        match start_running_actor(
+            registry,
+            config,
+            agent,
+            knowledge_provider,
+            bridge_token_provider,
+        )
+        .await
+        {
             Ok(running) => {
                 metrics.inc_local_watchdog_restart();
                 metrics.inc_local_session_started();
@@ -935,6 +1018,7 @@ async fn recover_from_quota(
         agent,
         metrics,
         knowledge_provider,
+        bridge_token_provider,
     } = context;
     let agent_id = agent.id.to_string();
     let mut delay = expected_at
@@ -965,7 +1049,15 @@ async fn recover_from_quota(
         }
 
         metrics.inc_recovery_probe_scheduled();
-        match start_running_actor(registry, config, agent, knowledge_provider).await {
+        match start_running_actor(
+            registry,
+            config,
+            agent,
+            knowledge_provider,
+            bridge_token_provider,
+        )
+        .await
+        {
             Ok(running) => {
                 let mut recovery = recovery.lock().await;
                 recovery.complete_probe(&agent_id, StdInstant::now(), ProbeResult::Recovered);
@@ -1020,7 +1112,7 @@ fn reject_command_during_recovery(command: Option<LocalSessionCommand>) -> bool 
             false
         }
         Some(LocalSessionCommand::Stop { reply }) => {
-            let _ = reply.send(());
+            let _ = reply.send(Ok(()));
             true
         }
         None => true,
@@ -1057,20 +1149,23 @@ fn expected_recovery_time(resets_at: i64) -> (i64, Option<StdInstant>) {
     (expected_ms, Some(expected_at))
 }
 
-async fn record_history(sink: &Option<Arc<dyn RuntimeHistorySink>>, event: RuntimeHistoryEvent) {
+async fn record_history(
+    sink: &Option<Arc<dyn RuntimeHistorySink>>,
+    event: RuntimeHistoryEvent,
+) -> Result<(), RuntimeError> {
     let Some(sink) = sink else {
-        return;
+        return Ok(());
     };
-    if let Err(error) = sink.record(event).await {
-        tracing::warn!(%error, "failed to persist local runtime history");
-    }
+    sink.record(event)
+        .await
+        .map_err(|error| RuntimeError::Delivery(format!("persist local runtime history: {error}")))
 }
 
 async fn record_session_start(
     sink: &Option<Arc<dyn RuntimeHistorySink>>,
     agent: &Agent,
     running: &AgentActor<cocli_agent::state::Running>,
-) {
+) -> Result<(), RuntimeError> {
     record_history(
         sink,
         RuntimeHistoryEvent::SessionStarted {
@@ -1081,7 +1176,7 @@ async fn record_session_start(
             started_at: chrono::Utc::now(),
         },
     )
-    .await;
+    .await
 }
 
 async fn record_session_end(
@@ -1090,7 +1185,7 @@ async fn record_session_end(
     running: &AgentActor<cocli_agent::state::Running>,
     totals: &SessionTotals,
     end_reason: &str,
-) {
+) -> Result<(), RuntimeError> {
     record_history(
         sink,
         RuntimeHistoryEvent::SessionEnded {
@@ -1105,7 +1200,7 @@ async fn record_session_end(
             ended_at: chrono::Utc::now(),
         },
     )
-    .await;
+    .await
 }
 
 fn trajectory_entry(kind: &str, fields: serde_json::Value) -> serde_json::Value {
@@ -1147,7 +1242,7 @@ async fn record_aborted_turn(
     totals: &mut SessionTotals,
     turn: &mut ActiveReply,
     reason: &str,
-) {
+) -> Result<(), RuntimeError> {
     totals.turn_count = totals.turn_count.saturating_add(1);
     turn.entries.push(trajectory_entry(
         "error",
@@ -1171,14 +1266,14 @@ async fn record_aborted_turn(
             entries: serde_json::Value::Array(turn.entries.clone()),
         },
     )
-    .await;
+    .await
 }
 
 async fn run_local_session(
     mut running: AgentActor<cocli_agent::state::Running>,
     mut commands: mpsc::Receiver<LocalSessionCommand>,
     context: LocalSessionContext,
-) {
+) -> Result<(), RuntimeError> {
     let LocalSessionContext {
         status,
         started_at,
@@ -1189,12 +1284,35 @@ async fn run_local_session(
         recovery,
         history_sink,
         knowledge_provider,
+        bridge_token_provider,
     } = context;
     let turn_timeout = config.turn_timeout;
     let mut active: Option<ActiveReply> = None;
     let mut event_rx_live = true;
     let mut quota_recovery: Option<QuotaRecovery> = None;
     let mut totals = SessionTotals::default();
+    macro_rules! persist_history {
+        ($operation:expr) => {
+            match $operation.await {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Some(turn) = active.as_mut() {
+                        if let Some(reply) = turn.reply.take() {
+                            let _ = reply.send(Err(RuntimeError::Delivery(error.to_string())));
+                        }
+                    }
+                    if let Err(stop_error) = running.stop(true).await {
+                        tracing::error!(
+                            agent_id = %agent.id,
+                            %stop_error,
+                            "failed to reap runtime after durable history failure"
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        };
+    }
     loop {
         let deadline = active
             .as_ref()
@@ -1279,34 +1397,33 @@ async fn run_local_session(
                         })
                     };
                     if let Ok(session_id) = &result {
-                        record_session_end(
+                        persist_history!(record_session_end(
                             &history_sink,
                             &agent,
                             &running,
                             &totals,
                             "context_reset",
-                        )
-                        .await;
+                        ));
                         running.state.session_id.clone_from(session_id);
                         running.state.launch_id = Uuid::new_v4().to_string();
                         running.state.turn_count = 0;
                         totals = SessionTotals::default();
-                        record_session_start(&history_sink, &agent, &running).await;
+                        persist_history!(record_session_start(&history_sink, &agent, &running));
                         status.write().await.session_id.clone_from(session_id);
                     }
                     let _ = reply.send(result);
                 }
                 Some(LocalSessionCommand::Stop { reply }) => {
+                    let had_active_turn = active.is_some();
                     if let Some(turn) = active.as_mut() {
-                        record_aborted_turn(
+                        persist_history!(record_aborted_turn(
                             &history_sink,
                             &agent,
                             &running,
                             &mut totals,
                             turn,
                             "agent runtime stopped during active turn",
-                        )
-                        .await;
+                        ));
                         if let Some(reply) = turn.reply.take() {
                             let _ = reply.send(Err(RuntimeError::Delivery(
                                 "agent runtime stopped during active turn".to_owned(),
@@ -1314,28 +1431,48 @@ async fn run_local_session(
                         }
                         metrics.inc_local_turn_cancelled();
                     }
-                    record_session_end(&history_sink, &agent, &running, &totals, "manual_stop").await;
-                    let _stopping = running.stop(true);
+                    persist_history!(record_session_end(
+                        &history_sink,
+                        &agent,
+                        &running,
+                        &totals,
+                        "manual_stop",
+                    ));
+                    running.stop(true).await.map_err(RuntimeError::Delivery)?;
+                    if had_active_turn {
+                        active.take();
+                        metrics.dec_local_active_turns();
+                    }
                     let mut state = status.write().await;
                     state.running = false;
                     state.active_turn = false;
-                    let _ = reply.send(());
+                    let _ = reply.send(Ok(()));
                     break;
                 }
                 None => {
+                    let had_active_turn = active.is_some();
                     if let Some(turn) = active.as_mut() {
-                        record_aborted_turn(
+                        persist_history!(record_aborted_turn(
                             &history_sink,
                             &agent,
                             &running,
                             &mut totals,
                             turn,
                             "runtime command channel closed during active turn",
-                        )
-                        .await;
+                        ));
                     }
-                    record_session_end(&history_sink, &agent, &running, &totals, "shutdown").await;
-                    let _stopping = running.stop(true);
+                    persist_history!(record_session_end(
+                        &history_sink,
+                        &agent,
+                        &running,
+                        &totals,
+                        "shutdown",
+                    ));
+                    running.stop(true).await.map_err(RuntimeError::Delivery)?;
+                    if had_active_turn {
+                        active.take();
+                        metrics.dec_local_active_turns();
+                    }
                     let mut state = status.write().await;
                     state.running = false;
                     state.active_turn = false;
@@ -1378,7 +1515,7 @@ async fn run_local_session(
                     if let Some(turn) = active.as_mut() {
                         turn.entries.push(tool_call_entry(id, name, input));
                     }
-                    record_history(
+                    persist_history!(record_history(
                         &history_sink,
                         RuntimeHistoryEvent::Activity {
                             agent_id: agent.id,
@@ -1389,8 +1526,7 @@ async fn run_local_session(
                             trajectory: vec![tool_name],
                             created_at: chrono::Utc::now(),
                         },
-                    )
-                    .await;
+                    ));
                 }
                 Some(DriverEvent::ToolResult { id, output, error })
                 | Some(DriverEvent::ToolDone {
@@ -1408,7 +1544,7 @@ async fn run_local_session(
                             }),
                         ));
                     }
-                    record_history(
+                    persist_history!(record_history(
                         &history_sink,
                         RuntimeHistoryEvent::Activity {
                             agent_id: agent.id,
@@ -1419,8 +1555,7 @@ async fn run_local_session(
                             trajectory: vec!["tool_result".to_owned()],
                             created_at: chrono::Utc::now(),
                         },
-                    )
-                    .await;
+                    ));
                 }
                 Some(DriverEvent::RateLimit {
                     limit_type,
@@ -1430,7 +1565,7 @@ async fn run_local_session(
                     ..
                 }) => {
                     if rate_limit_is_limited(&limit_status, overage_status.as_deref()) {
-                        record_history(
+                        persist_history!(record_history(
                             &history_sink,
                             RuntimeHistoryEvent::Activity {
                                 agent_id: agent.id,
@@ -1443,8 +1578,7 @@ async fn run_local_session(
                                 trajectory: Vec::new(),
                                 created_at: chrono::Utc::now(),
                             },
-                        )
-                        .await;
+                        ));
                         let provider = running.state.driver.name().trim().to_owned();
                         let reason = terminal_stop_reason(&provider);
                         let (expected_recovery_at_ms, expected_at) =
@@ -1493,7 +1627,7 @@ async fn run_local_session(
                             metrics.inc_local_turn_completed();
                         }
                     }
-                    if let Some(mut turn) = active.take() {
+                    if let Some(turn) = active.as_mut() {
                         let ended_at = chrono::Utc::now();
                         let context_window = if context_window_tokens > 0 {
                             context_window_tokens
@@ -1520,7 +1654,7 @@ async fn run_local_session(
                             "status",
                             serde_json::json!({"text": format!("{turn_status:?}")}),
                         ));
-                        record_history(
+                        persist_history!(record_history(
                             &history_sink,
                             RuntimeHistoryEvent::TurnCompleted {
                                 agent_id: agent.id,
@@ -1537,9 +1671,8 @@ async fn run_local_session(
                                 context_window: context_window.min(i64::MAX as u64) as i64,
                                 entries: serde_json::Value::Array(turn.entries.clone()),
                             },
-                        )
-                        .await;
-                        record_history(
+                        ));
+                        persist_history!(record_history(
                             &history_sink,
                             RuntimeHistoryEvent::Activity {
                                 agent_id: agent.id,
@@ -1550,8 +1683,8 @@ async fn run_local_session(
                                 trajectory: Vec::new(),
                                 created_at: ended_at,
                             },
-                        )
-                        .await;
+                        ));
+                        let mut turn = active.take().expect("active turn remains after persistence");
                         if let Some(reply) = turn.reply.take() {
                             let result = completed_turn_result(
                                 turn_status,
@@ -1564,15 +1697,14 @@ async fn run_local_session(
                     metrics.dec_local_active_turns();
                     status.write().await.active_turn = false;
                     if let Some(quota) = quota_recovery.take() {
-                        record_session_end(
+                        persist_history!(record_session_end(
                             &history_sink,
                             &agent,
                             &running,
                             &totals,
                             "rate_limit",
-                        )
-                        .await;
-                        let _stopping = running.stop(true);
+                        ));
+                        running.stop(true).await.map_err(RuntimeError::Delivery)?;
                         {
                             let mut state = status.write().await;
                             state.running = false;
@@ -1585,6 +1717,7 @@ async fn run_local_session(
                                 agent: &agent,
                                 metrics: &metrics,
                                 knowledge_provider: knowledge_provider.as_ref(),
+                                bridge_token_provider: bridge_token_provider.as_ref(),
                             },
                             &mut commands,
                             &recovery,
@@ -1593,7 +1726,11 @@ async fn run_local_session(
                             Some(restarted) => {
                                 running = restarted;
                                 totals = SessionTotals::default();
-                                record_session_start(&history_sink, &agent, &running).await;
+                                persist_history!(record_session_start(
+                                    &history_sink,
+                                    &agent,
+                                    &running,
+                                ));
                                 *status.write().await =
                                     runtime_status_for_running(&agent, &running);
                                 *started_at.write().await = Instant::now();
@@ -1612,7 +1749,7 @@ async fn run_local_session(
                     }
                 }
                 Some(DriverEvent::CompactStarted) => {
-                    record_history(
+                    persist_history!(record_history(
                         &history_sink,
                         RuntimeHistoryEvent::Activity {
                             agent_id: agent.id,
@@ -1623,11 +1760,10 @@ async fn run_local_session(
                             trajectory: Vec::new(),
                             created_at: chrono::Utc::now(),
                         },
-                    )
-                    .await;
+                    ));
                 }
                 Some(DriverEvent::CompactFinished) => {
-                    record_history(
+                    persist_history!(record_history(
                         &history_sink,
                         RuntimeHistoryEvent::Activity {
                             agent_id: agent.id,
@@ -1638,39 +1774,38 @@ async fn run_local_session(
                             trajectory: Vec::new(),
                             created_at: chrono::Utc::now(),
                         },
-                    )
-                    .await;
+                    ));
                 }
                 Some(_) => {}
                 None => {
                     if let Some(quota) = quota_recovery.take() {
-                        if let Some(mut turn) = active.take() {
+                        if let Some(turn) = active.as_mut() {
                             metrics.inc_local_turn_failed();
                             metrics.dec_local_active_turns();
                             let error = turn.last_error.clone().unwrap_or_else(|| {
                                 "runtime exited while rate limited".to_owned()
                             });
-                            record_aborted_turn(
+                            persist_history!(record_aborted_turn(
                                 &history_sink,
                                 &agent,
                                 &running,
                                 &mut totals,
-                                &mut turn,
+                                turn,
                                 &error,
-                            )
-                            .await;
+                            ));
+                            let mut turn =
+                                active.take().expect("active turn remains after persistence");
                             if let Some(reply) = turn.reply.take() {
                                 let _ = reply.send(Err(RuntimeError::Delivery(error)));
                             }
                         }
-                        record_session_end(
+                        persist_history!(record_session_end(
                             &history_sink,
                             &agent,
                             &running,
                             &totals,
                             "rate_limit",
-                        )
-                        .await;
+                        ));
                         {
                             let mut state = status.write().await;
                             state.running = false;
@@ -1684,6 +1819,7 @@ async fn run_local_session(
                                 agent: &agent,
                                 metrics: &metrics,
                                 knowledge_provider: knowledge_provider.as_ref(),
+                                bridge_token_provider: bridge_token_provider.as_ref(),
                             },
                             &mut commands,
                             &recovery,
@@ -1692,7 +1828,11 @@ async fn run_local_session(
                             Some(restarted) => {
                                 running = restarted;
                                 totals = SessionTotals::default();
-                                record_session_start(&history_sink, &agent, &running).await;
+                                persist_history!(record_session_start(
+                                    &history_sink,
+                                    &agent,
+                                    &running,
+                                ));
                                 *status.write().await =
                                     runtime_status_for_running(&agent, &running);
                                 *started_at.write().await = Instant::now();
@@ -1706,22 +1846,23 @@ async fn run_local_session(
                         event_rx_live = false;
                         continue;
                     }
-                    if let Some(mut turn) = active.take() {
+                    if let Some(turn) = active.as_mut() {
                         metrics.inc_local_turn_failed();
                         metrics.dec_local_active_turns();
                         let error = turn
                             .last_error
                             .clone()
                             .unwrap_or_else(|| "runtime exited before completing the turn".to_owned());
-                        record_aborted_turn(
+                        persist_history!(record_aborted_turn(
                             &history_sink,
                             &agent,
                             &running,
                             &mut totals,
-                            &mut turn,
+                            turn,
                             &error,
-                        )
-                        .await;
+                        ));
+                        let mut turn =
+                            active.take().expect("active turn remains after persistence");
                         if let Some(reply) = turn.reply.take() {
                             let _ = reply.send(Err(RuntimeError::Delivery(error)));
                         }
@@ -1732,7 +1873,13 @@ async fn run_local_session(
                         state.recovering = true;
                         state.active_turn = false;
                     }
-                    record_session_end(&history_sink, &agent, &running, &totals, "error").await;
+                    persist_history!(record_session_end(
+                        &history_sink,
+                        &agent,
+                        &running,
+                        &totals,
+                        "error",
+                    ));
                     match restart_with_watchdog(
                         RuntimeRestartContext {
                             registry: &registry,
@@ -1740,13 +1887,18 @@ async fn run_local_session(
                             agent: &agent,
                             metrics: &metrics,
                             knowledge_provider: knowledge_provider.as_ref(),
+                            bridge_token_provider: bridge_token_provider.as_ref(),
                         },
                         &mut commands,
                     ).await {
                         Some(restarted) => {
                             running = restarted;
                             totals = SessionTotals::default();
-                            record_session_start(&history_sink, &agent, &running).await;
+                            persist_history!(record_session_start(
+                                &history_sink,
+                                &agent,
+                                &running,
+                            ));
                             *status.write().await = runtime_status_for_running(&agent, &running);
                             *started_at.write().await = Instant::now();
                             event_rx_live = true;
@@ -1757,47 +1909,55 @@ async fn run_local_session(
                 }
             },
             _ = tokio::time::sleep_until(deadline), if deadline_live => {
+                metrics.inc_local_turn_timed_out();
                 if let Some(turn) = active.as_mut() {
-                    metrics.inc_local_turn_timed_out();
                     turn.deadline = None;
+                }
+                let cancel_error = running.turn_cancel().await.err();
+                if let Some(error) = &cancel_error {
+                    tracing::warn!(
+                        agent_id = %running.id,
+                        %error,
+                        "failed to request cancellation for timed-out turn"
+                    );
+                }
+                let reason = cancel_error
+                    .as_deref()
+                    .map_or("runtime turn timed out", |_| {
+                        "runtime turn timed out and cancellation failed"
+                    });
+                if let Some(turn) = active.as_mut() {
+                    persist_history!(record_aborted_turn(
+                        &history_sink,
+                        &agent,
+                        &running,
+                        &mut totals,
+                        turn,
+                        reason,
+                    ));
+                }
+                persist_history!(record_session_end(
+                    &history_sink,
+                    &agent,
+                    &running,
+                    &totals,
+                    "timeout",
+                ));
+                running.stop(true).await.map_err(RuntimeError::Delivery)?;
+                if let Some(mut turn) = active.take() {
                     if let Some(reply) = turn.reply.take() {
-                        let _ = reply.send(Err(RuntimeError::Delivery(
-                            "runtime turn timed out".to_owned(),
-                        )));
+                        let _ = reply.send(Err(RuntimeError::Delivery(reason.to_owned())));
                     }
+                    metrics.dec_local_active_turns();
                 }
-                if let Err(error) = running.turn_cancel().await {
-                    tracing::warn!(agent_id = %running.id, %error, "failed to cancel timed-out turn");
-                    if let Some(turn) = active.as_mut() {
-                        record_aborted_turn(
-                            &history_sink,
-                            &agent,
-                            &running,
-                            &mut totals,
-                            turn,
-                            "runtime turn timed out and cancellation failed",
-                        )
-                        .await;
-                    }
-                    record_session_end(&history_sink, &agent, &running, &totals, "timeout").await;
-                    let _stopping = running.stop(true);
-                    let mut state = status.write().await;
-                    state.running = false;
-                    state.active_turn = false;
-                    break;
-                }
+                let mut state = status.write().await;
+                state.running = false;
+                state.active_turn = false;
+                break;
             }
         }
     }
-    if active.is_some() {
-        metrics.dec_local_active_turns();
-    }
-    metrics.inc_local_session_stopped();
-    metrics.dec_local_active_sessions();
-    let mut state = status.write().await;
-    state.running = false;
-    state.recovering = false;
-    state.active_turn = false;
+    Ok(())
 }
 
 async fn update_context_status(
@@ -2011,6 +2171,47 @@ mod tests {
     }
 
     struct FakeDriver;
+
+    struct FailingHistorySink;
+
+    struct BlockingSessionEndSink {
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    struct FailingTurnHistorySink;
+
+    #[async_trait]
+    impl RuntimeHistorySink for FailingHistorySink {
+        async fn record(&self, _event: RuntimeHistoryEvent) -> Result<(), cocli_store::StoreError> {
+            Err(cocli_store::StoreError::InvalidValue {
+                kind: "history",
+                value: "simulated failure".to_owned(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeHistorySink for BlockingSessionEndSink {
+        async fn record(&self, event: RuntimeHistoryEvent) -> Result<(), cocli_store::StoreError> {
+            if matches!(event, RuntimeHistoryEvent::SessionEnded { .. }) {
+                self.release.notified().await;
+            }
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeHistorySink for FailingTurnHistorySink {
+        async fn record(&self, event: RuntimeHistoryEvent) -> Result<(), cocli_store::StoreError> {
+            if matches!(event, RuntimeHistoryEvent::SessionStarted { .. }) {
+                return Ok(());
+            }
+            Err(cocli_store::StoreError::InvalidValue {
+                kind: "history",
+                value: "simulated turn failure".to_owned(),
+            })
+        }
+    }
 
     #[async_trait]
     impl Driver for FakeDriver {
@@ -3034,6 +3235,222 @@ mod tests {
             .await
             .expect("activity should list");
         assert!(activity.iter().any(|entry| entry.activity == "online"));
+    }
+
+    #[tokio::test]
+    async fn runtime_start_fails_when_session_history_is_not_durable() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(FakeDriver));
+        let catalog = registry.discover(
+            &[RuntimeSpec::new("fake", "/bin/sh")
+                .with_models(vec![RuntimeModel::new("test-model", "Test Model")])],
+            &SystemRuntimeProbe::with_path(None),
+        );
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            catalog,
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        service.set_history_sink(Arc::new(FailingHistorySink));
+
+        let error = service
+            .start(&test_agent("fake"))
+            .await
+            .expect_err("history failure must abort runtime start");
+
+        assert!(matches!(
+            error,
+            RuntimeError::Delivery(message)
+                if message.contains("persist local runtime history")
+        ));
+    }
+
+    #[tokio::test]
+    async fn stop_timeout_retains_session_ownership_until_shutdown_finishes() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(FakeDriver));
+        let catalog = registry.discover(
+            &[RuntimeSpec::new("fake", "/bin/sh")
+                .with_models(vec![RuntimeModel::new("test-model", "Test Model")])],
+            &SystemRuntimeProbe::with_path(None),
+        );
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            catalog,
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        let release = Arc::new(tokio::sync::Notify::new());
+        service.set_history_sink(Arc::new(BlockingSessionEndSink {
+            release: Arc::clone(&release),
+        }));
+        let agent = test_agent("fake");
+        service.start(&agent).await.expect("runtime starts");
+
+        let error = service
+            .stop(agent.id)
+            .await
+            .expect_err("blocked durable session end should time out");
+        assert!(error.to_string().contains("timed out"));
+        assert!(
+            service
+                .status(&agent)
+                .await
+                .expect("status while stop is pending")
+                .running,
+            "timed-out stop must retain the live session handle"
+        );
+
+        release.notify_waiters();
+        for _ in 0..100 {
+            if !service
+                .status(&agent)
+                .await
+                .expect("status after release")
+                .running
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !service
+                .status(&agent)
+                .await
+                .expect("runtime should finish stopping")
+                .running
+        );
+        service
+            .stop(agent.id)
+            .await
+            .expect("repeated stop after completion is idempotent");
+    }
+
+    #[tokio::test]
+    async fn stopping_an_active_turn_clears_the_active_turn_metric() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(ControllableDriver {
+            spawn_count: Arc::new(AtomicUsize::new(0)),
+            fork_count: Arc::new(AtomicUsize::new(0)),
+            steers: Arc::new(StdMutex::new(Vec::new())),
+            native_fork: true,
+        }));
+        let service = Arc::new(LocalRuntimeService::from_catalog(
+            registry,
+            RuntimeCatalog::default(),
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
+            },
+        ));
+        let agent = test_agent("controllable");
+        let reply_service = Arc::clone(&service);
+        let reply_agent = agent.clone();
+        let reply = tokio::spawn(async move {
+            reply_service
+                .reply(&reply_agent, &test_message(&reply_agent, 1, "stop me"))
+                .await
+        });
+
+        for _ in 0..100 {
+            if service
+                .status(&agent)
+                .await
+                .expect("runtime status")
+                .active_turn
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            service
+                .status(&agent)
+                .await
+                .expect("active runtime status")
+                .active_turn
+        );
+
+        service.stop(agent.id).await.expect("runtime should stop");
+        assert!(reply
+            .await
+            .expect("reply task should join")
+            .expect_err("active reply should be aborted")
+            .to_string()
+            .contains("stopped during active turn"));
+        assert_eq!(
+            service.metrics().await.gauges["local_agent_active_turns"],
+            0.0
+        );
+    }
+
+    #[tokio::test]
+    async fn turn_history_failure_replies_with_error_and_reaps_runtime() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(FakeDriver));
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            RuntimeCatalog::default(),
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        service.set_history_sink(Arc::new(FailingTurnHistorySink));
+        let agent = test_agent("fake");
+
+        let error = service
+            .reply(&agent, &test_message(&agent, 1, "persist this"))
+            .await
+            .expect_err("turn must fail when durable history fails");
+        assert!(error.to_string().contains("simulated turn failure"));
+        for _ in 0..100 {
+            if !service
+                .status(&agent)
+                .await
+                .expect("runtime status")
+                .running
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !service
+                .status(&agent)
+                .await
+                .expect("runtime should be reaped")
+                .running
+        );
     }
 
     #[test]

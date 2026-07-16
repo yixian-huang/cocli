@@ -13,6 +13,36 @@ use cocli_driver_core::types::{
     SpawnConfig,
 };
 use cocli_driver_core::{Driver, DriverError, DriverEvent};
+use tokio::io::{AsyncBufReadExt, BufReader};
+
+fn spawn_stdin_capture_child() -> (
+    tokio::process::Child,
+    tokio::process::ChildStdin,
+    BufReader<tokio::process::ChildStdout>,
+) {
+    let mut child = tokio::process::Command::new("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("spawn stdin capture child");
+    let stdin = child.stdin.take().expect("child stdin");
+    let stdout = child.stdout.take().expect("child stdout");
+    (child, stdin, BufReader::new(stdout))
+}
+
+async fn read_captured_json_line(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+) -> serde_json::Value {
+    let mut written = String::new();
+    tokio::time::timeout(Duration::from_secs(1), reader.read_line(&mut written))
+        .await
+        .expect("stdin capture timed out")
+        .expect("read stdin capture");
+    assert!(!written.trim().is_empty(), "expected stdin write payload");
+    serde_json::from_str(written.trim()).expect("stdin capture should be valid JSON")
+}
 
 fn factory_for_test() -> CodexDriver {
     CodexDriver::new(
@@ -383,23 +413,12 @@ fn fork_thread_writes_request_waits_for_response_and_updates_thread() {
         let d = Arc::new(process_driver_for_test());
         d.set_state_for_test("thread-old", "turn-active");
 
-        let capture = tempfile::NamedTempFile::new().unwrap();
-        let capture_path = capture.path().to_path_buf();
-        let mut child = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(format!("cat > {}", capture_path.display()))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn stdin capture child");
-        let stdin = child.stdin.take().expect("child stdin");
+        let (mut child, stdin, mut capture) = spawn_stdin_capture_child();
         d.as_stdin_binder().unwrap().bind_stdin(stdin);
 
         let fork_driver = d.clone();
         let join = tokio::spawn(async move { fork_driver.fork_thread("thread-old").await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let fork_json = read_captured_json_line(&mut capture).await;
         let events =
             d.parse_event(r#"{"jsonrpc":"2.0","id":3,"result":{"thread":{"id":"thread-new"}}}"#);
         assert!(
@@ -418,8 +437,6 @@ fn fork_thread_writes_request_waits_for_response_and_updates_thread() {
 
         let _ = child.kill().await;
         let _ = child.wait().await;
-        let written = std::fs::read_to_string(capture_path).unwrap();
-        let fork_json: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
         assert_eq!(fork_json["jsonrpc"], "2.0");
         assert_eq!(fork_json["id"], 3);
         assert_eq!(fork_json["method"], "thread/fork");
@@ -959,23 +976,12 @@ fn fork_thread_clears_rejected_steer_replay_queue() {
         let err_line = r#"{"jsonrpc":"2.0","method":"error","params":{"willRetry":false,"error":{"message":"not steerable","codexErrorInfo":{"activeTurnNotSteerable":{"turnKind":"review"}}}}}"#;
         let _ = d.parse_event(err_line);
 
-        let capture = tempfile::NamedTempFile::new().unwrap();
-        let capture_path = capture.path().to_path_buf();
-        let mut child = tokio::process::Command::new("bash")
-            .arg("-c")
-            .arg(format!("cat > {}", capture_path.display()))
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn stdin capture child");
-        let stdin = child.stdin.take().expect("child stdin");
+        let (mut child, stdin, mut capture) = spawn_stdin_capture_child();
         d.as_stdin_binder().unwrap().bind_stdin(stdin);
 
         let fork_driver = d.clone();
         let join = tokio::spawn(async move { fork_driver.fork_thread("thread-old").await });
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = read_captured_json_line(&mut capture).await;
         // steer used id=3; fork uses id=4.
         let _ = d.parse_event(
             r#"{"jsonrpc":"2.0","id":4,"result":{"thread":{"id":"thread-new"}}}"#,
@@ -1109,18 +1115,7 @@ async fn interrupt_turn_writes_turn_interrupt_json_rpc() {
     let d = Arc::new(process_driver_for_test());
     d.set_state_for_test("thread-test", "turn-42");
 
-    let capture = tempfile::NamedTempFile::new().unwrap();
-    let capture_path = capture.path().to_path_buf();
-    let mut child = tokio::process::Command::new("bash")
-        .arg("-c")
-        .arg(format!("cat > {}", capture_path.display()))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn stdin capture child");
-    let stdin = child.stdin.take().expect("child stdin");
+    let (mut child, stdin, mut capture) = spawn_stdin_capture_child();
     d.as_stdin_binder().unwrap().bind_stdin(stdin);
 
     d.as_turn_interruptor()
@@ -1128,11 +1123,8 @@ async fn interrupt_turn_writes_turn_interrupt_json_rpc() {
         .interrupt_turn()
         .await
         .expect("interrupt succeeds");
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let written = std::fs::read_to_string(&capture_path).unwrap();
-    assert!(!written.trim().is_empty(), "expected stdin write payload");
-    let v: serde_json::Value = serde_json::from_str(written.trim()).unwrap();
+    let v = read_captured_json_line(&mut capture).await;
     assert_eq!(v["method"], "turn/interrupt");
     assert_eq!(v["params"]["threadId"], "thread-test");
     assert_eq!(v["params"]["turnId"], "turn-42");

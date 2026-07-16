@@ -34,6 +34,17 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     tracing_subscriber::fmt::init();
 
+    let reap = cocli_reaper::reap_orphaned_agents()
+        .context("failed to reconcile orphaned local agent processes")?;
+    tracing::info!(
+        scanned = reap.scanned,
+        reaped = reap.reaped,
+        cleaned_stale = reap.cleaned_stale,
+        skipped_foreign = reap.skipped_foreign,
+        skipped_unknown_ppid = reap.skipped_unknown_ppid,
+        "reconciled local agent process ownership"
+    );
+
     let data_dir = args.data_dir.map(Ok).unwrap_or_else(default_data_dir)?;
     let web_dir = args.web_dir.or_else(default_web_dir);
     let runtime: Arc<dyn RuntimeService> = if args.fake_runtime {

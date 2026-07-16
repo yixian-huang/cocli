@@ -29,6 +29,13 @@ export default defineConfig([
       'react-hooks/set-state-in-effect': 'off',
     },
   },
+  {
+    files: ['**/*.test.{ts,tsx}', '**/__tests__/**/*.{ts,tsx}'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      'no-empty': ['error', { allowEmptyCatch: true }],
+    },
+  },
   // Enforce platform-agnostic purity in shared/ (no react, react-dom, react-native)
   {
     basePath: repoRoot,

@@ -9,11 +9,13 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
-    router, router_with_delivery_config, DeliveryConfig, RuntimeError, RuntimeInfo, RuntimeService,
-    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
+    reconcile_skill_state, router, router_with_delivery_config, DeliveryConfig, RuntimeError,
+    RuntimeInfo, RuntimeService, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent,
+    RuntimeSkillFileEntry,
 };
 use cocli_store::{
-    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, SkillLibraryFile, Store,
+    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillLibrary, SkillLibraryFile,
+    Store,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -21,6 +23,9 @@ use tower::ServiceExt;
 
 #[derive(Debug)]
 struct FakeRuntime;
+
+#[derive(Debug)]
+struct FailingStartRuntime;
 
 #[async_trait]
 impl RuntimeService for FakeRuntime {
@@ -41,9 +46,31 @@ impl RuntimeService for FakeRuntime {
     }
 }
 
+#[async_trait]
+impl RuntimeService for FailingStartRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, _message: &Message) -> Result<String, RuntimeError> {
+        Err(RuntimeError::Delivery(
+            "runtime should not receive a reply".to_owned(),
+        ))
+    }
+
+    async fn start(&self, _agent: &Agent) -> Result<cocli_api::RuntimeSessionStatus, RuntimeError> {
+        Err(RuntimeError::Delivery(
+            "simulated startup failure".to_owned(),
+        ))
+    }
+}
+
 #[derive(Debug, Default)]
 struct FakeSkillRuntime {
     installs: Mutex<HashMap<(uuid::Uuid, String), Vec<SkillLibraryFile>>>,
+    install_calls: AtomicUsize,
+    install_delay: Duration,
+    install_started: Mutex<Option<Arc<tokio::sync::Notify>>>,
 }
 
 #[async_trait]
@@ -105,6 +132,18 @@ impl RuntimeService for FakeSkillRuntime {
         skill_name: &str,
         files: &[SkillLibraryFile],
     ) -> Result<String, RuntimeError> {
+        self.install_calls.fetch_add(1, Ordering::Relaxed);
+        let install_started = self
+            .install_started
+            .lock()
+            .expect("install notification should not be poisoned")
+            .clone();
+        if let Some(started) = install_started {
+            started.notify_waiters();
+        }
+        if !self.install_delay.is_zero() {
+            tokio::time::sleep(self.install_delay).await;
+        }
         let install_path = format!(".fake/skills/{skill_name}");
         self.installs
             .lock()
@@ -149,6 +188,16 @@ impl RuntimeService for FakeSkillRuntime {
         install_path: &str,
         relative_path: &str,
     ) -> Result<RuntimeSkillFileContent, RuntimeError> {
+        if relative_path == ".cocli-managed" {
+            let name = install_path
+                .rsplit('/')
+                .next()
+                .ok_or_else(|| RuntimeError::NotFound("fake skill name not found".to_owned()))?;
+            return Ok(RuntimeSkillFileContent {
+                content: name.to_owned(),
+                binary: false,
+            });
+        }
         let installs = self
             .installs
             .lock()
@@ -170,6 +219,75 @@ impl RuntimeService for FakeSkillRuntime {
     }
 }
 
+#[tokio::test]
+async fn startup_skill_reconciliation_repairs_missing_files_and_removes_orphans() {
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("skill-reconcile")
+        .await
+        .expect("channel");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "skill-agent",
+            "fake",
+            None,
+            AgentStatus::Stopped,
+        )
+        .await
+        .expect("agent");
+    let library = store
+        .create_skill_library(NewSkillLibrary {
+            name: "managed-demo".to_owned(),
+            display_name: "Managed Demo".to_owned(),
+            description: "reconcile".to_owned(),
+            user_invocable: true,
+            source_kind: "local".to_owned(),
+            source_url: "/tmp/managed-demo".to_owned(),
+            source_subpath: None,
+            source_ref: None,
+            files: vec![SkillLibraryFile {
+                rel_path: "SKILL.md".to_owned(),
+                mode: 0o644,
+                content: b"# managed".to_vec(),
+                size: 9,
+            }],
+        })
+        .await
+        .expect("library");
+    let install = store
+        .create_agent_skill_install(agent.id, library.id, ".fake/skills/managed-demo")
+        .await
+        .expect("install record");
+    let runtime = Arc::new(FakeSkillRuntime::default());
+    let runtime_service: Arc<dyn RuntimeService> = runtime.clone();
+
+    reconcile_skill_state(&store, &runtime_service)
+        .await
+        .expect("missing runtime files should be restored");
+    assert_eq!(
+        runtime
+            .list_skills(&agent)
+            .await
+            .expect("skills after restore")
+            .len(),
+        1
+    );
+
+    store
+        .delete_agent_skill_install(agent.id, install.id)
+        .await
+        .expect("catalog install should be removed");
+    reconcile_skill_state(&store, &runtime_service)
+        .await
+        .expect("orphan runtime files should be removed");
+    assert!(runtime
+        .list_skills(&agent)
+        .await
+        .expect("skills after orphan cleanup")
+        .is_empty());
+}
+
 #[derive(Debug, Default)]
 struct FlakyRuntime {
     calls: AtomicUsize,
@@ -178,6 +296,12 @@ struct FlakyRuntime {
 #[derive(Debug, Default)]
 struct PanicOnceRuntime {
     calls: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct TimeoutOnceRuntime {
+    calls: AtomicUsize,
+    stops: AtomicUsize,
 }
 
 #[async_trait]
@@ -209,6 +333,27 @@ impl RuntimeService for FlakyRuntime {
     }
 }
 
+#[async_trait]
+impl RuntimeService for TimeoutOnceRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        if self.calls.fetch_add(1, Ordering::Relaxed) == 0 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(format!("late: {}", message.content))
+        } else {
+            Ok(format!("retried safely: {}", message.content))
+        }
+    }
+
+    async fn stop(&self, _agent_id: uuid::Uuid) -> Result<(), RuntimeError> {
+        self.stops.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
 async fn json_request(
     app: axum::Router,
     method: &str,
@@ -221,6 +366,33 @@ async fn json_request(
                 .method(method)
                 .uri(uri)
                 .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .expect("request should build"),
+        )
+        .await
+        .expect("request should complete");
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("response body should load");
+    let body = serde_json::from_slice(&bytes).expect("response should be JSON");
+    (status, body)
+}
+
+async fn bridge_json_request(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+    token: &str,
+) -> (StatusCode, Value) {
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))
                 .expect("request should build"),
         )
@@ -418,6 +590,199 @@ async fn skills_routes_complete_the_local_import_install_and_refresh_loop() {
 }
 
 #[tokio::test]
+async fn concurrent_duplicate_skill_install_mutates_runtime_once() {
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("concurrent-skills")
+        .await
+        .expect("channel should create");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "skilled",
+            "fake",
+            Some("test-model"),
+            AgentStatus::Stopped,
+        )
+        .await
+        .expect("agent should create");
+    let library = store
+        .create_skill_library(NewSkillLibrary {
+            name: "serialized-install".to_owned(),
+            display_name: "Serialized Install".to_owned(),
+            description: "concurrent install test".to_owned(),
+            user_invocable: true,
+            source_kind: "local".to_owned(),
+            source_url: "/tmp/serialized-install".to_owned(),
+            source_subpath: None,
+            source_ref: None,
+            files: vec![SkillLibraryFile {
+                rel_path: "SKILL.md".to_owned(),
+                mode: 0o644,
+                content: b"# Serialized Install\n".to_vec(),
+                size: 21,
+            }],
+        })
+        .await
+        .expect("library should create");
+    let runtime = Arc::new(FakeSkillRuntime {
+        installs: Mutex::new(HashMap::new()),
+        install_calls: AtomicUsize::new(0),
+        install_delay: Duration::from_millis(50),
+        install_started: Mutex::new(None),
+    });
+    let app = router(store.clone(), runtime.clone());
+    let uri = format!("/api/agents/{}/skills", agent.id);
+    let body = json!({"libraryId": library.id});
+
+    let first = json_request(app.clone(), "POST", &uri, body.clone());
+    let second = json_request(app, "POST", &uri, body);
+    let ((first_status, _), (second_status, _)) = tokio::join!(first, second);
+
+    let statuses = [first_status, second_status];
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::OK)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|status| **status == StatusCode::CONFLICT)
+            .count(),
+        1
+    );
+    assert_eq!(runtime.install_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        store
+            .list_agent_skill_installs(agent.id)
+            .await
+            .expect("installs should list")
+            .len(),
+        1
+    );
+    assert_eq!(
+        runtime
+            .list_skills(&agent)
+            .await
+            .expect("runtime skills should list")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn library_reinstall_and_uninstall_are_serialized() {
+    let source = tempdir().expect("skill source should create");
+    std::fs::write(
+        source.path().join("SKILL.md"),
+        "---\nname: serialized-library\n---\n# Initial\n",
+    )
+    .expect("skill source should write");
+
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("serialized-library")
+        .await
+        .expect("channel should create");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "skilled",
+            "fake",
+            Some("test-model"),
+            AgentStatus::Stopped,
+        )
+        .await
+        .expect("agent should create");
+    let library = store
+        .create_skill_library(NewSkillLibrary {
+            name: "serialized-library".to_owned(),
+            display_name: "Serialized Library".to_owned(),
+            description: "library mutation lock test".to_owned(),
+            user_invocable: true,
+            source_kind: "local".to_owned(),
+            source_url: source
+                .path()
+                .to_str()
+                .expect("source path should be UTF-8")
+                .to_owned(),
+            source_subpath: None,
+            source_ref: None,
+            files: vec![SkillLibraryFile {
+                rel_path: "SKILL.md".to_owned(),
+                mode: 0o644,
+                content: b"# Initial\n".to_vec(),
+                size: 10,
+            }],
+        })
+        .await
+        .expect("library should create");
+    let install_started = Arc::new(tokio::sync::Notify::new());
+    let runtime = Arc::new(FakeSkillRuntime {
+        installs: Mutex::new(HashMap::new()),
+        install_calls: AtomicUsize::new(0),
+        install_delay: Duration::from_millis(50),
+        install_started: Mutex::new(None),
+    });
+    let app = router(store.clone(), runtime.clone());
+    let (install_status, installed) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{}/skills", agent.id),
+        json!({"libraryId": library.id}),
+    )
+    .await;
+    assert_eq!(install_status, StatusCode::OK);
+    let install_id = installed["installId"]
+        .as_str()
+        .expect("install id")
+        .to_owned();
+    *runtime
+        .install_started
+        .lock()
+        .expect("install notification should not be poisoned") = Some(Arc::clone(&install_started));
+
+    std::fs::write(
+        source.path().join("SKILL.md"),
+        "---\nname: serialized-library\n---\n# Refreshed\n",
+    )
+    .expect("refreshed source should write");
+    let reinstall_started = install_started.notified();
+    tokio::pin!(reinstall_started);
+    let reinstall_app = app.clone();
+    let reinstall_uri = format!("/api/zones/local/skills/library/{}/reinstall", library.id);
+    let reinstall = tokio::spawn(async move {
+        json_request(reinstall_app, "POST", &reinstall_uri, json!({})).await
+    });
+    reinstall_started.await;
+
+    let (uninstall_status, _) = json_request(
+        app,
+        "DELETE",
+        &format!("/api/agents/{}/skills/{install_id}", agent.id),
+        json!({}),
+    )
+    .await;
+    let (reinstall_status, _) = reinstall.await.expect("reinstall task should complete");
+
+    assert_eq!(reinstall_status, StatusCode::OK);
+    assert_eq!(uninstall_status, StatusCode::OK);
+    assert!(store
+        .list_agent_skill_installs(agent.id)
+        .await
+        .expect("installs should list")
+        .is_empty());
+    assert!(runtime
+        .list_skills(&agent)
+        .await
+        .expect("runtime skills should list")
+        .is_empty());
+}
+
+#[tokio::test]
 async fn wiki_routes_match_browser_contract_and_preserve_history() {
     let store = Store::in_memory().await.expect("store should open");
     let app = router(store, Arc::new(FakeRuntime));
@@ -540,7 +905,7 @@ async fn wiki_routes_match_browser_contract_and_preserve_history() {
 #[tokio::test]
 async fn memory_routes_support_private_shared_write_read_and_move() {
     let store = Store::in_memory().await.expect("store should open");
-    let app = router(store, Arc::new(FakeRuntime));
+    let app = router(store.clone(), Arc::new(FakeRuntime));
     let (_, channel) = json_request(
         app.clone(),
         "POST",
@@ -562,8 +927,13 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
     )
     .await;
     let agent_id = agent["id"].as_str().expect("agent id");
+    let bridge_token = store
+        .agent_bridge_token(agent_id.parse().expect("agent uuid"))
+        .await
+        .expect("bridge token query")
+        .expect("bridge token");
 
-    let (write_status, written) = json_request(
+    let (write_status, written) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{agent_id}/memory/topic"),
@@ -574,6 +944,7 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
             "description": "Apollo plan",
             "body": "# Apollo\n\nShip locally."
         }),
+        &bridge_token,
     )
     .await;
     assert_eq!(write_status, StatusCode::OK);
@@ -605,7 +976,7 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
         .as_str()
         .is_some_and(|body| body.contains("Ship locally.")));
 
-    let (move_status, moved) = json_request(
+    let (move_status, moved) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{agent_id}/memory/move"),
@@ -616,6 +987,7 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
             "type": "project",
             "topic": "apollo"
         }),
+        &bridge_token,
     )
     .await;
     assert_eq!(move_status, StatusCode::OK);
@@ -647,11 +1019,12 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
         .as_str()
         .is_some_and(|body| body.contains("Ship locally.")));
 
-    let (list_status, namespace) = json_request(
+    let (list_status, namespace) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{agent_id}/memory/list?scope=channel&channel_id={channel_id}"),
         json!({}),
+        &bridge_token,
     )
     .await;
     assert_eq!(list_status, StatusCode::OK);
@@ -670,13 +1043,14 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
     )
     .await;
     let other_channel_id = other_channel["id"].as_str().expect("other channel id");
-    let (forbidden_status, _) = json_request(
+    let (forbidden_status, _) = bridge_json_request(
         app,
         "GET",
         &format!(
             "/api/bridge/agents/{agent_id}/memory/index?scope=channel&channel_id={other_channel_id}"
         ),
         json!({}),
+        &bridge_token,
     )
     .await;
     assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
@@ -685,7 +1059,7 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
 #[tokio::test]
 async fn bridge_wiki_routes_attribute_agent_writes_and_search_pages() {
     let store = Store::in_memory().await.expect("store should open");
-    let app = router(store, Arc::new(FakeRuntime));
+    let app = router(store.clone(), Arc::new(FakeRuntime));
     let (_, channel) = json_request(
         app.clone(),
         "POST",
@@ -707,9 +1081,14 @@ async fn bridge_wiki_routes_attribute_agent_writes_and_search_pages() {
     )
     .await;
     let agent_id = agent["id"].as_str().expect("agent id");
+    let bridge_token = store
+        .agent_bridge_token(agent_id.parse().expect("agent uuid"))
+        .await
+        .expect("bridge token query")
+        .expect("bridge token");
     let encoded_path = "reference%2Fbridge-api";
 
-    let (write_status, written) = json_request(
+    let (write_status, written) = bridge_json_request(
         app.clone(),
         "PUT",
         &format!("/api/bridge/agents/{agent_id}/wiki/pages/{encoded_path}"),
@@ -719,27 +1098,30 @@ async fn bridge_wiki_routes_attribute_agent_writes_and_search_pages() {
             "tags": ["reference"],
             "reason": "record contract"
         }),
+        &bridge_token,
     )
     .await;
     assert_eq!(write_status, StatusCode::OK);
     assert_eq!(written["updatedBy"], "wiki-writer");
     assert_eq!(written["path"], "reference/bridge-api");
 
-    let (search_status, search) = json_request(
+    let (search_status, search) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{agent_id}/wiki/pages?q=Durable&limit=10"),
         json!({}),
+        &bridge_token,
     )
     .await;
     assert_eq!(search_status, StatusCode::OK);
     assert_eq!(search["pages"].as_array().map(Vec::len), Some(1));
 
-    let (read_status, read) = json_request(
+    let (read_status, read) = bridge_json_request(
         app,
         "GET",
         &format!("/api/bridge/agents/{agent_id}/wiki/pages/{encoded_path}"),
         json!({}),
+        &bridge_token,
     )
     .await;
     assert_eq!(read_status, StatusCode::OK);
@@ -802,6 +1184,43 @@ async fn post_message_persists_user_message_and_fake_agent_reply() {
     let messages: Value = serde_json::from_slice(&bytes).expect("messages response should be JSON");
 
     assert_eq!(messages.as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn failed_runtime_start_rolls_back_agent_creation() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), Arc::new(FailingStartRuntime));
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "startup-failure"}),
+    )
+    .await;
+
+    let (status, body) = json_request(
+        app,
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel["id"],
+            "name": "broken",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["error"], "simulated startup failure");
+    assert!(
+        store
+            .list_agents()
+            .await
+            .expect("agents should list")
+            .is_empty(),
+        "failed startup must not leave an agent marked as running"
+    );
 }
 
 #[tokio::test]
@@ -1117,6 +1536,85 @@ async fn failed_runtime_delivery_is_accepted_and_retried_from_sqlite() {
 }
 
 #[tokio::test]
+async fn timed_out_delivery_stops_runtime_before_retrying_once() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(TimeoutOnceRuntime::default());
+    let app = router_with_delivery_config(
+        store,
+        runtime.clone(),
+        DeliveryConfig {
+            batch_size: 8,
+            max_attempts: 3,
+            poll_interval: Duration::from_millis(5),
+            attempt_timeout: Duration::from_millis(10),
+            base_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(5),
+        },
+    );
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "timeout-retry"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let _ = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "slow-once",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/messages"),
+        json!({"content": "do not duplicate"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let mut messages = json!([]);
+    for _ in 0..100 {
+        let (_, current) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/channels/{channel_id}/messages"),
+            json!({}),
+        )
+        .await;
+        messages = current;
+        if messages.as_array().map(Vec::len) == Some(2) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let (_, final_messages) = json_request(
+        app,
+        "GET",
+        &format!("/api/channels/{channel_id}/messages"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(messages.as_array().map(Vec::len), Some(2));
+    assert_eq!(final_messages.as_array().map(Vec::len), Some(2));
+    assert_eq!(
+        final_messages[1]["content"],
+        "retried safely: do not duplicate"
+    );
+    assert_eq!(runtime.calls.load(Ordering::Relaxed), 2);
+    assert_eq!(runtime.stops.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
 async fn startup_releases_and_retries_delivery_left_in_flight_by_previous_process() {
     let temp = tempfile::tempdir().expect("temp directory");
     let database_path = temp.path().join("cocli.sqlite3");
@@ -1255,7 +1753,7 @@ async fn panicking_runtime_task_is_deferred_instead_of_sticking_in_flight() {
 #[tokio::test]
 async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
     let store = Store::in_memory().await.expect("store opens");
-    let app = router(store, Arc::new(FakeRuntime));
+    let app = router(store.clone(), Arc::new(FakeRuntime));
     let (_, channel) = json_request(
         app.clone(),
         "POST",
@@ -1290,77 +1788,112 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
     .await;
     let first_id = first["id"].as_str().expect("first id");
     let second_id = second["id"].as_str().expect("second id");
+    let first_token = store
+        .agent_bridge_token(first_id.parse().expect("first uuid"))
+        .await
+        .expect("first token query")
+        .expect("first token");
+    let second_token = store
+        .agent_bridge_token(second_id.parse().expect("second uuid"))
+        .await
+        .expect("second token query")
+        .expect("second token");
+    let (missing_auth, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/inbox"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(missing_auth, StatusCode::UNAUTHORIZED);
+    let (cross_agent_auth, _) = bridge_json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/inbox"),
+        json!({}),
+        &first_token,
+    )
+    .await;
+    assert_eq!(cross_agent_auth, StatusCode::UNAUTHORIZED);
 
-    let (send_status, sent) = json_request(
+    let (send_status, sent) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{first_id}/messages"),
         json!({"target": "#bridge", "content": "peer update"}),
+        &first_token,
     )
     .await;
     assert_eq!(send_status, StatusCode::CREATED);
     assert_eq!(sent["content"], "peer update");
     assert_eq!(sent["agent_id"], first_id);
 
-    let (_, inbox) = json_request(
+    let (_, inbox) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{second_id}/inbox?limit=10"),
         json!({}),
+        &second_token,
     )
     .await;
     assert_eq!(inbox["messages"].as_array().map(Vec::len), Some(1));
     assert_eq!(inbox["messages"][0]["content"], "peer update");
-    let (_, consumed) = json_request(
+    let (_, consumed) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{second_id}/inbox?limit=10"),
         json!({}),
+        &second_token,
     )
     .await;
     assert_eq!(consumed["messages"], json!([]));
-    let (_, own_inbox) = json_request(
+    let (_, own_inbox) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{first_id}/inbox"),
         json!({}),
+        &first_token,
     )
     .await;
     assert_eq!(own_inbox["messages"], json!([]));
 
-    let (_, history) = json_request(
+    let (_, history) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{second_id}/history?limit=10"),
         json!({}),
+        &second_token,
     )
     .await;
     assert_eq!(history["channel"]["name"], "bridge");
     assert_eq!(history["messages"][0]["content"], "peer update");
 
-    let (create_tasks_status, created_tasks) = json_request(
+    let (create_tasks_status, created_tasks) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks"),
         json!({"tasks": [{"title": "prepare"}, {"title": "ship"}]}),
+        &second_token,
     )
     .await;
     assert_eq!(create_tasks_status, StatusCode::CREATED);
     assert_eq!(created_tasks["tasks"][0]["taskNumber"], 1);
     assert_eq!(created_tasks["tasks"][1]["taskNumber"], 2);
-    let (_, dependency) = json_request(
+    let (_, dependency) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/dependencies"),
         json!({"task_number": 2, "depends_on": 1}),
+        &second_token,
     )
     .await;
     assert_eq!(dependency["dependsOn"], json!([1]));
-    let (_, blocked_claim) = json_request(
+    let (_, blocked_claim) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
         json!({"task_numbers": [2]}),
+        &second_token,
     )
     .await;
     assert_eq!(blocked_claim["results"][0]["success"], false);
@@ -1368,50 +1901,55 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         .as_str()
         .expect("claim reason")
         .contains("unmet dependencies"));
-    let (_, first_claim) = json_request(
+    let (_, first_claim) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
         json!({"task_numbers": [1]}),
+        &second_token,
     )
     .await;
     assert_eq!(first_claim["results"][0]["success"], true);
-    let (_, completed) = json_request(
+    let (_, completed) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/update-status"),
         json!({"task_number": 1, "status": "done", "progress": "verified"}),
+        &second_token,
     )
     .await;
     assert_eq!(completed["status"], "done");
-    let (_, second_claim) = json_request(
+    let (_, second_claim) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
         json!({"task_numbers": [2]}),
+        &second_token,
     )
     .await;
     assert_eq!(second_claim["results"][0]["success"], true);
-    let (_, tasks) = json_request(
+    let (_, tasks) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{second_id}/tasks?status=all"),
         json!({}),
+        &second_token,
     )
     .await;
     assert_eq!(tasks["tasks"].as_array().map(Vec::len), Some(2));
-    let (_, message_claim) = json_request(
+    let (_, message_claim) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
         json!({"message_ids": [sent["id"]]}),
+        &second_token,
     )
     .await;
     assert_eq!(message_claim["results"][0]["success"], true);
     assert_eq!(message_claim["results"][0]["created"], true);
     assert_eq!(message_claim["results"][0]["task"]["messageId"], sent["id"]);
 
-    let (_, working) = json_request(
+    let (_, working) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/working"),
@@ -1421,31 +1959,35 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
             "taskNumber": 3,
             "nextStepHint": "run protocol tests"
         }),
+        &second_token,
     )
     .await;
     assert_eq!(working["state"]["summary"], "implement MCP");
     assert_eq!(working["state"]["task_number"], 3);
-    let (_, current) = json_request(
+    let (_, current) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{second_id}/working"),
         json!({}),
+        &second_token,
     )
     .await;
     assert_eq!(current["state"]["next_step_hint"], "run protocol tests");
-    let (_, cleared) = json_request(
+    let (_, cleared) = bridge_json_request(
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/working/clear"),
         json!({}),
+        &second_token,
     )
     .await;
     assert_eq!(cleared["cleared"], true);
-    let (_, empty) = json_request(
+    let (_, empty) = bridge_json_request(
         app,
         "GET",
         &format!("/api/bridge/agents/{second_id}/working"),
         json!({}),
+        &second_token,
     )
     .await;
     assert!(empty["state"].is_null());

@@ -25,9 +25,9 @@ function createStorageMock(): Storage {
   }
 }
 
-if (typeof globalThis.localStorage === 'undefined' || typeof globalThis.localStorage.getItem !== 'function') {
-  Object.defineProperty(globalThis, 'localStorage', {
-    configurable: true,
-    value: createStorageMock(),
-  })
-}
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: createStorageMock(),
+})
+
+await import('../i18n')

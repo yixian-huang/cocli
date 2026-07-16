@@ -298,6 +298,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cocli-api",
+ "cocli-reaper",
  "cocli-server",
  "dirs",
  "tokio",

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { MessageList } from './MessageList'
 import { useAgentStore } from '@/stores/agentStore'
 import { useChannelStore } from '@/stores/channelStore'
@@ -54,11 +55,19 @@ describe('MessageList loading skeleton', () => {
   })
 
   it('shows skeletons while loading and removes them once loading is false', () => {
-    const { rerender } = render(<MessageList channelId={channel.id} loading />)
+    const { rerender } = render(
+      <MemoryRouter>
+        <MessageList channelId={channel.id} loading />
+      </MemoryRouter>,
+    )
 
     expect(screen.getByTestId('message-list-skeleton')).toBeInTheDocument()
 
-    rerender(<MessageList channelId={channel.id} loading={false} />)
+    rerender(
+      <MemoryRouter>
+        <MessageList channelId={channel.id} loading={false} />
+      </MemoryRouter>,
+    )
 
     expect(screen.queryByTestId('message-list-skeleton')).not.toBeInTheDocument()
     expect(screen.getByText('Welcome to #general')).toBeInTheDocument()

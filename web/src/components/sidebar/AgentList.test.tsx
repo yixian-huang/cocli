@@ -39,7 +39,7 @@ describe('<AgentList>', () => {
     vi.restoreAllMocks()
   })
 
-  it('renders inside a CollapsibleSection with a filter and shows agents', () => {
+  it('renders inside a CollapsibleSection and shows agents', () => {
     render(
       <>
         <ContextMenuPortal />
@@ -47,7 +47,6 @@ describe('<AgentList>', () => {
       </>,
     )
     expect(screen.getByRole('button', { name: /agents/i })).toBeInTheDocument()
-    expect(screen.getByRole('searchbox')).toBeInTheDocument()
     expect(screen.getByText(/codex-backend/)).toBeInTheDocument()
     expect(screen.getByText(/claude-ops/)).toBeInTheDocument()
   })

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { MessageList } from './MessageList'
 import { useAgentStore } from '@/stores/agentStore'
 import { useChannelStore } from '@/stores/channelStore'
@@ -96,7 +97,11 @@ describe('MessageList keyboard navigation', () => {
   })
 
   it('highlights the currently selected message as navigation events arrive', async () => {
-    const { container } = render(<MessageList channelId={channel.id} />)
+    const { container } = render(
+      <MemoryRouter>
+        <MessageList channelId={channel.id} />
+      </MemoryRouter>,
+    )
 
     await act(async () => {
       window.dispatchEvent(new CustomEvent('message-list:navigate', { detail: { direction: 'previous' } }))

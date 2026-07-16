@@ -9,7 +9,7 @@ import frCommon from './locales/fr/common.json'
 import deCommon from './locales/de/common.json'
 import jaCommon from './locales/ja/common.json'
 
-const isDev = import.meta.env.DEV
+const isDev = import.meta.env.DEV && import.meta.env.MODE !== 'test'
 
 // 初始化一次即可；React 组件通过 useTranslation() 获取 t/i18n
 void i18n
@@ -40,4 +40,3 @@ void i18n
   })
 
 export { i18n }
-

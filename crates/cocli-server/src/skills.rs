@@ -18,6 +18,7 @@ use crate::runtime::LocalRuntimeConfig;
 
 const MAX_SKILL_BROWSER_BYTES: u64 = 1024 * 1024;
 const MAX_SKILL_BROWSER_ENTRIES: usize = 5_000;
+const MANAGED_SKILL_MARKER: &str = ".cocli-managed";
 
 pub(crate) fn compatibility(
     registry: &Arc<RuntimeRegistry>,
@@ -97,6 +98,9 @@ pub(crate) async fn install(
             .map_err(|error| skill_io_error("write skill file", &error))?;
         set_file_mode(&path, file.mode).await?;
     }
+    tokio::fs::write(temporary.join(MANAGED_SKILL_MARKER), skill_name)
+        .await
+        .map_err(|error| skill_io_error("write managed skill marker", &error))?;
 
     let had_target = tokio::fs::symlink_metadata(&target).await.is_ok();
     if had_target {
@@ -375,6 +379,9 @@ fn collect_skill_tree(
             .map_err(|_| io::Error::new(io::ErrorKind::PermissionDenied, "skill path escaped"))?
             .to_string_lossy()
             .replace('\\', "/");
+        if relative == MANAGED_SKILL_MARKER {
+            continue;
+        }
         let is_dir = file_type.is_dir();
         let size = if is_dir {
             0

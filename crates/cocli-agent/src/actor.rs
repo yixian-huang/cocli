@@ -438,8 +438,8 @@ impl AgentActor<Running> {
     }
 
     /// Deliver a server-side message to the agent. Emits `AgentDeliverAccepted`
-    /// (when seq>0 && attempt>0) before the write, and always emits
-    /// `AgentDeliverAck` afterwards with the `routeAction` derived from
+    /// (when seq>0 && attempt>0) before the write, and emits `AgentDeliverAck`
+    /// only after a successful write with the `routeAction` derived from
     /// `delivery_tier`.
     pub async fn deliver(&mut self, msg: AgentDeliverMsg) -> Result<(), String> {
         tracing::info!(
@@ -482,7 +482,7 @@ impl AgentActor<Running> {
         // Ack only when server has a queue item to release (attempt > 0).
         // For immediate dispatch (attempt = 0) sending an ack would trigger
         // server-side "ignoring ack with missing attempt" warnings.
-        if msg.attempt > 0 {
+        if msg.attempt > 0 && write_result.is_ok() {
             let _ = self
                 .outbound
                 .send(DaemonMsg::AgentDeliverAck(AgentDeliverAckMsg {
@@ -751,10 +751,9 @@ impl AgentActor<Running> {
                             }
                         }
                         Some(AgentCmd::Stop { force }) => {
-                            let _stopping = self.stop(force);
-                            // Child reaped via kill_on_drop when `_stopping`
-                            // is dropped at scope exit. Phase 0b will add an
-                            // explicit `child.wait()` here + AgentSessionEnd.
+                            if let Err(error) = self.stop(force).await {
+                                tracing::warn!(agent_id = %agent_id, %error, "run_loop: stop failed");
+                            }
                             break;
                         }
                         None => {
@@ -810,24 +809,49 @@ impl AgentActor<Running> {
         }
     }
 
-    /// Transition into `Stopping` by sending SIGTERM (or SIGKILL when
-    /// `force=true`). The caller is responsible for reaping the child via
-    /// `child.wait()` from the outer run-loop.
-    pub fn stop(self, force: bool) -> AgentActor<Stopping> {
+    /// Transition into `Stopping`, terminate the subprocess, and reap it
+    /// before returning.
+    pub async fn stop(mut self, force: bool) -> Result<AgentActor<Stopping>, String> {
         let pid = self.state.child.id();
-        if let Some(p) = pid {
+        if force {
+            self.state
+                .child
+                .start_kill()
+                .map_err(|error| format!("kill child process: {error}"))?;
+        } else if let Some(pid) = pid {
             #[cfg(unix)]
-            {
-                let sig = if force {
-                    nix::sys::signal::Signal::SIGKILL
-                } else {
-                    nix::sys::signal::Signal::SIGTERM
-                };
-                let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(p as i32), sig);
-            }
-            let _ = p;
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGTERM,
+            )
+            .map_err(|error| format!("signal child process: {error}"))?;
+
+            #[cfg(not(unix))]
+            self.state
+                .child
+                .start_kill()
+                .map_err(|error| format!("kill child process: {error}"))?;
         }
-        AgentActor {
+
+        let wait_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), self.state.child.wait()).await;
+        if wait_result.is_err() {
+            self.state
+                .child
+                .start_kill()
+                .map_err(|error| format!("kill unresponsive child process: {error}"))?;
+            self.state
+                .child
+                .wait()
+                .await
+                .map_err(|error| format!("reap killed child process: {error}"))?;
+        } else {
+            wait_result
+                .expect("timeout result checked")
+                .map_err(|error| format!("reap child process: {error}"))?;
+        }
+
+        Ok(AgentActor {
             id: self.id,
             mailbox: self.mailbox,
             outbound: self.outbound,
@@ -837,7 +861,7 @@ impl AgentActor<Running> {
                 started_at: Instant::now(),
                 force,
             },
-        }
+        })
     }
 }
 

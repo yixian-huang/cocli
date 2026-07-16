@@ -14,7 +14,7 @@ use cocli_driver_core::types::{
 use cocli_driver_core::{Driver, DriverError, DriverEvent};
 use cocli_pidfile::TestPidDirGuard;
 use cocli_protocol::types::DeliveryMessage;
-use cocli_protocol::AgentDeliverMsg;
+use cocli_protocol::{AgentDeliverMsg, DaemonMsg};
 use cocli_runtime_pool::RuntimeRegistry;
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
@@ -256,7 +256,7 @@ async fn actor_uses_core_driver_for_prepare_spawn_parse_and_delivery() {
         other => panic!("unexpected event: {other:?}"),
     }
 
-    let _stopping = running.stop(true);
+    let _stopping = running.stop(true).await.unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -313,5 +313,76 @@ async fn actor_sends_required_initial_prompt_before_waiting_for_session() {
         DriverEvent::TextDelta { text } if text == "bootstrap"
     ));
 
-    let _stopping = running.stop(true);
+    let _stopping = running.stop(true).await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn failed_delivery_is_accepted_but_not_acknowledged() {
+    let temp = tempfile::tempdir().unwrap();
+    let _pid_guard = TestPidDirGuard::new(temp.path().join("pids").as_path());
+    let mut registry = RuntimeRegistry::new();
+    registry.register(Arc::new(FakeLifecycleDriver));
+
+    let (_command_tx, command_rx) = mpsc::channel(4);
+    let (outbound_tx, mut outbound_rx) = mpsc::channel(4);
+    let (state_tx, _state_rx) = mpsc::channel(4);
+    let (obs_tx, _obs_rx) = broadcast::channel(4);
+    let actor = AgentActor::<Idle> {
+        id: "agent-failed-delivery".to_string(),
+        mailbox: command_rx,
+        outbound: outbound_tx,
+        state_tx,
+        obs_tx,
+        state: Idle,
+    };
+    let mut running = actor
+        .start(StartCfg {
+            registry: Arc::new(registry),
+            runtime_name: "fake".to_string(),
+            workspace_root: temp.path().join("workspaces"),
+            server_url: "ws://localhost:8080".to_string(),
+            auth_token: "test-token".to_string(),
+            channel_id: uuid::Uuid::nil(),
+            channel_name: String::new(),
+            model: "fake-model".to_string(),
+            launch_id: "launch-failed-delivery".to_string(),
+            resume_session: None,
+            system_prompt: String::new(),
+            initial_prompt: String::new(),
+            env_vars: HashMap::new(),
+        })
+        .await
+        .unwrap();
+
+    running.state.child.start_kill().unwrap();
+    running.state.child.wait().await.unwrap();
+    let result = running
+        .deliver(AgentDeliverMsg {
+            agent_id: "agent-failed-delivery".to_string(),
+            seq: 7,
+            attempt: 1,
+            message: DeliveryMessage {
+                channel_id: uuid::Uuid::new_v4(),
+                sender_name: "alice".to_string(),
+                sender_type: "user".to_string(),
+                content: "hello".to_string(),
+                channel_name: "test".to_string(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .await;
+    assert!(result.is_err());
+    assert!(matches!(
+        outbound_rx.recv().await,
+        Some(DaemonMsg::AgentDeliverAccepted(_))
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(50), outbound_rx.recv())
+            .await
+            .is_err(),
+        "failed writes must not release durable deliveries"
+    );
+
+    let _stopping = running.stop(true).await.unwrap();
 }
