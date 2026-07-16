@@ -1,6 +1,7 @@
 //! Local server assembly for cocli.
 
 mod runtime;
+mod skills;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

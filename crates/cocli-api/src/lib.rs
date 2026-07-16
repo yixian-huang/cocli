@@ -15,8 +15,9 @@ use chrono::{DateTime, Utc};
 use cocli_store::{
     Agent, AgentActivity, AgentSession, AgentSessionFinish, AgentStatus, AgentTurn, Channel,
     Delivery, DeliveryStats, MemoryDocument, MemoryDocumentEntry, MemoryMoveResult,
-    MemoryNamespace, MemoryScope, MemoryTopic, Message, MessageRole, NewAgentTurn, Store,
-    StoreError, Task, TaskStatus, WikiBacklink, WikiPage, WikiPageSummary, WikiRevision,
+    MemoryNamespace, MemoryScope, MemoryTopic, Message, MessageRole, NewAgentTurn,
+    SkillLibraryFile, Store, StoreError, Task, TaskStatus, WikiBacklink, WikiPage, WikiPageSummary,
+    WikiRevision,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -114,6 +115,47 @@ pub struct RuntimeForkResult {
 pub struct RuntimeMetricsSnapshot {
     pub counters: BTreeMap<String, i64>,
     pub gauges: BTreeMap<String, f64>,
+}
+
+/// Runtime skill-loading confidence shown by the local management UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSkillCompatibility {
+    Supported,
+    Uncertain,
+    Unsupported,
+    Unknown,
+}
+
+/// Skill discovered in one runtime's global or workspace search roots.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSkill {
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub user_invocable: bool,
+    #[serde(rename = "type")]
+    pub skill_type: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install_path: Option<String>,
+}
+
+/// One file entry exposed by the installed-skill browser.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSkillFileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: i64,
+}
+
+/// File content returned by the installed-skill browser.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RuntimeSkillFileContent {
+    pub content: String,
+    pub binary: bool,
 }
 
 /// Durable history events emitted by a local runtime service.
@@ -493,6 +535,62 @@ pub trait RuntimeService: Send + Sync {
     /// Returns process-local runtime metrics.
     async fn metrics(&self) -> RuntimeMetricsSnapshot {
         RuntimeMetricsSnapshot::default()
+    }
+
+    /// Returns skill compatibility for one runtime name.
+    fn skill_compatibility(&self, _runtime: &str) -> RuntimeSkillCompatibility {
+        RuntimeSkillCompatibility::Unknown
+    }
+
+    /// Scans runtime-specific global and workspace skill roots.
+    async fn list_skills(&self, _agent: &Agent) -> Result<Vec<RuntimeSkill>, RuntimeError> {
+        Ok(Vec::new())
+    }
+
+    /// Atomically installs or refreshes one library skill in the agent workspace.
+    async fn install_skill(
+        &self,
+        _agent: &Agent,
+        _skill_name: &str,
+        _files: &[SkillLibraryFile],
+    ) -> Result<String, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime skill installation is not supported".to_owned(),
+        ))
+    }
+
+    /// Removes one managed skill from the agent workspace.
+    async fn uninstall_skill(
+        &self,
+        _agent: &Agent,
+        _install_path: &str,
+    ) -> Result<(), RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime skill installation is not supported".to_owned(),
+        ))
+    }
+
+    /// Lists files below one managed skill install.
+    async fn list_skill_files(
+        &self,
+        _agent: &Agent,
+        _install_path: &str,
+    ) -> Result<Vec<RuntimeSkillFileEntry>, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime skill browsing is not supported".to_owned(),
+        ))
+    }
+
+    /// Reads one file below a managed skill install.
+    async fn read_skill_file(
+        &self,
+        _agent: &Agent,
+        _install_path: &str,
+        _relative_path: &str,
+    ) -> Result<RuntimeSkillFileContent, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime skill browsing is not supported".to_owned(),
+        ))
     }
 
     /// Returns or advances quota-recovery state for one agent.

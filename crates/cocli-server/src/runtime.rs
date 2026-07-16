@@ -19,6 +19,7 @@ use cocli_api::{
     RuntimeError, RuntimeForkResult, RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo,
     RuntimeKnowledgeProvider, RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot,
     RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus,
+    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -36,7 +37,7 @@ use cocli_runtime_pool::{
     initial_oss_runtime_specs, RuntimeCapabilities, RuntimeCatalog, RuntimeCatalogEntry,
     RuntimeProbe, RuntimeRegistry, SystemRuntimeProbe,
 };
-use cocli_store::{Agent, Message};
+use cocli_store::{Agent, Message, SkillLibraryFile};
 use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio::time::Instant;
 use uuid::Uuid;
@@ -484,6 +485,55 @@ impl RuntimeService for LocalRuntimeService {
             counters: snapshot.counters,
             gauges: snapshot.gauges,
         }
+    }
+
+    fn skill_compatibility(&self, runtime: &str) -> RuntimeSkillCompatibility {
+        crate::skills::compatibility(&self.registry, runtime)
+    }
+
+    async fn list_skills(&self, agent: &Agent) -> Result<Vec<RuntimeSkill>, RuntimeError> {
+        crate::skills::list(&self.registry, &self.config, agent).await
+    }
+
+    async fn install_skill(
+        &self,
+        agent: &Agent,
+        skill_name: &str,
+        files: &[SkillLibraryFile],
+    ) -> Result<String, RuntimeError> {
+        let install_path =
+            crate::skills::install(&self.registry, &self.config, agent, skill_name, files).await?;
+        self.stop(agent.id).await?;
+        Ok(install_path)
+    }
+
+    async fn uninstall_skill(&self, agent: &Agent, install_path: &str) -> Result<(), RuntimeError> {
+        crate::skills::uninstall(&self.registry, &self.config, agent, install_path).await?;
+        self.stop(agent.id).await
+    }
+
+    async fn list_skill_files(
+        &self,
+        agent: &Agent,
+        install_path: &str,
+    ) -> Result<Vec<RuntimeSkillFileEntry>, RuntimeError> {
+        crate::skills::list_files(&self.registry, &self.config, agent, install_path).await
+    }
+
+    async fn read_skill_file(
+        &self,
+        agent: &Agent,
+        install_path: &str,
+        relative_path: &str,
+    ) -> Result<RuntimeSkillFileContent, RuntimeError> {
+        crate::skills::read_file(
+            &self.registry,
+            &self.config,
+            agent,
+            install_path,
+            relative_path,
+        )
+        .await
     }
 
     async fn probe_recovery(
