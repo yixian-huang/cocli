@@ -24,6 +24,9 @@ pub enum StoreError {
         /// The unexpected persisted value.
         value: String,
     },
+    /// A delivery completion was attempted after it was already finalized or released.
+    #[error("delivery is not in flight: {0}")]
+    DeliveryNotInFlight(Uuid),
 }
 
 /// A local conversation channel.
@@ -161,6 +164,66 @@ pub struct Message {
     pub created_at: DateTime<Utc>,
 }
 
+/// Durable state of one user-message delivery to one agent.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeliveryState {
+    /// Ready now or after `next_attempt_at`.
+    Pending,
+    /// Reserved by the local delivery worker.
+    InFlight,
+    /// Retry budget was exhausted and manual intervention is required.
+    Exhausted,
+}
+
+impl DeliveryState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::InFlight => "in_flight",
+            Self::Exhausted => "exhausted",
+        }
+    }
+
+    fn parse(value: String) -> Result<Self, StoreError> {
+        match value.as_str() {
+            "pending" => Ok(Self::Pending),
+            "in_flight" => Ok(Self::InFlight),
+            "exhausted" => Ok(Self::Exhausted),
+            _ => Err(StoreError::InvalidValue {
+                kind: "delivery state",
+                value,
+            }),
+        }
+    }
+}
+
+/// Persisted delivery from one channel message to one configured agent.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct Delivery {
+    pub id: Uuid,
+    pub agent_id: Uuid,
+    pub channel_id: Uuid,
+    pub message_id: Uuid,
+    pub seq: i64,
+    pub state: DeliveryState,
+    pub attempts: i64,
+    pub next_attempt_at: DateTime<Utc>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Aggregate durable-delivery backlog state.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct DeliveryStats {
+    pub pending: i64,
+    pub in_flight: i64,
+    pub exhausted: i64,
+    pub ready: i64,
+    pub max_attempts: i64,
+}
+
 struct MessageRow {
     id: Uuid,
     channel_id: Uuid,
@@ -169,6 +232,20 @@ struct MessageRow {
     role: String,
     content: String,
     created_at: DateTime<Utc>,
+}
+
+struct DeliveryRow {
+    id: Uuid,
+    agent_id: Uuid,
+    channel_id: Uuid,
+    message_id: Uuid,
+    seq: i64,
+    state: String,
+    attempts: i64,
+    next_attempt_at: DateTime<Utc>,
+    last_error: Option<String>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 
 impl TryFrom<MessageRow> for Message {
@@ -183,6 +260,26 @@ impl TryFrom<MessageRow> for Message {
             role: MessageRole::parse(row.role)?,
             content: row.content,
             created_at: row.created_at,
+        })
+    }
+}
+
+impl TryFrom<DeliveryRow> for Delivery {
+    type Error = StoreError;
+
+    fn try_from(row: DeliveryRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            id: row.id,
+            agent_id: row.agent_id,
+            channel_id: row.channel_id,
+            message_id: row.message_id,
+            seq: row.seq,
+            state: DeliveryState::parse(row.state)?,
+            attempts: row.attempts,
+            next_attempt_at: row.next_attempt_at,
+            last_error: row.last_error,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
         })
     }
 }
@@ -431,13 +528,292 @@ impl Store {
             .map(|row| row.and_then(Message::try_from))
             .collect()
     }
+
+    /// Returns one persisted message by identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or persisted enum decoding fails.
+    pub async fn get_message(&self, message_id: Uuid) -> Result<Option<Message>, StoreError> {
+        let row = query(
+            "SELECT id, channel_id, seq, agent_id, role, content, created_at \
+             FROM messages WHERE id = ?",
+        )
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(message_row_from_sqlite)
+            .transpose()?
+            .map(Message::try_from)
+            .transpose()
+    }
+
+    /// Enqueues one durable delivery per agent, ignoring duplicate message-agent pairs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the transaction fails.
+    pub async fn enqueue_deliveries(
+        &self,
+        message: &Message,
+        agent_ids: &[Uuid],
+    ) -> Result<Vec<Delivery>, StoreError> {
+        let now = Utc::now();
+        let mut transaction = self.pool.begin().await?;
+        for agent_id in agent_ids {
+            query(
+                "INSERT OR IGNORE INTO delivery_queue \
+                 (id, agent_id, channel_id, message_id, seq, state, attempts, \
+                  next_attempt_at, last_error, created_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(agent_id)
+            .bind(message.channel_id)
+            .bind(message.id)
+            .bind(message.seq)
+            .bind(DeliveryState::Pending.as_str())
+            .bind(now)
+            .bind(now)
+            .bind(now)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        self.list_message_deliveries(message.id).await
+    }
+
+    /// Lists durable deliveries for one source message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or persisted enum decoding fails.
+    pub async fn list_message_deliveries(
+        &self,
+        message_id: Uuid,
+    ) -> Result<Vec<Delivery>, StoreError> {
+        let rows = query(
+            "SELECT id, agent_id, channel_id, message_id, seq, state, attempts, \
+             next_attempt_at, last_error, created_at, updated_at \
+             FROM delivery_queue WHERE message_id = ? ORDER BY created_at, agent_id",
+        )
+        .bind(message_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(delivery_row_from_sqlite)
+            .map(|row| row.and_then(Delivery::try_from))
+            .collect()
+    }
+
+    /// Atomically reserves due deliveries and increments their attempt generation.
+    ///
+    /// This local implementation has one worker, so a transaction with guarded
+    /// updates provides the same no-double-reserve invariant without
+    /// `FOR UPDATE SKIP LOCKED`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the transaction fails.
+    pub async fn reserve_due_deliveries(
+        &self,
+        limit: i64,
+        max_attempts: i64,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<Delivery>, StoreError> {
+        let limit = limit.max(1);
+        let max_attempts = max_attempts.max(1);
+        let mut transaction = self.pool.begin().await?;
+        let rows = query(
+            "SELECT id, agent_id, channel_id, message_id, seq, state, attempts, \
+             next_attempt_at, last_error, created_at, updated_at \
+             FROM delivery_queue \
+             WHERE state = 'pending' AND next_attempt_at <= ? AND attempts < ? \
+             ORDER BY next_attempt_at, created_at, id LIMIT ?",
+        )
+        .bind(now)
+        .bind(max_attempts)
+        .bind(limit)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let candidates: Vec<Delivery> = rows
+            .into_iter()
+            .map(delivery_row_from_sqlite)
+            .map(|row| row.and_then(Delivery::try_from))
+            .collect::<Result<_, _>>()?;
+        let mut reserved = Vec::with_capacity(candidates.len());
+        for mut delivery in candidates {
+            let result = query(
+                "UPDATE delivery_queue \
+                 SET state = 'in_flight', attempts = attempts + 1, \
+                     last_error = NULL, updated_at = ? \
+                 WHERE id = ? AND state = 'pending'",
+            )
+            .bind(now)
+            .bind(delivery.id)
+            .execute(&mut *transaction)
+            .await?;
+            if result.rows_affected() == 1 {
+                delivery.state = DeliveryState::InFlight;
+                delivery.attempts = delivery.attempts.saturating_add(1);
+                delivery.last_error = None;
+                delivery.updated_at = now;
+                reserved.push(delivery);
+            }
+        }
+        transaction.commit().await?;
+        Ok(reserved)
+    }
+
+    /// Returns an in-flight delivery to the retry queue or exhausts it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update fails.
+    pub async fn defer_delivery(
+        &self,
+        delivery_id: Uuid,
+        error: &str,
+        next_attempt_at: DateTime<Utc>,
+        max_attempts: i64,
+    ) -> Result<Option<Delivery>, StoreError> {
+        let now = Utc::now();
+        query(
+            "UPDATE delivery_queue \
+             SET state = CASE WHEN attempts >= ? THEN 'exhausted' ELSE 'pending' END, \
+                 next_attempt_at = ?, last_error = ?, updated_at = ? \
+             WHERE id = ? AND state = 'in_flight'",
+        )
+        .bind(max_attempts.max(1))
+        .bind(next_attempt_at)
+        .bind(error)
+        .bind(now)
+        .bind(delivery_id)
+        .execute(&self.pool)
+        .await?;
+        self.get_delivery(delivery_id).await
+    }
+
+    /// Releases all in-flight rows after a process restart.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update fails.
+    pub async fn release_in_flight_deliveries(&self) -> Result<u64, StoreError> {
+        let now = Utc::now();
+        let result = query(
+            "UPDATE delivery_queue \
+             SET state = 'pending', next_attempt_at = ?, updated_at = ? \
+             WHERE state = 'in_flight'",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Persists an assistant reply and removes its delivery in one transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the transaction fails.
+    pub async fn complete_delivery(
+        &self,
+        delivery: &Delivery,
+        content: &str,
+    ) -> Result<Message, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let deleted = query("DELETE FROM delivery_queue WHERE id = ? AND state = 'in_flight'")
+            .bind(delivery.id)
+            .execute(&mut *transaction)
+            .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(StoreError::DeliveryNotInFlight(delivery.id));
+        }
+        let seq: i64 =
+            query_scalar("SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE channel_id = ?")
+                .bind(delivery.channel_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        let row = query(
+            "INSERT INTO messages \
+             (id, channel_id, seq, agent_id, role, content, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             RETURNING id, channel_id, seq, agent_id, role, content, created_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(delivery.channel_id)
+        .bind(seq)
+        .bind(delivery.agent_id)
+        .bind(MessageRole::Assistant.as_str())
+        .bind(content)
+        .bind(Utc::now())
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        message_row_from_sqlite(row)?.try_into()
+    }
+
+    /// Returns aggregate durable-delivery backlog state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn delivery_stats(&self, now: DateTime<Utc>) -> Result<DeliveryStats, StoreError> {
+        let row = query(
+            "SELECT \
+             SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) AS pending, \
+             SUM(CASE WHEN state = 'in_flight' THEN 1 ELSE 0 END) AS in_flight, \
+             SUM(CASE WHEN state = 'exhausted' THEN 1 ELSE 0 END) AS exhausted, \
+             SUM(CASE WHEN state = 'pending' AND next_attempt_at <= ? THEN 1 ELSE 0 END) AS ready, \
+             COALESCE(MAX(attempts), 0) AS max_attempts \
+             FROM delivery_queue",
+        )
+        .bind(now)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(DeliveryStats {
+            pending: row
+                .try_get::<Option<i64>, _>("pending")?
+                .unwrap_or_default(),
+            in_flight: row
+                .try_get::<Option<i64>, _>("in_flight")?
+                .unwrap_or_default(),
+            exhausted: row
+                .try_get::<Option<i64>, _>("exhausted")?
+                .unwrap_or_default(),
+            ready: row.try_get::<Option<i64>, _>("ready")?.unwrap_or_default(),
+            max_attempts: row.try_get("max_attempts")?,
+        })
+    }
+
+    async fn get_delivery(&self, delivery_id: Uuid) -> Result<Option<Delivery>, StoreError> {
+        let row = query(
+            "SELECT id, agent_id, channel_id, message_id, seq, state, attempts, \
+             next_attempt_at, last_error, created_at, updated_at \
+             FROM delivery_queue WHERE id = ?",
+        )
+        .bind(delivery_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(delivery_row_from_sqlite)
+            .transpose()?
+            .map(Delivery::try_from)
+            .transpose()
+    }
 }
 
 async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
-    for statement in include_str!("../migrations/0001_local_loop.sql").split(';') {
-        let statement = statement.trim();
-        if !statement.is_empty() {
-            query(statement).execute(pool).await?;
+    for migration in [
+        include_str!("../migrations/0001_local_loop.sql"),
+        include_str!("../migrations/0002_delivery_queue.sql"),
+    ] {
+        for statement in migration.split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                query(statement).execute(pool).await?;
+            }
         }
     }
     Ok(())
@@ -472,5 +848,21 @@ fn message_row_from_sqlite(row: SqliteRow) -> Result<MessageRow, StoreError> {
         role: row.try_get("role")?,
         content: row.try_get("content")?,
         created_at: row.try_get("created_at")?,
+    })
+}
+
+fn delivery_row_from_sqlite(row: SqliteRow) -> Result<DeliveryRow, StoreError> {
+    Ok(DeliveryRow {
+        id: row.try_get("id")?,
+        agent_id: row.try_get("agent_id")?,
+        channel_id: row.try_get("channel_id")?,
+        message_id: row.try_get("message_id")?,
+        seq: row.try_get("seq")?,
+        state: row.try_get("state")?,
+        attempts: row.try_get("attempts")?,
+        next_attempt_at: row.try_get("next_attempt_at")?,
+        last_error: row.try_get("last_error")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
     })
 }
