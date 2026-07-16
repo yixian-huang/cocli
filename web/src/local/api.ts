@@ -154,6 +154,74 @@ export interface WikiBacklink {
   version: number
 }
 
+export interface RuntimeSession {
+  id: string
+  agentId: string
+  sessionId: string
+  launchId?: string
+  channelId?: string
+  parentSessionId?: string
+  endReason?: string
+  turnCount: number
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+  contextWindow: number
+  sessionType: string
+  scope?: string
+  parentChatSessionId?: string
+  taskSummary?: string
+  filesChanged?: string[]
+  taskSuccess?: boolean | null
+  startedAt: string
+  endedAt?: string
+}
+
+export interface RuntimeTrajectoryEntry {
+  kind: 'input' | 'thinking' | 'text' | 'tool_call' | 'tool_result' | 'status' | 'warning' | 'error'
+  id?: string
+  text?: string
+  input?: Record<string, unknown>
+  result?: string
+  error?: string
+  ts?: number
+}
+
+export interface RuntimeTurn {
+  id: string
+  agentId: string
+  sessionId: string
+  launchId?: string
+  turnNumber: number
+  startedAt: string
+  endedAt?: string
+  inputTokens: number
+  outputTokens: number
+  costUsd: number
+  contextWindow: number
+  entries: RuntimeTrajectoryEntry[]
+  sessionType: string
+  durationMs?: number
+  messageRef?: {
+    channelId: string
+    messageId: string
+    seq?: number
+    createdAt?: string
+  }
+}
+
+export interface RuntimeActivity {
+  id: string
+  agentId: string
+  activity: string
+  detail?: string
+  trajectory: string[]
+  launchId?: string
+  createdAt: string
+  sessionRowId?: string
+  sessionId?: string
+}
+
 interface PostMessageResponse {
   message: Message
   replies: Message[]
@@ -408,4 +476,18 @@ export const localApi = {
         body: JSON.stringify({ version, updatedBy: 'local-user' }),
       },
     ),
+  listRuntimeSessions: (agentId: string, type?: string) => {
+    const params = new URLSearchParams({ limit: '50' })
+    if (type) params.set('type', type)
+    return request<RuntimeSession[]>(`/api/agents/${agentId}/sessions?${params}`)
+  },
+  getCurrentRuntimeSession: (agentId: string) =>
+    request<RuntimeSession | null>(`/api/agents/${agentId}/sessions/current`),
+  listRuntimeTurns: (agentId: string, sessionId?: string) => {
+    const params = new URLSearchParams({ limit: '120', offset: '0' })
+    if (sessionId) params.set('sessionId', sessionId)
+    return request<RuntimeTurn[]>(`/api/agents/${agentId}/turns?${params}`)
+  },
+  listRuntimeActivity: (agentId: string) =>
+    request<RuntimeActivity[]>(`/api/agents/${agentId}/activity?limit=100&offset=0`),
 }

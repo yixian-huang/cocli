@@ -672,6 +672,13 @@ textarea::placeholder {
   padding-left: 14px;
 }
 
+.message.history-target {
+  border-color: var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  box-shadow: 0 0 0 1px var(--line-accent);
+}
+
 .message-meta {
   display: flex;
   align-items: center;

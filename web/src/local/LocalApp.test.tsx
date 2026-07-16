@@ -158,6 +158,67 @@ describe('LocalApp', () => {
           binary: false,
         })
       }
+      if (path === '/api/agents/agent-1/sessions?limit=50' && !init?.method) {
+        return jsonResponse([{
+          id: 'session-row-1',
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          channelId: channel.id,
+          turnCount: 1,
+          inputTokens: 12,
+          outputTokens: 6,
+          costUsd: 0.001,
+          contextWindow: 100000,
+          sessionType: 'chat',
+          startedAt: '2026-07-16T09:02:00Z',
+          endedAt: '2026-07-16T09:02:01Z',
+          endReason: 'idle',
+        }])
+      }
+      if (path === '/api/agents/agent-1/sessions/current' && !init?.method) {
+        return jsonResponse(null)
+      }
+      if (path === '/api/agents/agent-1/activity?limit=100&offset=0' && !init?.method) {
+        return jsonResponse([{
+          id: 'activity-1',
+          agentId: 'agent-1',
+          activity: 'working',
+          detail: 'Recording local history',
+          trajectory: ['received', 'replied'],
+          createdAt: '2026-07-16T09:02:00Z',
+          sessionRowId: 'session-row-1',
+          sessionId: 'session-1',
+        }])
+      }
+      if (
+        path === '/api/agents/agent-1/turns?limit=120&offset=0&sessionId=session-1'
+        && !init?.method
+      ) {
+        return jsonResponse([{
+          id: 'turn-1',
+          agentId: 'agent-1',
+          sessionId: 'session-1',
+          turnNumber: 1,
+          startedAt: '2026-07-16T09:02:00Z',
+          endedAt: '2026-07-16T09:02:01Z',
+          inputTokens: 12,
+          outputTokens: 6,
+          costUsd: 0.001,
+          contextWindow: 100000,
+          sessionType: 'chat',
+          durationMs: 1000,
+          entries: [{
+            kind: 'text',
+            text: 'Recorded locally.',
+          }],
+          messageRef: {
+            channelId: channel.id,
+            messageId: 'message-1',
+            seq: 1,
+            createdAt: '2026-07-16T09:02:00Z',
+          },
+        }])
+      }
       if (path === '/api/bridge/agents/agent-1/memory/list?scope=agent' && !init?.method) {
         return jsonResponse({
           entries: memoryTopic ? [{
@@ -507,5 +568,39 @@ describe('LocalApp', () => {
 
     expect(await screen.findByRole('heading', { name: 'Local product loop' })).toBeInTheDocument()
     expect(await screen.findByText('Complete.')).toBeInTheDocument()
+  })
+
+  it('inspects runtime history and jumps back to the source message', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+    expect(await screen.findByText('builder')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Task for #product-loop'), {
+      target: { value: 'Ship the loop' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Run task' }))
+    expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'History' }))
+    expect(await screen.findByRole('heading', { name: 'Runtime history' })).toBeInTheDocument()
+    expect(await screen.findByText('session-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Turn #1/ }))
+    expect(await screen.findByText('Recorded locally.')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Open source message #1' }))
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    const sourceMessage = screen.getByText('Ship the loop').closest('article')
+    expect(sourceMessage).toHaveClass('history-target')
+
+    fireEvent.click(screen.getByRole('button', { name: 'History' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Activity' }))
+    expect(await screen.findByText('Recording local history')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Filter activity'), {
+      target: { value: 'replied' },
+    })
+    expect(screen.getByText('working')).toBeInTheDocument()
   })
 })

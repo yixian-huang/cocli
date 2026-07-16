@@ -8,6 +8,7 @@ import {
 } from 'react'
 import {
   BookOpen,
+  History as HistoryIcon,
   Languages,
   ListTodo,
   MessageSquare,
@@ -24,6 +25,7 @@ import {
   type RuntimeInfo,
 } from './api'
 import { LocalSelect } from './LocalSelect'
+import { LocalHistoryWorkspace } from './LocalHistoryWorkspace'
 import { LocalKnowledgeWorkspace } from './LocalKnowledgeWorkspace'
 import { LocalSkillsWorkspace } from './LocalSkillsWorkspace'
 import { LocalTasksWorkspace } from './LocalTasksWorkspace'
@@ -36,7 +38,7 @@ import {
 } from './localization'
 
 type LocalTheme = 'light' | 'dark'
-type WorkspaceView = 'chat' | 'tasks' | 'knowledge' | 'skills'
+type WorkspaceView = 'chat' | 'tasks' | 'knowledge' | 'history' | 'skills'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unexpected local service error'
@@ -61,6 +63,7 @@ export function LocalApp() {
   const [agents, setAgents] = useState<Agent[]>([])
   const [messages, setMessages] = useState<Message[]>([])
   const [activeChannelId, setActiveChannelId] = useState<string | null>(null)
+  const [pendingMessageId, setPendingMessageId] = useState<string | null>(null)
   const [channelName, setChannelName] = useState('')
   const [agentName, setAgentName] = useState('')
   const [runtimeName, setRuntimeName] = useState('')
@@ -187,6 +190,15 @@ export function LocalApp() {
   useEffect(() => {
     messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages])
+
+  useEffect(() => {
+    if (workspaceView !== 'chat' || !pendingMessageId) return
+    const target = document.getElementById(`local-message-${pendingMessageId}`)
+    if (!target) return
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    const timer = window.setTimeout(() => setPendingMessageId(null), 1_600)
+    return () => window.clearTimeout(timer)
+  }, [messages, pendingMessageId, workspaceView])
 
   function formatTime(value: string): string {
     return new Intl.DateTimeFormat(language, {
@@ -316,6 +328,15 @@ export function LocalApp() {
           >
             <BookOpen size={14} aria-hidden="true" />
             {t('knowledgeWorkspace')}
+          </button>
+          <button
+            type="button"
+            className={workspaceView === 'history' ? 'active' : ''}
+            aria-current={workspaceView === 'history' ? 'page' : undefined}
+            onClick={() => setWorkspaceView('history')}
+          >
+            <HistoryIcon size={14} aria-hidden="true" />
+            {t('historyWorkspace')}
           </button>
           <button
             type="button"
@@ -456,7 +477,11 @@ export function LocalApp() {
               </div>
             )}
             {messages.map((message) => (
-              <article className={`message ${message.role}`} key={message.id}>
+              <article
+                id={`local-message-${message.id}`}
+                className={`message ${message.role} ${pendingMessageId === message.id ? 'history-target' : ''}`}
+                key={message.id}
+              >
                 <div className="message-meta">
                   <strong>
                     {message.role === 'user'
@@ -600,6 +625,17 @@ export function LocalApp() {
         />
       ) : workspaceView === 'knowledge' ? (
         <LocalKnowledgeWorkspace agents={agents} channels={channels} t={t} />
+      ) : workspaceView === 'history' ? (
+        <LocalHistoryWorkspace
+          agents={agents}
+          channels={channels}
+          onOpenMessage={(channelId, messageId) => {
+            setActiveChannelId(channelId)
+            setPendingMessageId(messageId)
+            setWorkspaceView('chat')
+          }}
+          t={t}
+        />
       ) : (
         <LocalSkillsWorkspace agents={agents} t={t} />
       )}
