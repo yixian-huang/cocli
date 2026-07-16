@@ -12,6 +12,11 @@ use uuid::Uuid;
 
 mod wiki;
 pub use wiki::{WikiBacklink, WikiPage, WikiPageSummary, WikiRevision};
+mod memory;
+pub use memory::{
+    MemoryDocument, MemoryDocumentEntry, MemoryMoveResult, MemoryNamespace, MemoryScope,
+    MemoryTopic,
+};
 
 /// Errors returned by the local SQLite store.
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +93,42 @@ pub enum StoreError {
         /// Requested historical version.
         version: i64,
     },
+    /// A memory topic type is outside the fixed local taxonomy.
+    #[error("invalid memory type: {0}")]
+    InvalidMemoryType(String),
+    /// A memory topic slug is unsafe or too long.
+    #[error("invalid memory topic: {0}")]
+    InvalidMemoryTopic(String),
+    /// A memory description cannot be represented safely in frontmatter.
+    #[error("invalid memory description: {0}")]
+    InvalidMemoryDescription(String),
+    /// A memory topic exceeded the per-file byte cap.
+    #[error("memory topic is too large: {bytes} bytes exceeds {limit} bytes")]
+    MemoryTopicTooLarge {
+        /// Actual UTF-8 byte length.
+        bytes: usize,
+        /// Maximum permitted UTF-8 byte length.
+        limit: usize,
+    },
+    /// A memory namespace exceeded its aggregate byte cap.
+    #[error("memory namespace is full: {bytes} bytes exceeds {limit} bytes")]
+    MemoryNamespaceFull {
+        /// Actual aggregate byte length.
+        bytes: i64,
+        /// Maximum permitted aggregate byte length.
+        limit: i64,
+    },
+    /// A generated memory index exceeded its line cap.
+    #[error("memory index is full: {lines} lines exceeds {limit} lines")]
+    MemoryIndexFull {
+        /// Generated line count.
+        lines: usize,
+        /// Maximum permitted line count.
+        limit: usize,
+    },
+    /// A memory move cannot target the same namespace.
+    #[error("source and destination memory namespaces are identical")]
+    MemoryMoveSameNamespace,
 }
 
 /// A local conversation channel.

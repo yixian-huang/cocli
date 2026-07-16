@@ -220,6 +220,146 @@ async fn wiki_routes_match_browser_contract_and_preserve_history() {
 }
 
 #[tokio::test]
+async fn memory_routes_support_private_shared_write_read_and_move() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "memory-api"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let (_, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "rememberer",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id");
+
+    let (write_status, written) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{agent_id}/memory/topic"),
+        json!({
+            "scope": "agent",
+            "type": "project",
+            "topic": "apollo",
+            "description": "Apollo plan",
+            "body": "# Apollo\n\nShip locally."
+        }),
+    )
+    .await;
+    assert_eq!(write_status, StatusCode::OK);
+    assert_eq!(written["version"], 1);
+    assert_eq!(written["type"], "project");
+
+    let (public_index_status, public_index) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/memory/index"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(public_index_status, StatusCode::OK);
+    assert!(public_index["body"]
+        .as_str()
+        .is_some_and(|body| body.contains("project_apollo")));
+
+    let (public_topic_status, public_topic) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/memory/topic?type=project&topic=apollo"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(public_topic_status, StatusCode::OK);
+    assert_eq!(public_topic["version"], 1);
+    assert!(public_topic["body"]
+        .as_str()
+        .is_some_and(|body| body.contains("Ship locally.")));
+
+    let (move_status, moved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{agent_id}/memory/move"),
+        json!({
+            "from_scope": "agent",
+            "to_scope": "channel",
+            "to_channel_id": channel_id,
+            "type": "project",
+            "topic": "apollo"
+        }),
+    )
+    .await;
+    assert_eq!(move_status, StatusCode::OK);
+    assert!(moved["from"]
+        .as_str()
+        .is_some_and(|path| path.starts_with("agents/")));
+    assert!(moved["to"]
+        .as_str()
+        .is_some_and(|path| path.starts_with("channels/")));
+
+    let (missing_status, _) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/memory/topic?type=project&topic=apollo"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(missing_status, StatusCode::NOT_FOUND);
+
+    let (channel_topic_status, channel_topic) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/channels/{channel_id}/memory/topic?type=project&topic=apollo"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(channel_topic_status, StatusCode::OK);
+    assert!(channel_topic["body"]
+        .as_str()
+        .is_some_and(|body| body.contains("Ship locally.")));
+
+    let (list_status, namespace) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{agent_id}/memory/list?scope=channel&channel_id={channel_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(list_status, StatusCode::OK);
+    assert_eq!(namespace["entries"].as_array().map(Vec::len), Some(2));
+
+    let (_, other_channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "not-a-member"}),
+    )
+    .await;
+    let other_channel_id = other_channel["id"].as_str().expect("other channel id");
+    let (forbidden_status, _) = json_request(
+        app,
+        "GET",
+        &format!(
+            "/api/bridge/agents/{agent_id}/memory/index?scope=channel&channel_id={other_channel_id}"
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
 async fn post_message_persists_user_message_and_fake_agent_reply() {
     let store = Store::in_memory().await.expect("store should open");
     let app = router(store, Arc::new(FakeRuntime));

@@ -14,8 +14,9 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use cocli_store::{
     Agent, AgentActivity, AgentSession, AgentSessionFinish, AgentStatus, AgentTurn, Channel,
-    Delivery, DeliveryStats, Message, MessageRole, NewAgentTurn, Store, StoreError, Task,
-    TaskStatus, WikiBacklink, WikiPage, WikiPageSummary, WikiRevision,
+    Delivery, DeliveryStats, MemoryDocument, MemoryDocumentEntry, MemoryMoveResult,
+    MemoryNamespace, MemoryScope, MemoryTopic, Message, MessageRole, NewAgentTurn, Store,
+    StoreError, Task, TaskStatus, WikiBacklink, WikiPage, WikiPageSummary, WikiRevision,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -694,6 +695,22 @@ pub fn router_with_delivery_config(
         .route("/api/agents/:agent_id/turns", get(list_agent_turns))
         .route("/api/agents/:agent_id/turns/:turn_id", get(get_agent_turn))
         .route("/api/agents/:agent_id/activity", get(list_agent_activity))
+        .route(
+            "/api/agents/:agent_id/memory/index",
+            get(get_agent_memory_index),
+        )
+        .route(
+            "/api/agents/:agent_id/memory/topic",
+            get(get_agent_memory_topic),
+        )
+        .route(
+            "/api/channels/:channel_id/memory/index",
+            get(get_channel_memory_index),
+        )
+        .route(
+            "/api/channels/:channel_id/memory/topic",
+            get(get_channel_memory_topic),
+        )
         .route("/api/agents/:agent_id/turn/cancel", post(cancel_turn))
         .route("/api/agents/:agent_id/turn/steer", post(steer_turn))
         .route("/api/agents/:agent_id/thread/fork", post(fork_thread))
@@ -745,6 +762,22 @@ pub fn router_with_delivery_config(
         .route(
             "/api/bridge/agents/:agent_id/working/clear",
             post(bridge_clear_working_state),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/index",
+            get(bridge_get_memory_index),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/list",
+            get(bridge_list_memory_namespace),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/topic",
+            get(bridge_get_memory_topic).post(bridge_write_memory_topic),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/memory/move",
+            post(bridge_move_memory_topic),
         )
         .with_state(AppState {
             store,
@@ -994,6 +1027,81 @@ fn default_session_turn_limit() -> i64 {
 
 fn default_activity_limit() -> i64 {
     50
+}
+
+#[derive(Deserialize)]
+struct MemoryTopicQuery {
+    #[serde(rename = "type")]
+    memory_type: String,
+    topic: String,
+}
+
+async fn get_agent_memory_index(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<MemoryDocument>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(
+        state
+            .store
+            .get_memory_index(MemoryNamespace::Agent(agent_id))
+            .await?,
+    ))
+}
+
+async fn get_agent_memory_topic(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<MemoryTopicQuery>,
+) -> Result<Json<MemoryDocument>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    let topic = state
+        .store
+        .get_memory_topic(
+            MemoryNamespace::Agent(agent_id),
+            &query.memory_type,
+            &query.topic,
+        )
+        .await?
+        .ok_or_else(|| ApiError::not_found("memory topic not found"))?;
+    Ok(Json(MemoryDocument {
+        body: topic.body,
+        version: topic.version,
+    }))
+}
+
+async fn get_channel_memory_index(
+    State(state): State<AppState>,
+    Path(channel_id): Path<Uuid>,
+) -> Result<Json<MemoryDocument>, ApiError> {
+    require_channel(&state.store, channel_id).await?;
+    Ok(Json(
+        state
+            .store
+            .get_memory_index(MemoryNamespace::Channel(channel_id))
+            .await?,
+    ))
+}
+
+async fn get_channel_memory_topic(
+    State(state): State<AppState>,
+    Path(channel_id): Path<Uuid>,
+    Query(query): Query<MemoryTopicQuery>,
+) -> Result<Json<MemoryDocument>, ApiError> {
+    require_channel(&state.store, channel_id).await?;
+    let topic = state
+        .store
+        .get_memory_topic(
+            MemoryNamespace::Channel(channel_id),
+            &query.memory_type,
+            &query.topic,
+        )
+        .await?
+        .ok_or_else(|| ApiError::not_found("memory topic not found"))?;
+    Ok(Json(MemoryDocument {
+        body: topic.body,
+        version: topic.version,
+    }))
 }
 
 #[derive(Serialize)]
@@ -1661,6 +1769,189 @@ async fn bridge_clear_working_state(
     }))
 }
 
+#[derive(Deserialize)]
+struct BridgeMemoryScopeQuery {
+    scope: MemoryScope,
+    #[serde(default)]
+    channel_id: Option<Uuid>,
+}
+
+#[derive(Deserialize)]
+struct BridgeMemoryTopicQuery {
+    scope: MemoryScope,
+    #[serde(default)]
+    channel_id: Option<Uuid>,
+    #[serde(rename = "type")]
+    memory_type: String,
+    topic: String,
+}
+
+#[derive(Serialize)]
+struct BridgeMemoryNamespaceResponse {
+    entries: Vec<MemoryDocumentEntry>,
+}
+
+async fn bridge_get_memory_index(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<BridgeMemoryScopeQuery>,
+) -> Result<Json<MemoryDocument>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let namespace =
+        resolve_bridge_memory_namespace(&state.store, &agent, query.scope, query.channel_id)
+            .await?;
+    Ok(Json(state.store.get_memory_index(namespace).await?))
+}
+
+async fn bridge_list_memory_namespace(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<BridgeMemoryScopeQuery>,
+) -> Result<Json<BridgeMemoryNamespaceResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let namespace =
+        resolve_bridge_memory_namespace(&state.store, &agent, query.scope, query.channel_id)
+            .await?;
+    Ok(Json(BridgeMemoryNamespaceResponse {
+        entries: state.store.list_memory_namespace(namespace).await?,
+    }))
+}
+
+async fn bridge_get_memory_topic(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<BridgeMemoryTopicQuery>,
+) -> Result<Json<MemoryTopic>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let namespace =
+        resolve_bridge_memory_namespace(&state.store, &agent, query.scope, query.channel_id)
+            .await?;
+    state
+        .store
+        .get_memory_topic(namespace, &query.memory_type, &query.topic)
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("memory topic not found"))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeWriteMemoryTopicRequest {
+    scope: MemoryScope,
+    #[serde(default, alias = "channel_id")]
+    channel_id: Option<Uuid>,
+    #[serde(rename = "type")]
+    memory_type: String,
+    topic: String,
+    #[serde(default)]
+    description: String,
+    body: String,
+    #[serde(default, alias = "if_version")]
+    if_version: Option<i64>,
+}
+
+async fn bridge_write_memory_topic(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeWriteMemoryTopicRequest>,
+) -> Result<Json<MemoryTopic>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let namespace =
+        resolve_bridge_memory_namespace(&state.store, &agent, request.scope, request.channel_id)
+            .await?;
+    Ok(Json(
+        state
+            .store
+            .write_memory_topic(
+                namespace,
+                &request.memory_type,
+                &request.topic,
+                &request.description,
+                &request.body,
+                Some(&agent.name),
+                request.if_version,
+            )
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct BridgeMoveMemoryTopicRequest {
+    from_scope: MemoryScope,
+    #[serde(default)]
+    from_channel_id: Option<Uuid>,
+    to_scope: MemoryScope,
+    #[serde(default)]
+    to_channel_id: Option<Uuid>,
+    #[serde(rename = "type")]
+    memory_type: String,
+    topic: String,
+}
+
+async fn bridge_move_memory_topic(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeMoveMemoryTopicRequest>,
+) -> Result<Json<MemoryMoveResult>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let from = resolve_bridge_memory_namespace(
+        &state.store,
+        &agent,
+        request.from_scope,
+        request.from_channel_id,
+    )
+    .await?;
+    let to = resolve_bridge_memory_namespace(
+        &state.store,
+        &agent,
+        request.to_scope,
+        request.to_channel_id,
+    )
+    .await?;
+    Ok(Json(
+        state
+            .store
+            .move_memory_topic(
+                from,
+                to,
+                &request.memory_type,
+                &request.topic,
+                Some(&agent.name),
+            )
+            .await?,
+    ))
+}
+
+async fn resolve_bridge_memory_namespace(
+    store: &Store,
+    agent: &Agent,
+    scope: MemoryScope,
+    channel_id: Option<Uuid>,
+) -> Result<MemoryNamespace, ApiError> {
+    match scope {
+        MemoryScope::Agent => {
+            if channel_id.is_some() {
+                return Err(ApiError::bad_request(
+                    "channel_id is forbidden for agent memory",
+                ));
+            }
+            Ok(MemoryNamespace::Agent(agent.id))
+        }
+        MemoryScope::Channel => {
+            let channel_id = channel_id.ok_or_else(|| {
+                ApiError::bad_request("channel_id is required for channel memory")
+            })?;
+            if channel_id != agent.channel_id {
+                return Err(ApiError::forbidden(
+                    "agent does not belong to the requested channel",
+                ));
+            }
+            require_channel(store, channel_id).await?;
+            Ok(MemoryNamespace::Channel(channel_id))
+        }
+    }
+}
+
 fn default_bridge_message_limit() -> i64 {
     50
 }
@@ -2020,6 +2311,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn forbidden(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: message.into(),
+        }
+    }
 }
 
 impl From<StoreError> for ApiError {
@@ -2035,6 +2333,13 @@ impl From<StoreError> for ApiError {
                 Some(StatusCode::NOT_FOUND)
             }
             StoreError::WikiVersionConflict { .. } => Some(StatusCode::CONFLICT),
+            StoreError::InvalidMemoryType(_)
+            | StoreError::InvalidMemoryTopic(_)
+            | StoreError::InvalidMemoryDescription(_)
+            | StoreError::MemoryMoveSameNamespace => Some(StatusCode::BAD_REQUEST),
+            StoreError::MemoryTopicTooLarge { .. }
+            | StoreError::MemoryNamespaceFull { .. }
+            | StoreError::MemoryIndexFull { .. } => Some(StatusCode::UNPROCESSABLE_ENTITY),
             _ => None,
         };
         if let Some(status) = status {

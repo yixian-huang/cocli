@@ -95,88 +95,20 @@ impl Store {
         reason: Option<&str>,
         if_version: Option<i64>,
     ) -> Result<WikiPage, StoreError> {
-        let now = Utc::now();
-        let normalized_tags = normalize_tags(tags);
-        let tags_json = serde_json::to_string(&normalized_tags)?;
         let mut transaction = self.pool.begin().await?;
-        let existing = query("SELECT id, version, created_at FROM wiki_pages WHERE path = ?")
-            .bind(path)
-            .fetch_optional(&mut *transaction)
-            .await?;
-
-        let (id, version, created_at) = if let Some(existing) = existing {
-            let id: Uuid = existing.try_get("id")?;
-            let current_version: i64 = existing.try_get("version")?;
-            if let Some(attempted_version) = if_version.filter(|version| *version > 0) {
-                if attempted_version != current_version {
-                    return Err(StoreError::WikiVersionConflict {
-                        path: path.to_owned(),
-                        current_version,
-                        attempted_version,
-                    });
-                }
-            }
-            let version = current_version + 1;
-            query(
-                "UPDATE wiki_pages SET title = ?, content_md = ?, tags = ?, \
-                 version = ?, updated_at = ?, updated_by = ? WHERE id = ?",
-            )
-            .bind(title)
-            .bind(content)
-            .bind(&tags_json)
-            .bind(version)
-            .bind(now)
-            .bind(updated_by)
-            .bind(id)
-            .execute(&mut *transaction)
-            .await?;
-            (id, version, existing.try_get("created_at")?)
-        } else {
-            let id = Uuid::new_v4();
-            query(
-                "INSERT INTO wiki_pages \
-                 (id, path, title, content_md, tags, version, created_at, updated_at, updated_by) \
-                 VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
-            )
-            .bind(id)
-            .bind(path)
-            .bind(title)
-            .bind(content)
-            .bind(&tags_json)
-            .bind(now)
-            .bind(now)
-            .bind(updated_by)
-            .execute(&mut *transaction)
-            .await?;
-            (id, 1, now)
-        };
-
-        insert_wiki_revision(
+        let page = upsert_wiki_page_in_transaction(
             &mut transaction,
-            id,
-            version,
+            path,
             title,
             content,
-            &tags_json,
-            now,
+            tags,
             updated_by,
             reason,
+            if_version,
         )
         .await?;
-        replace_wiki_links(&mut transaction, id, content).await?;
         transaction.commit().await?;
-
-        Ok(WikiPage {
-            id,
-            path: path.to_owned(),
-            title: title.to_owned(),
-            content: content.to_owned(),
-            tags: normalized_tags,
-            version,
-            created_at,
-            updated_at: now,
-            updated_by: updated_by.map(str::to_owned),
-        })
+        Ok(page)
     }
 
     /// Returns a page by its canonical path.
@@ -360,6 +292,99 @@ impl Store {
             updated_by: updated_by.map(str::to_owned),
         })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn upsert_wiki_page_in_transaction(
+    transaction: &mut sqlx_core::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    path: &str,
+    title: &str,
+    content: &str,
+    tags: &[String],
+    updated_by: Option<&str>,
+    reason: Option<&str>,
+    if_version: Option<i64>,
+) -> Result<WikiPage, StoreError> {
+    let now = Utc::now();
+    let normalized_tags = normalize_tags(tags);
+    let tags_json = serde_json::to_string(&normalized_tags)?;
+    let existing = query("SELECT id, version, created_at FROM wiki_pages WHERE path = ?")
+        .bind(path)
+        .fetch_optional(&mut **transaction)
+        .await?;
+
+    let (id, version, created_at) = if let Some(existing) = existing {
+        let id: Uuid = existing.try_get("id")?;
+        let current_version: i64 = existing.try_get("version")?;
+        if let Some(attempted_version) = if_version.filter(|version| *version > 0) {
+            if attempted_version != current_version {
+                return Err(StoreError::WikiVersionConflict {
+                    path: path.to_owned(),
+                    current_version,
+                    attempted_version,
+                });
+            }
+        }
+        let version = current_version + 1;
+        query(
+            "UPDATE wiki_pages SET title = ?, content_md = ?, tags = ?, \
+             version = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+        )
+        .bind(title)
+        .bind(content)
+        .bind(&tags_json)
+        .bind(version)
+        .bind(now)
+        .bind(updated_by)
+        .bind(id)
+        .execute(&mut **transaction)
+        .await?;
+        (id, version, existing.try_get("created_at")?)
+    } else {
+        let id = Uuid::new_v4();
+        query(
+            "INSERT INTO wiki_pages \
+             (id, path, title, content_md, tags, version, created_at, updated_at, updated_by) \
+             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(path)
+        .bind(title)
+        .bind(content)
+        .bind(&tags_json)
+        .bind(now)
+        .bind(now)
+        .bind(updated_by)
+        .execute(&mut **transaction)
+        .await?;
+        (id, 1, now)
+    };
+
+    insert_wiki_revision(
+        transaction,
+        id,
+        version,
+        title,
+        content,
+        &tags_json,
+        now,
+        updated_by,
+        reason,
+    )
+    .await?;
+    replace_wiki_links(transaction, id, content).await?;
+    Ok(WikiPage {
+        id,
+        path: path.to_owned(),
+        title: title.to_owned(),
+        content: content.to_owned(),
+        tags: normalized_tags,
+        version,
+        created_at,
+        updated_at: now,
+        updated_by: updated_by.map(str::to_owned),
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
