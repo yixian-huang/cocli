@@ -78,6 +78,25 @@ export interface SkillFileEntry {
   size: number
 }
 
+export type TaskStatus = 'todo' | 'in_progress' | 'in_review' | 'done'
+
+export interface Task {
+  id: string
+  channelId: string
+  messageId?: string
+  taskNumber: number
+  title: string
+  status: TaskStatus
+  progress?: string
+  assigneeId?: string
+  assigneeType?: string
+  assigneeName?: string
+  createdById?: string
+  createdByType?: string
+  createdAt: string
+  updatedAt: string
+}
+
 interface PostMessageResponse {
   message: Message
   replies: Message[]
@@ -182,5 +201,53 @@ export const localApi = {
   readAgentSkillFile: (agentId: string, installId: string, relativePath: string) =>
     request<{ content: string; binary: boolean }>(
       `/api/agents/${agentId}/skills/${installId}/files/${encodeURIComponent(relativePath)}`,
+    ),
+  listTasks: (channelId: string, status?: TaskStatus) =>
+    request<Task[]>(
+      `/api/channels/${channelId}/tasks${status ? `?status=${encodeURIComponent(status)}` : ''}`,
+    ),
+  createTask: (channelId: string, title: string) =>
+    request<Task>(`/api/channels/${channelId}/tasks`, {
+      method: 'POST',
+      body: JSON.stringify({ title }),
+    }),
+  claimTask: (channelId: string, taskNumber: number, agentId: string) =>
+    request<Task>(`/api/channels/${channelId}/tasks/${taskNumber}/claim`, {
+      method: 'POST',
+      body: JSON.stringify({ agentId }),
+    }),
+  unclaimTask: (channelId: string, taskNumber: number) =>
+    request<Task>(`/api/channels/${channelId}/tasks/${taskNumber}/unclaim`, {
+      method: 'POST',
+    }),
+  updateTaskStatus: (
+    channelId: string,
+    taskNumber: number,
+    status: TaskStatus,
+    progress?: string,
+  ) =>
+    request<Task>(`/api/channels/${channelId}/tasks/${taskNumber}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status, progress }),
+    }),
+  getTaskDependencies: (channelId: string, taskNumber: number) =>
+    request<{ taskNumber: number; dependsOn: number[] }>(
+      `/api/channels/${channelId}/tasks/${taskNumber}/dependencies`,
+    ),
+  addTaskDependency: (channelId: string, taskNumber: number, dependsOn: number) =>
+    request<{ taskNumber: number; dependsOn: number[] }>(
+      `/api/channels/${channelId}/tasks/${taskNumber}/dependencies`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ dependsOn }),
+      },
+    ),
+  removeTaskDependency: (channelId: string, taskNumber: number, dependsOn: number) =>
+    request<{ taskNumber: number; dependsOn: number[] }>(
+      `/api/channels/${channelId}/tasks/${taskNumber}/dependencies`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({ dependsOn }),
+      },
     ),
 }

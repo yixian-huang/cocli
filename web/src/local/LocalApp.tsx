@@ -6,7 +6,7 @@ import {
   useState,
   type FormEvent,
 } from 'react'
-import { Languages, MessageSquare, Moon, PackageOpen, Sun } from 'lucide-react'
+import { Languages, ListTodo, MessageSquare, Moon, PackageOpen, Sun } from 'lucide-react'
 import {
   localApi,
   type Agent,
@@ -17,6 +17,7 @@ import {
 } from './api'
 import { LocalSelect } from './LocalSelect'
 import { LocalSkillsWorkspace } from './LocalSkillsWorkspace'
+import { LocalTasksWorkspace } from './LocalTasksWorkspace'
 import {
   LANGUAGE_OPTIONS,
   resolveInitialLanguage,
@@ -26,7 +27,7 @@ import {
 } from './localization'
 
 type LocalTheme = 'light' | 'dark'
-type WorkspaceView = 'chat' | 'skills'
+type WorkspaceView = 'chat' | 'tasks' | 'skills'
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unexpected local service error'
@@ -288,6 +289,15 @@ export function LocalApp() {
           >
             <MessageSquare size={14} aria-hidden="true" />
             {t('chatWorkspace')}
+          </button>
+          <button
+            type="button"
+            className={workspaceView === 'tasks' ? 'active' : ''}
+            aria-current={workspaceView === 'tasks' ? 'page' : undefined}
+            onClick={() => setWorkspaceView('tasks')}
+          >
+            <ListTodo size={14} aria-hidden="true" />
+            {t('tasksWorkspace')}
           </button>
           <button
             type="button"
@@ -562,6 +572,14 @@ export function LocalApp() {
           </form>
         </aside>
       </div>
+      ) : workspaceView === 'tasks' ? (
+        <LocalTasksWorkspace
+          channels={channels}
+          agents={agents}
+          activeChannelId={activeChannelId}
+          onChannelChange={setActiveChannelId}
+          t={t}
+        />
       ) : (
         <LocalSkillsWorkspace agents={agents} t={t} />
       )}

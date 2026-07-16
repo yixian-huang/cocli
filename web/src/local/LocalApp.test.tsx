@@ -28,6 +28,20 @@ function jsonResponse(body: unknown, status = 200) {
 describe('LocalApp', () => {
   beforeEach(() => {
     let skillInstalled = false
+    let taskState: Array<{
+      id: string
+      channelId: string
+      taskNumber: number
+      title: string
+      status: 'todo' | 'in_progress' | 'in_review' | 'done'
+      progress?: string
+      assigneeId?: string
+      assigneeType?: string
+      assigneeName?: string
+      createdAt: string
+      updatedAt: string
+    }> = []
+    const taskDependencies: Record<number, number[]> = {}
     localStorage.clear()
     window.matchMedia = vi.fn().mockReturnValue({
       matches: false,
@@ -123,6 +137,83 @@ describe('LocalApp', () => {
           content: '# Reviewer\n\nReview local changes.',
           binary: false,
         })
+      }
+      if (path === `/api/channels/${channel.id}/tasks` && !init?.method) {
+        return jsonResponse(taskState)
+      }
+      if (path === `/api/channels/${channel.id}/tasks` && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { title: string }
+        const taskNumber = taskState.length + 1
+        const task = {
+          id: `task-${taskNumber}`,
+          channelId: channel.id,
+          taskNumber,
+          title: body.title,
+          status: 'todo' as const,
+          createdAt: '2026-07-16T09:03:00Z',
+          updatedAt: '2026-07-16T09:03:00Z',
+        }
+        taskState = [...taskState, task]
+        taskDependencies[taskNumber] = []
+        return jsonResponse(task, 201)
+      }
+      const dependencyMatch = path.match(
+        new RegExp(`^/api/channels/${channel.id}/tasks/(\\d+)/dependencies$`),
+      )
+      if (dependencyMatch && !init?.method) {
+        const taskNumber = Number(dependencyMatch[1])
+        return jsonResponse({
+          taskNumber,
+          dependsOn: taskDependencies[taskNumber] ?? [],
+        })
+      }
+      if (dependencyMatch && init?.method === 'POST') {
+        const taskNumber = Number(dependencyMatch[1])
+        const body = JSON.parse(String(init.body)) as { dependsOn: number }
+        taskDependencies[taskNumber] = [
+          ...(taskDependencies[taskNumber] ?? []),
+          body.dependsOn,
+        ]
+        return jsonResponse({
+          taskNumber,
+          dependsOn: taskDependencies[taskNumber],
+        }, 201)
+      }
+      const claimMatch = path.match(
+        new RegExp(`^/api/channels/${channel.id}/tasks/(\\d+)/claim$`),
+      )
+      if (claimMatch && init?.method === 'POST') {
+        const taskNumber = Number(claimMatch[1])
+        const task = taskState.find((candidate) => candidate.taskNumber === taskNumber)!
+        const updated = {
+          ...task,
+          status: 'in_progress' as const,
+          assigneeId: 'agent-1',
+          assigneeType: 'agent',
+          assigneeName: 'builder',
+          updatedAt: '2026-07-16T09:04:00Z',
+        }
+        taskState = taskState.map((candidate) => candidate.id === updated.id ? updated : candidate)
+        return jsonResponse(updated)
+      }
+      const statusMatch = path.match(
+        new RegExp(`^/api/channels/${channel.id}/tasks/(\\d+)/status$`),
+      )
+      if (statusMatch && init?.method === 'POST') {
+        const taskNumber = Number(statusMatch[1])
+        const body = JSON.parse(String(init.body)) as {
+          status: 'todo' | 'in_progress' | 'in_review' | 'done'
+          progress?: string
+        }
+        const task = taskState.find((candidate) => candidate.taskNumber === taskNumber)!
+        const updated = {
+          ...task,
+          status: body.status,
+          progress: body.progress,
+          updatedAt: '2026-07-16T09:05:00Z',
+        }
+        taskState = taskState.map((candidate) => candidate.id === updated.id ? updated : candidate)
+        return jsonResponse(updated)
       }
       if (path === `/api/channels/${channel.id}/messages` && init?.method === 'POST') {
         return jsonResponse({
@@ -223,5 +314,43 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View files' }))
     expect(await screen.findByRole('heading', { name: 'Reviewer' })).toBeInTheDocument()
     expect(await screen.findByText(/Review local changes\./)).toBeInTheDocument()
+  })
+
+  it('creates, assigns, updates, and links local tasks', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+    expect(await screen.findByText('builder')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Tasks' }))
+    expect(await screen.findByRole('heading', { name: 'Task board' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('New task'), {
+      target: { value: 'Prepare release' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create task' }))
+
+    expect(await screen.findByRole('heading', { name: '#1 Prepare release' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Claim task' }))
+    expect((await screen.findAllByText('@builder')).length).toBeGreaterThan(0)
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Progress' }), {
+      target: { value: 'Implementation verified' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Save progress' }))
+    expect(await screen.findByDisplayValue('Implementation verified')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('New task'), {
+      target: { value: 'Ship release' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Create task' }))
+    expect(await screen.findByRole('heading', { name: '#2 Ship release' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dependencies' }))
+    fireEvent.click(screen.getByRole('option', { name: /#1 Prepare release/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add dependency' }))
+
+    expect(await screen.findByText('#1 Prepare release')).toBeInTheDocument()
   })
 })
