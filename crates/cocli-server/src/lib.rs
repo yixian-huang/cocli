@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
-use cocli_api::{router, RuntimeService};
+use cocli_api::{router, RuntimeService, SqliteRuntimeHistorySink};
 use cocli_store::{Store, StoreError};
 use tokio::net::TcpListener;
 
@@ -44,6 +44,7 @@ impl Server {
     ) -> Result<Self, ServerError> {
         tokio::fs::create_dir_all(&config.data_dir).await?;
         let store = Store::open(database_path(&config.data_dir)).await?;
+        runtime.set_history_sink(Arc::new(SqliteRuntimeHistorySink::new(store.clone())));
         let listener = TcpListener::bind(config.bind).await?;
         Ok(Self {
             listener,

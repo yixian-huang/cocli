@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant as StdInstant};
 
 use async_trait::async_trait;
@@ -15,8 +15,9 @@ use cocli_agent::state::Idle;
 use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
-    RuntimeError, RuntimeForkResult, RuntimeInfo, RuntimeMetricsSnapshot,
-    RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus,
+    RuntimeError, RuntimeForkResult, RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo,
+    RuntimeMetricsSnapshot, RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService,
+    RuntimeSessionStatus,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -91,6 +92,7 @@ pub struct LocalRuntimeService {
     session_locks: Mutex<HashMap<Uuid, Arc<Mutex<()>>>>,
     metrics: Arc<AgentMetrics>,
     recovery: Arc<Mutex<RecoveryStore>>,
+    history_sink: OnceLock<Arc<dyn RuntimeHistorySink>>,
 }
 
 #[derive(Clone)]
@@ -125,6 +127,10 @@ struct ActiveReply {
     text: String,
     last_error: Option<String>,
     deadline: Option<Instant>,
+    started_at: chrono::DateTime<chrono::Utc>,
+    channel_id: Uuid,
+    source_message_id: Option<Uuid>,
+    entries: Vec<serde_json::Value>,
 }
 
 struct LocalSessionContext {
@@ -135,6 +141,16 @@ struct LocalSessionContext {
     agent: Agent,
     metrics: Arc<AgentMetrics>,
     recovery: Arc<Mutex<RecoveryStore>>,
+    history_sink: Option<Arc<dyn RuntimeHistorySink>>,
+}
+
+#[derive(Default)]
+struct SessionTotals {
+    turn_count: i64,
+    input_tokens: i64,
+    output_tokens: i64,
+    cost_usd: f64,
+    context_window: i64,
 }
 
 struct QuotaRecovery {
@@ -180,6 +196,7 @@ impl LocalRuntimeService {
             session_locks: Mutex::new(HashMap::new()),
             metrics: Arc::new(AgentMetrics::default()),
             recovery: Arc::new(Mutex::new(RecoveryStore::new())),
+            history_sink: OnceLock::new(),
         }
     }
 
@@ -195,6 +212,8 @@ impl LocalRuntimeService {
         let agent = agent.clone();
         let metrics = Arc::clone(&self.metrics);
         let recovery = Arc::clone(&self.recovery);
+        let history_sink = self.history_sink.get().cloned();
+        record_session_start(&history_sink, &agent, &running).await;
         metrics.inc_local_session_started();
         metrics.inc_local_active_sessions();
         tokio::spawn(async move {
@@ -209,6 +228,7 @@ impl LocalRuntimeService {
                     agent,
                     metrics,
                     recovery,
+                    history_sink,
                 },
             )
             .await;
@@ -282,6 +302,9 @@ impl LocalRuntimeService {
                 content: message.content.clone(),
                 channel_name: "local".to_owned(),
                 channel_type: "channel".to_owned(),
+                seq: message.seq,
+                message_id: message.id.to_string(),
+                timestamp: message.created_at.to_rfc3339(),
                 ..Default::default()
             },
             ..Default::default()
@@ -303,6 +326,10 @@ impl LocalRuntimeService {
 
 #[async_trait]
 impl RuntimeService for LocalRuntimeService {
+    fn set_history_sink(&self, sink: Arc<dyn RuntimeHistorySink>) {
+        let _ = self.history_sink.set(sink);
+    }
+
     async fn list(&self) -> Vec<RuntimeInfo> {
         self.catalog.clone()
     }
@@ -748,6 +775,123 @@ fn expected_recovery_time(resets_at: i64) -> (i64, Option<StdInstant>) {
     (expected_ms, Some(expected_at))
 }
 
+async fn record_history(sink: &Option<Arc<dyn RuntimeHistorySink>>, event: RuntimeHistoryEvent) {
+    let Some(sink) = sink else {
+        return;
+    };
+    if let Err(error) = sink.record(event).await {
+        tracing::warn!(%error, "failed to persist local runtime history");
+    }
+}
+
+async fn record_session_start(
+    sink: &Option<Arc<dyn RuntimeHistorySink>>,
+    agent: &Agent,
+    running: &AgentActor<cocli_agent::state::Running>,
+) {
+    record_history(
+        sink,
+        RuntimeHistoryEvent::SessionStarted {
+            agent_id: agent.id,
+            channel_id: agent.channel_id,
+            session_id: running.state.session_id.clone(),
+            launch_id: running.state.launch_id.clone(),
+            started_at: chrono::Utc::now(),
+        },
+    )
+    .await;
+}
+
+async fn record_session_end(
+    sink: &Option<Arc<dyn RuntimeHistorySink>>,
+    agent: &Agent,
+    running: &AgentActor<cocli_agent::state::Running>,
+    totals: &SessionTotals,
+    end_reason: &str,
+) {
+    record_history(
+        sink,
+        RuntimeHistoryEvent::SessionEnded {
+            agent_id: agent.id,
+            launch_id: running.state.launch_id.clone(),
+            end_reason: end_reason.to_owned(),
+            turn_count: totals.turn_count,
+            input_tokens: totals.input_tokens,
+            output_tokens: totals.output_tokens,
+            cost_usd: totals.cost_usd,
+            context_window: totals.context_window,
+            ended_at: chrono::Utc::now(),
+        },
+    )
+    .await;
+}
+
+fn trajectory_entry(kind: &str, fields: serde_json::Value) -> serde_json::Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert(
+        "kind".to_owned(),
+        serde_json::Value::String(kind.to_owned()),
+    );
+    entry.insert(
+        "ts".to_owned(),
+        serde_json::Value::Number(chrono::Utc::now().timestamp_millis().into()),
+    );
+    if let serde_json::Value::Object(fields) = fields {
+        entry.extend(fields);
+    }
+    serde_json::Value::Object(entry)
+}
+
+fn tool_call_entry(id: String, name: String, input: serde_json::Value) -> serde_json::Value {
+    let mut input = match input {
+        serde_json::Value::Object(input) => input,
+        other => {
+            let mut input = serde_json::Map::new();
+            input.insert("arguments".to_owned(), other);
+            input
+        }
+    };
+    input.insert("name".to_owned(), serde_json::Value::String(name));
+    trajectory_entry(
+        "tool_call",
+        serde_json::json!({"id": id, "input": serde_json::Value::Object(input)}),
+    )
+}
+
+async fn record_aborted_turn(
+    sink: &Option<Arc<dyn RuntimeHistorySink>>,
+    agent: &Agent,
+    running: &AgentActor<cocli_agent::state::Running>,
+    totals: &mut SessionTotals,
+    turn: &mut ActiveReply,
+    reason: &str,
+) {
+    totals.turn_count = totals.turn_count.saturating_add(1);
+    turn.entries.push(trajectory_entry(
+        "error",
+        serde_json::json!({"text": reason}),
+    ));
+    record_history(
+        sink,
+        RuntimeHistoryEvent::TurnCompleted {
+            agent_id: agent.id,
+            channel_id: turn.channel_id,
+            source_message_id: turn.source_message_id,
+            session_id: running.state.session_id.clone(),
+            launch_id: running.state.launch_id.clone(),
+            turn_number: totals.turn_count,
+            started_at: turn.started_at,
+            ended_at: chrono::Utc::now(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            context_window: totals.context_window,
+            entries: serde_json::Value::Array(turn.entries.clone()),
+        },
+    )
+    .await;
+}
+
 async fn run_local_session(
     mut running: AgentActor<cocli_agent::state::Running>,
     mut commands: mpsc::Receiver<LocalSessionCommand>,
@@ -761,11 +905,13 @@ async fn run_local_session(
         agent,
         metrics,
         recovery,
+        history_sink,
     } = context;
     let turn_timeout = config.turn_timeout;
     let mut active: Option<ActiveReply> = None;
     let mut event_rx_live = true;
     let mut quota_recovery: Option<QuotaRecovery> = None;
+    let mut totals = SessionTotals::default();
     loop {
         let deadline = active
             .as_ref()
@@ -782,6 +928,10 @@ async fn run_local_session(
                         )));
                         continue;
                     }
+                    let channel_id = delivery.message.channel_id;
+                    let source_message_id =
+                        Uuid::parse_str(&delivery.message.message_id).ok();
+                    let input_text = delivery.message.content.clone();
                     match running.deliver(delivery).await {
                         Ok(()) => {
                             if running.state.respawn_ctx.is_some() {
@@ -794,6 +944,13 @@ async fn run_local_session(
                                 text: String::new(),
                                 last_error: None,
                                 deadline: Some(Instant::now() + turn_timeout),
+                                started_at: chrono::Utc::now(),
+                                channel_id,
+                                source_message_id,
+                                entries: vec![trajectory_entry(
+                                    "input",
+                                    serde_json::json!({"text": input_text}),
+                                )],
                             });
                             status.write().await.active_turn = true;
                         }
@@ -839,12 +996,34 @@ async fn run_local_session(
                         })
                     };
                     if let Ok(session_id) = &result {
+                        record_session_end(
+                            &history_sink,
+                            &agent,
+                            &running,
+                            &totals,
+                            "context_reset",
+                        )
+                        .await;
+                        running.state.session_id.clone_from(session_id);
+                        running.state.launch_id = Uuid::new_v4().to_string();
+                        running.state.turn_count = 0;
+                        totals = SessionTotals::default();
+                        record_session_start(&history_sink, &agent, &running).await;
                         status.write().await.session_id.clone_from(session_id);
                     }
                     let _ = reply.send(result);
                 }
                 Some(LocalSessionCommand::Stop { reply }) => {
                     if let Some(turn) = active.as_mut() {
+                        record_aborted_turn(
+                            &history_sink,
+                            &agent,
+                            &running,
+                            &mut totals,
+                            turn,
+                            "agent runtime stopped during active turn",
+                        )
+                        .await;
                         if let Some(reply) = turn.reply.take() {
                             let _ = reply.send(Err(RuntimeError::Delivery(
                                 "agent runtime stopped during active turn".to_owned(),
@@ -852,6 +1031,7 @@ async fn run_local_session(
                         }
                         metrics.inc_local_turn_cancelled();
                     }
+                    record_session_end(&history_sink, &agent, &running, &totals, "manual_stop").await;
                     let _stopping = running.stop(true);
                     let mut state = status.write().await;
                     state.running = false;
@@ -860,6 +1040,18 @@ async fn run_local_session(
                     break;
                 }
                 None => {
+                    if let Some(turn) = active.as_mut() {
+                        record_aborted_turn(
+                            &history_sink,
+                            &agent,
+                            &running,
+                            &mut totals,
+                            turn,
+                            "runtime command channel closed during active turn",
+                        )
+                        .await;
+                    }
+                    record_session_end(&history_sink, &agent, &running, &totals, "shutdown").await;
                     let _stopping = running.stop(true);
                     let mut state = status.write().await;
                     state.running = false;
@@ -872,15 +1064,80 @@ async fn run_local_session(
                     running.state.session_id.clone_from(&session_id);
                     status.write().await.session_id = session_id;
                 }
+                Some(DriverEvent::ThinkingDelta { text }) => {
+                    if let Some(turn) = active.as_mut() {
+                        turn.entries.push(trajectory_entry(
+                            "thinking",
+                            serde_json::json!({"text": text}),
+                        ));
+                    }
+                }
                 Some(DriverEvent::TextDelta { text }) => {
                     if let Some(turn) = active.as_mut() {
                         turn.text.push_str(&text);
+                        turn.entries.push(trajectory_entry(
+                            "text",
+                            serde_json::json!({"text": text}),
+                        ));
                     }
                 }
                 Some(DriverEvent::Error { message, .. }) => {
                     if let Some(turn) = active.as_mut() {
-                        turn.last_error = Some(message);
+                        turn.last_error = Some(message.clone());
+                        turn.entries.push(trajectory_entry(
+                            "error",
+                            serde_json::json!({"text": message}),
+                        ));
                     }
+                }
+                Some(DriverEvent::ToolCall { id, name, input }) => {
+                    let tool_name = name.clone();
+                    if let Some(turn) = active.as_mut() {
+                        turn.entries.push(tool_call_entry(id, name, input));
+                    }
+                    record_history(
+                        &history_sink,
+                        RuntimeHistoryEvent::Activity {
+                            agent_id: agent.id,
+                            session_id: running.state.session_id.clone(),
+                            launch_id: running.state.launch_id.clone(),
+                            activity: "working".to_owned(),
+                            detail: Some(tool_name.clone()),
+                            trajectory: vec![tool_name],
+                            created_at: chrono::Utc::now(),
+                        },
+                    )
+                    .await;
+                }
+                Some(DriverEvent::ToolResult { id, output, error })
+                | Some(DriverEvent::ToolDone {
+                    id,
+                    result: output,
+                    error,
+                }) => {
+                    if let Some(turn) = active.as_mut() {
+                        turn.entries.push(trajectory_entry(
+                            "tool_result",
+                            serde_json::json!({
+                                "id": id,
+                                "result": output,
+                                "error": error,
+                            }),
+                        ));
+                    }
+                    record_history(
+                        &history_sink,
+                        RuntimeHistoryEvent::Activity {
+                            agent_id: agent.id,
+                            session_id: running.state.session_id.clone(),
+                            launch_id: running.state.launch_id.clone(),
+                            activity: "working".to_owned(),
+                            detail: Some("tool_result".to_owned()),
+                            trajectory: vec!["tool_result".to_owned()],
+                            created_at: chrono::Utc::now(),
+                        },
+                    )
+                    .await;
                 }
                 Some(DriverEvent::RateLimit {
                     limit_type,
@@ -890,6 +1147,21 @@ async fn run_local_session(
                     ..
                 }) => {
                     if rate_limit_is_limited(&limit_status, overage_status.as_deref()) {
+                        record_history(
+                            &history_sink,
+                            RuntimeHistoryEvent::Activity {
+                                agent_id: agent.id,
+                                session_id: running.state.session_id.clone(),
+                                launch_id: running.state.launch_id.clone(),
+                                activity: "rate_limit".to_owned(),
+                                detail: Some(format!(
+                                    "type={limit_type} status={limit_status}"
+                                )),
+                                trajectory: Vec::new(),
+                                created_at: chrono::Utc::now(),
+                            },
+                        )
+                        .await;
                         let provider = running.state.driver.name().trim().to_owned();
                         let reason = terminal_stop_reason(&provider);
                         let (expected_recovery_at_ms, expected_at) =
@@ -920,6 +1192,8 @@ async fn run_local_session(
                 Some(DriverEvent::TurnEnd {
                     status: turn_status,
                     input_tokens,
+                    output_tokens,
+                    cost_usd,
                     context_window_tokens,
                     ..
                 }) => {
@@ -937,6 +1211,64 @@ async fn run_local_session(
                         }
                     }
                     if let Some(mut turn) = active.take() {
+                        let ended_at = chrono::Utc::now();
+                        let context_window = if context_window_tokens > 0 {
+                            context_window_tokens
+                        } else {
+                            running
+                                .state
+                                .driver
+                                .context_window_tokens()
+                                .unwrap_or_default() as u64
+                        };
+                        totals.turn_count = totals.turn_count.saturating_add(1);
+                        totals.input_tokens = totals
+                            .input_tokens
+                            .saturating_add(input_tokens.min(i64::MAX as u64) as i64);
+                        totals.output_tokens = totals
+                            .output_tokens
+                            .saturating_add(output_tokens.min(i64::MAX as u64) as i64);
+                        totals.cost_usd += cost_usd;
+                        totals.context_window = totals
+                            .context_window
+                            .max(context_window.min(i64::MAX as u64) as i64);
+                        running.state.turn_count = running.state.turn_count.saturating_add(1);
+                        turn.entries.push(trajectory_entry(
+                            "status",
+                            serde_json::json!({"text": format!("{turn_status:?}")}),
+                        ));
+                        record_history(
+                            &history_sink,
+                            RuntimeHistoryEvent::TurnCompleted {
+                                agent_id: agent.id,
+                                channel_id: turn.channel_id,
+                                source_message_id: turn.source_message_id,
+                                session_id: running.state.session_id.clone(),
+                                launch_id: running.state.launch_id.clone(),
+                                turn_number: totals.turn_count,
+                                started_at: turn.started_at,
+                                ended_at,
+                                input_tokens: input_tokens.min(i64::MAX as u64) as i64,
+                                output_tokens: output_tokens.min(i64::MAX as u64) as i64,
+                                cost_usd,
+                                context_window: context_window.min(i64::MAX as u64) as i64,
+                                entries: serde_json::Value::Array(turn.entries.clone()),
+                            },
+                        )
+                        .await;
+                        record_history(
+                            &history_sink,
+                            RuntimeHistoryEvent::Activity {
+                                agent_id: agent.id,
+                                session_id: running.state.session_id.clone(),
+                                launch_id: running.state.launch_id.clone(),
+                                activity: "online".to_owned(),
+                                detail: Some(format!("turn {}", totals.turn_count)),
+                                trajectory: Vec::new(),
+                                created_at: ended_at,
+                            },
+                        )
+                        .await;
                         if let Some(reply) = turn.reply.take() {
                             let result = completed_turn_result(
                                 turn_status,
@@ -949,6 +1281,14 @@ async fn run_local_session(
                     metrics.dec_local_active_turns();
                     status.write().await.active_turn = false;
                     if let Some(quota) = quota_recovery.take() {
+                        record_session_end(
+                            &history_sink,
+                            &agent,
+                            &running,
+                            &totals,
+                            "rate_limit",
+                        )
+                        .await;
                         let _stopping = running.stop(true);
                         {
                             let mut state = status.write().await;
@@ -966,6 +1306,8 @@ async fn run_local_session(
                         ).await {
                             Some(restarted) => {
                                 running = restarted;
+                                totals = SessionTotals::default();
+                                record_session_start(&history_sink, &agent, &running).await;
                                 *status.write().await =
                                     runtime_status_for_running(&agent, &running);
                                 *started_at.write().await = Instant::now();
@@ -983,20 +1325,66 @@ async fn run_local_session(
                         }
                     }
                 }
+                Some(DriverEvent::CompactStarted) => {
+                    record_history(
+                        &history_sink,
+                        RuntimeHistoryEvent::Activity {
+                            agent_id: agent.id,
+                            session_id: running.state.session_id.clone(),
+                            launch_id: running.state.launch_id.clone(),
+                            activity: "compact_started".to_owned(),
+                            detail: None,
+                            trajectory: Vec::new(),
+                            created_at: chrono::Utc::now(),
+                        },
+                    )
+                    .await;
+                }
+                Some(DriverEvent::CompactFinished) => {
+                    record_history(
+                        &history_sink,
+                        RuntimeHistoryEvent::Activity {
+                            agent_id: agent.id,
+                            session_id: running.state.session_id.clone(),
+                            launch_id: running.state.launch_id.clone(),
+                            activity: "compact_finished".to_owned(),
+                            detail: None,
+                            trajectory: Vec::new(),
+                            created_at: chrono::Utc::now(),
+                        },
+                    )
+                    .await;
+                }
                 Some(_) => {}
                 None => {
                     if let Some(quota) = quota_recovery.take() {
                         if let Some(mut turn) = active.take() {
                             metrics.inc_local_turn_failed();
                             metrics.dec_local_active_turns();
+                            let error = turn.last_error.clone().unwrap_or_else(|| {
+                                "runtime exited while rate limited".to_owned()
+                            });
+                            record_aborted_turn(
+                                &history_sink,
+                                &agent,
+                                &running,
+                                &mut totals,
+                                &mut turn,
+                                &error,
+                            )
+                            .await;
                             if let Some(reply) = turn.reply.take() {
-                                let _ = reply.send(Err(RuntimeError::Delivery(
-                                    turn.last_error.unwrap_or_else(|| {
-                                        "runtime exited while rate limited".to_owned()
-                                    }),
-                                )));
+                                let _ = reply.send(Err(RuntimeError::Delivery(error)));
                             }
                         }
+                        record_session_end(
+                            &history_sink,
+                            &agent,
+                            &running,
+                            &totals,
+                            "rate_limit",
+                        )
+                        .await;
                         {
                             let mut state = status.write().await;
                             state.running = false;
@@ -1014,6 +1402,8 @@ async fn run_local_session(
                         ).await {
                             Some(restarted) => {
                                 running = restarted;
+                                totals = SessionTotals::default();
+                                record_session_start(&history_sink, &agent, &running).await;
                                 *status.write().await =
                                     runtime_status_for_running(&agent, &running);
                                 *started_at.write().await = Instant::now();
@@ -1030,12 +1420,21 @@ async fn run_local_session(
                     if let Some(mut turn) = active.take() {
                         metrics.inc_local_turn_failed();
                         metrics.dec_local_active_turns();
+                        let error = turn
+                            .last_error
+                            .clone()
+                            .unwrap_or_else(|| "runtime exited before completing the turn".to_owned());
+                        record_aborted_turn(
+                            &history_sink,
+                            &agent,
+                            &running,
+                            &mut totals,
+                            &mut turn,
+                            &error,
+                        )
+                        .await;
                         if let Some(reply) = turn.reply.take() {
-                            let _ = reply.send(Err(RuntimeError::Delivery(
-                                turn.last_error.unwrap_or_else(|| {
-                                    "runtime exited before completing the turn".to_owned()
-                                }),
-                            )));
+                            let _ = reply.send(Err(RuntimeError::Delivery(error)));
                         }
                     }
                     {
@@ -1044,6 +1443,7 @@ async fn run_local_session(
                         state.recovering = true;
                         state.active_turn = false;
                     }
+                    record_session_end(&history_sink, &agent, &running, &totals, "error").await;
                     match restart_with_watchdog(
                         &registry,
                         &config,
@@ -1053,6 +1453,8 @@ async fn run_local_session(
                     ).await {
                         Some(restarted) => {
                             running = restarted;
+                            totals = SessionTotals::default();
+                            record_session_start(&history_sink, &agent, &running).await;
                             *status.write().await = runtime_status_for_running(&agent, &running);
                             *started_at.write().await = Instant::now();
                             event_rx_live = true;
@@ -1074,6 +1476,18 @@ async fn run_local_session(
                 }
                 if let Err(error) = running.turn_cancel().await {
                     tracing::warn!(agent_id = %running.id, %error, "failed to cancel timed-out turn");
+                    if let Some(turn) = active.as_mut() {
+                        record_aborted_turn(
+                            &history_sink,
+                            &agent,
+                            &running,
+                            &mut totals,
+                            turn,
+                            "runtime turn timed out and cancellation failed",
+                        )
+                        .await;
+                    }
+                    record_session_end(&history_sink, &agent, &running, &totals, "timeout").await;
                     let _stopping = running.stop(true);
                     let mut state = status.write().await;
                     state.running = false;
@@ -1997,6 +2411,96 @@ mod tests {
 
         assert!(reply.contains("ship it"));
         assert_eq!(service.list().await[0].models, vec!["test-model"]);
+    }
+
+    #[tokio::test]
+    async fn runtime_actor_persists_session_turn_and_activity_history() {
+        let temp = tempdir().expect("temp directory");
+        let _pid_guard = TestPidDirGuard::new(&temp.path().join("pids"));
+        let store = cocli_store::Store::in_memory()
+            .await
+            .expect("store should open");
+        let channel = store
+            .create_channel("history")
+            .await
+            .expect("channel should persist");
+        let agent = store
+            .create_agent(
+                channel.id,
+                "builder",
+                "fake",
+                Some("test-model"),
+                cocli_store::AgentStatus::Running,
+            )
+            .await
+            .expect("agent should persist");
+        let message = store
+            .append_message(
+                channel.id,
+                None,
+                cocli_store::MessageRole::User,
+                "record this",
+            )
+            .await
+            .expect("message should persist");
+
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(FakeDriver));
+        let service = LocalRuntimeService::from_catalog(
+            registry,
+            RuntimeCatalog::default(),
+            LocalRuntimeConfig {
+                workspace_root: temp.path().join("workspaces"),
+                server_url: "http://127.0.0.1:8090".to_owned(),
+                auth_token: String::new(),
+                turn_timeout: Duration::from_secs(2),
+                watchdog_backoff: [Duration::from_millis(1); 5],
+                recovery_backoff: [Duration::from_millis(1); 5],
+            },
+        );
+        service.set_history_sink(Arc::new(cocli_api::SqliteRuntimeHistorySink::new(
+            store.clone(),
+        )));
+
+        let reply = service
+            .reply(&agent, &message)
+            .await
+            .expect("runtime reply");
+        assert!(reply.contains("record this"));
+        service.stop(agent.id).await.expect("runtime should stop");
+
+        let sessions = store
+            .list_agent_sessions(agent.id, 20, Some("chat"))
+            .await
+            .expect("sessions should list");
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].end_reason.as_deref(), Some("manual_stop"));
+        assert_eq!(sessions[0].turn_count, 1);
+        assert_eq!(sessions[0].input_tokens, 1);
+        assert_eq!(sessions[0].output_tokens, 1);
+
+        let turns = store
+            .list_agent_turns(agent.id, Some("session-1"), 50, 0)
+            .await
+            .expect("turns should list");
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].message_ref.as_ref().map(|link| link.message_id),
+            Some(message.id)
+        );
+        assert_eq!(turns[0].entries[0]["kind"], "input");
+        assert!(turns[0]
+            .entries
+            .as_array()
+            .expect("entries should be an array")
+            .iter()
+            .any(|entry| entry["kind"] == "text"));
+
+        let activity = store
+            .list_agent_activity(agent.id, 50, 0)
+            .await
+            .expect("activity should list");
+        assert!(activity.iter().any(|entry| entry.activity == "online"));
     }
 
     #[test]

@@ -11,10 +11,11 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use cocli_store::{
-    Agent, AgentActivity, AgentSession, AgentStatus, AgentTurn, Channel, Delivery, DeliveryStats,
-    Message, MessageRole, Store, StoreError, Task, TaskStatus,
+    Agent, AgentActivity, AgentSession, AgentSessionFinish, AgentStatus, AgentTurn, Channel,
+    Delivery, DeliveryStats, Message, MessageRole, NewAgentTurn, Store, StoreError, Task,
+    TaskStatus,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
@@ -114,6 +115,191 @@ pub struct RuntimeMetricsSnapshot {
     pub gauges: BTreeMap<String, f64>,
 }
 
+/// Durable history events emitted by a local runtime service.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RuntimeHistoryEvent {
+    SessionStarted {
+        agent_id: Uuid,
+        channel_id: Uuid,
+        session_id: String,
+        launch_id: String,
+        started_at: DateTime<Utc>,
+    },
+    SessionEnded {
+        agent_id: Uuid,
+        launch_id: String,
+        end_reason: String,
+        turn_count: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        cost_usd: f64,
+        context_window: i64,
+        ended_at: DateTime<Utc>,
+    },
+    TurnCompleted {
+        agent_id: Uuid,
+        channel_id: Uuid,
+        source_message_id: Option<Uuid>,
+        session_id: String,
+        launch_id: String,
+        turn_number: i64,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+        input_tokens: i64,
+        output_tokens: i64,
+        cost_usd: f64,
+        context_window: i64,
+        entries: serde_json::Value,
+    },
+    Activity {
+        agent_id: Uuid,
+        session_id: String,
+        launch_id: String,
+        activity: String,
+        detail: Option<String>,
+        trajectory: Vec<String>,
+        created_at: DateTime<Utc>,
+    },
+}
+
+/// Runtime-neutral sink for durable session, turn, and activity history.
+#[async_trait]
+pub trait RuntimeHistorySink: Send + Sync {
+    async fn record(&self, event: RuntimeHistoryEvent) -> Result<(), StoreError>;
+}
+
+/// SQLite implementation installed by the local server after it opens the store.
+#[derive(Clone, Debug)]
+pub struct SqliteRuntimeHistorySink {
+    store: Store,
+}
+
+impl SqliteRuntimeHistorySink {
+    pub fn new(store: Store) -> Self {
+        Self { store }
+    }
+}
+
+#[async_trait]
+impl RuntimeHistorySink for SqliteRuntimeHistorySink {
+    async fn record(&self, event: RuntimeHistoryEvent) -> Result<(), StoreError> {
+        match event {
+            RuntimeHistoryEvent::SessionStarted {
+                agent_id,
+                channel_id,
+                session_id,
+                launch_id,
+                started_at,
+            } => {
+                self.store
+                    .create_agent_session(
+                        agent_id,
+                        Some(channel_id),
+                        &session_id,
+                        Some(&launch_id),
+                        None,
+                        "chat",
+                        started_at,
+                    )
+                    .await?;
+            }
+            RuntimeHistoryEvent::SessionEnded {
+                agent_id,
+                launch_id,
+                end_reason,
+                turn_count,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                context_window,
+                ended_at,
+            } => {
+                self.store
+                    .finish_agent_session(
+                        agent_id,
+                        &launch_id,
+                        &AgentSessionFinish {
+                            end_reason,
+                            turn_count,
+                            input_tokens,
+                            output_tokens,
+                            cost_usd,
+                            context_window,
+                            task_summary: None,
+                            files_changed: None,
+                            task_success: None,
+                            ended_at,
+                        },
+                    )
+                    .await?;
+            }
+            RuntimeHistoryEvent::TurnCompleted {
+                agent_id,
+                channel_id,
+                source_message_id,
+                session_id,
+                launch_id,
+                turn_number,
+                started_at,
+                ended_at,
+                input_tokens,
+                output_tokens,
+                cost_usd,
+                context_window,
+                entries,
+            } => {
+                self.store
+                    .upsert_agent_turn(&NewAgentTurn {
+                        agent_id,
+                        session_id,
+                        launch_id: Some(launch_id),
+                        turn_number,
+                        started_at,
+                        ended_at: Some(ended_at),
+                        input_tokens,
+                        output_tokens,
+                        cost_usd,
+                        context_window,
+                        entries,
+                        session_type: "chat".to_owned(),
+                        channel_id: Some(channel_id),
+                        source_message_id,
+                    })
+                    .await?;
+            }
+            RuntimeHistoryEvent::Activity {
+                agent_id,
+                session_id,
+                launch_id,
+                activity,
+                detail,
+                trajectory,
+                created_at,
+            } => {
+                let session_row_id = self
+                    .store
+                    .current_agent_session(agent_id)
+                    .await?
+                    .filter(|session| session.launch_id.as_deref() == Some(launch_id.as_str()))
+                    .map(|session| session.id);
+                self.store
+                    .insert_agent_activity(
+                        agent_id,
+                        session_row_id,
+                        Some(&session_id),
+                        &activity,
+                        detail.as_deref(),
+                        &trajectory,
+                        Some(&launch_id),
+                        created_at,
+                    )
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Runtime failures surfaced to the HTTP application layer.
 #[derive(Debug, thiserror::Error)]
 pub enum RuntimeError {
@@ -134,6 +320,9 @@ pub enum RuntimeError {
 /// Runtime-neutral boundary used by the local product loop.
 #[async_trait]
 pub trait RuntimeService: Send + Sync {
+    /// Installs the durable history sink after the local store is available.
+    fn set_history_sink(&self, _sink: Arc<dyn RuntimeHistorySink>) {}
+
     /// Returns the current runtime catalog.
     async fn list(&self) -> Vec<RuntimeInfo>;
 

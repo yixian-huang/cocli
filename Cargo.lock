@@ -635,6 +635,7 @@ dependencies = [
  "cocli-store",
  "cocli-web",
  "cocli-ws",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
