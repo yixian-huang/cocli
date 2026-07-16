@@ -55,6 +55,11 @@ fn stdio_process_initializes_and_lists_tools() {
         .expect("tool list")
         .iter()
         .any(|tool| tool["name"] == "send_message"));
+    assert!(responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tool list")
+        .iter()
+        .any(|tool| tool["name"] == "update_task_status"));
 }
 
 #[test]

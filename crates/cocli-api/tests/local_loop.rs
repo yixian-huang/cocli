@@ -561,6 +561,79 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
     assert_eq!(history["channel"]["name"], "bridge");
     assert_eq!(history["messages"][0]["content"], "peer update");
 
+    let (create_tasks_status, created_tasks) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/tasks"),
+        json!({"tasks": [{"title": "prepare"}, {"title": "ship"}]}),
+    )
+    .await;
+    assert_eq!(create_tasks_status, StatusCode::CREATED);
+    assert_eq!(created_tasks["tasks"][0]["taskNumber"], 1);
+    assert_eq!(created_tasks["tasks"][1]["taskNumber"], 2);
+    let (_, dependency) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/tasks/dependencies"),
+        json!({"task_number": 2, "depends_on": 1}),
+    )
+    .await;
+    assert_eq!(dependency["dependsOn"], json!([1]));
+    let (_, blocked_claim) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/tasks/claim"),
+        json!({"task_numbers": [2]}),
+    )
+    .await;
+    assert_eq!(blocked_claim["results"][0]["success"], false);
+    assert!(blocked_claim["results"][0]["reason"]
+        .as_str()
+        .expect("claim reason")
+        .contains("unmet dependencies"));
+    let (_, first_claim) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/tasks/claim"),
+        json!({"task_numbers": [1]}),
+    )
+    .await;
+    assert_eq!(first_claim["results"][0]["success"], true);
+    let (_, completed) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/tasks/update-status"),
+        json!({"task_number": 1, "status": "done", "progress": "verified"}),
+    )
+    .await;
+    assert_eq!(completed["status"], "done");
+    let (_, second_claim) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/tasks/claim"),
+        json!({"task_numbers": [2]}),
+    )
+    .await;
+    assert_eq!(second_claim["results"][0]["success"], true);
+    let (_, tasks) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/tasks?status=all"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(tasks["tasks"].as_array().map(Vec::len), Some(2));
+    let (_, message_claim) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/tasks/claim"),
+        json!({"message_ids": [sent["id"]]}),
+    )
+    .await;
+    assert_eq!(message_claim["results"][0]["success"], true);
+    assert_eq!(message_claim["results"][0]["created"], true);
+    assert_eq!(message_claim["results"][0]["task"]["messageId"], sent["id"]);
+
     let (_, working) = json_request(
         app.clone(),
         "POST",

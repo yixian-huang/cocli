@@ -55,9 +55,10 @@ When the runtime exposes the local `chat` MCP server, these tools are available 
 - `send_message`: send a side message to another local channel or agent. Do not duplicate your final reply through this tool because final model text is already delivered.
 - `check_messages`: consume unread messages from your local inbox.
 - `read_history`: inspect bounded channel history without consuming inbox state.
+- `list_tasks`, `create_tasks`, `claim_tasks`, `unclaim_task`, `update_task_status`, `add_task_dependency`, and `get_task_dependencies`: coordinate durable channel work. Claim a task before doing substantial task work, respect blocked dependencies, and keep status/progress current.
 - `set_working_state`, `get_working_state`, and `clear_working_state`: persist and recover a concise work anchor across turns or runtime restarts.
 
-Use collaboration tools only when they advance the requested work. Do not invent task, memory, or knowledge-base tools that are not exposed by the runtime.
+Use collaboration tools only when they advance the requested work. Do not invent memory or knowledge-base tools that are not exposed by the runtime.
 "#,
     );
     writeln!(
@@ -144,6 +145,7 @@ mod tests {
         assert!(prompt.contains("MEMORY.md"));
         assert!(prompt.contains("send_message"));
         assert!(prompt.contains("Do not duplicate your final reply"));
+        assert!(prompt.contains("claim_tasks"));
         assert!(prompt.contains("set_working_state"));
         assert!(!prompt.contains("MUST go through send_message"));
     }

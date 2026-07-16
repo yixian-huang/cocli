@@ -173,6 +173,108 @@ impl ToolBackend for HttpToolBackend {
                     None,
                 )
             }
+            "list_tasks" => {
+                let mut query = url::form_urlencoded::Serializer::new(String::new());
+                if let Some(channel) = optional_string(&arguments, "channel") {
+                    query.append_pair("channel", &channel);
+                }
+                if let Some(status) = optional_string(&arguments, "status") {
+                    query.append_pair("status", &status);
+                }
+                let query = query.finish();
+                let suffix = if query.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{query}")
+                };
+                self.request_json(
+                    "GET",
+                    &format!("{}{}", self.agent_path("/tasks"), suffix),
+                    None,
+                )
+            }
+            "create_tasks" => {
+                let tasks = required_array(&arguments, "tasks")?;
+                self.request_json(
+                    "POST",
+                    &self.agent_path("/tasks"),
+                    Some(&json!({
+                        "channel": optional_string(&arguments, "channel").unwrap_or_default(),
+                        "tasks": tasks
+                    })),
+                )
+            }
+            "claim_tasks" => {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "channel".to_owned(),
+                    Value::String(optional_string(&arguments, "channel").unwrap_or_default()),
+                );
+                copy_optional(&arguments, &mut body, "task_numbers", &["taskNumbers"]);
+                copy_optional(&arguments, &mut body, "message_ids", &["messageIds"]);
+                self.request_json(
+                    "POST",
+                    &self.agent_path("/tasks/claim"),
+                    Some(&Value::Object(body)),
+                )
+            }
+            "unclaim_task" => self.request_json(
+                "POST",
+                &self.agent_path("/tasks/unclaim"),
+                Some(&json!({
+                    "channel": optional_string(&arguments, "channel").unwrap_or_default(),
+                    "task_number": required_i64(&arguments, "task_number", &["taskNumber"])?
+                })),
+            ),
+            "update_task_status" => {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "channel".to_owned(),
+                    Value::String(optional_string(&arguments, "channel").unwrap_or_default()),
+                );
+                body.insert(
+                    "task_number".to_owned(),
+                    Value::Number(required_i64(&arguments, "task_number", &["taskNumber"])?.into()),
+                );
+                body.insert(
+                    "status".to_owned(),
+                    Value::String(required_string(&arguments, "status")?),
+                );
+                copy_optional(&arguments, &mut body, "progress", &[]);
+                self.request_json(
+                    "POST",
+                    &self.agent_path("/tasks/update-status"),
+                    Some(&Value::Object(body)),
+                )
+            }
+            "add_task_dependency" => self.request_json(
+                "POST",
+                &self.agent_path("/tasks/dependencies"),
+                Some(&json!({
+                    "channel": optional_string(&arguments, "channel").unwrap_or_default(),
+                    "task_number": required_i64(&arguments, "task_number", &["taskNumber"])?,
+                    "depends_on": required_i64(&arguments, "depends_on", &["dependsOn"])?
+                })),
+            ),
+            "get_task_dependencies" => {
+                let mut query = url::form_urlencoded::Serializer::new(String::new());
+                if let Some(channel) = optional_string(&arguments, "channel") {
+                    query.append_pair("channel", &channel);
+                }
+                query.append_pair(
+                    "task_number",
+                    &required_i64(&arguments, "task_number", &["taskNumber"])?.to_string(),
+                );
+                self.request_json(
+                    "GET",
+                    &format!(
+                        "{}?{}",
+                        self.agent_path("/tasks/dependencies"),
+                        query.finish()
+                    ),
+                    None,
+                )
+            }
             "set_working_state" => {
                 let summary = required_string(&arguments, "summary")?;
                 let mut body = serde_json::Map::new();
@@ -337,6 +439,13 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
             "message.send" => Ok(("message.send".to_owned(), "send_message", payload)),
             "message.check" | "message.digest" => Ok((args[0].clone(), "check_messages", payload)),
             "message.history" => Ok(("message.history".to_owned(), "read_history", payload)),
+            "task.list" => Ok(("task.list".to_owned(), "list_tasks", payload)),
+            "task.create" => Ok(("task.create".to_owned(), "create_tasks", payload)),
+            "task.claim" => Ok(("task.claim".to_owned(), "claim_tasks", payload)),
+            "task.unclaim" => Ok(("task.unclaim".to_owned(), "unclaim_task", payload)),
+            "task.update_status" => Ok((args[0].clone(), "update_task_status", payload)),
+            "task.add_dependency" => Ok((args[0].clone(), "add_task_dependency", payload)),
+            "task.get_dependencies" => Ok((args[0].clone(), "get_task_dependencies", payload)),
             "self.set_working_state" => Ok((args[0].clone(), "set_working_state", payload)),
             "self.get_working_state" => Ok((args[0].clone(), "get_working_state", payload)),
             "self.clear_working_state" => Ok((args[0].clone(), "clear_working_state", payload)),
@@ -377,6 +486,66 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
                 "after": numeric_flag(rest, "--after")
             }),
         )),
+        ("task", "list") => Ok((
+            "task.list".to_owned(),
+            "list_tasks",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "status": flag_value(rest, "--status").unwrap_or_else(|| "all".to_owned())
+            }),
+        )),
+        ("task", "create") => Ok((
+            "task.create".to_owned(),
+            "create_tasks",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "tasks": [{"title": required_flag(rest, "--title")?}]
+            }),
+        )),
+        ("task", "claim") => Ok((
+            "task.claim".to_owned(),
+            "claim_tasks",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "task_numbers": numeric_list_flag(rest, "--task-numbers")?,
+                "message_ids": string_list_flag(rest, "--message-ids")
+            }),
+        )),
+        ("task", "unclaim") => Ok((
+            "task.unclaim".to_owned(),
+            "unclaim_task",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "task_number": required_numeric_flag(rest, "--task-number")?
+            }),
+        )),
+        ("task", "update-status") => Ok((
+            "task.update_status".to_owned(),
+            "update_task_status",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "task_number": required_numeric_flag(rest, "--task-number")?,
+                "status": required_flag(rest, "--status")?,
+                "progress": flag_value(rest, "--progress")
+            }),
+        )),
+        ("task", "add-dependency") => Ok((
+            "task.add_dependency".to_owned(),
+            "add_task_dependency",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "task_number": required_numeric_flag(rest, "--task-number")?,
+                "depends_on": required_numeric_flag(rest, "--depends-on")?
+            }),
+        )),
+        ("task", "get-dependencies") => Ok((
+            "task.get_dependencies".to_owned(),
+            "get_task_dependencies",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "task_number": required_numeric_flag(rest, "--task-number")?
+            }),
+        )),
         ("self", "set-work") => Ok((
             "self.set_working_state".to_owned(),
             "set_working_state",
@@ -384,7 +553,9 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
                 "summary": required_flag(rest, "--summary")?,
                 "channelName": flag_value(rest, "--channel").unwrap_or_default(),
                 "taskNumber": numeric_flag(rest, "--task-number"),
-                "nextStepHint": flag_value(rest, "--next-step").unwrap_or_default()
+                "nextStepHint": flag_value(rest, "--next-step-hint")
+                    .or_else(|| flag_value(rest, "--next-step"))
+                    .unwrap_or_default()
             }),
         )),
         ("self", "get-work") => Ok((
@@ -436,6 +607,100 @@ fn tool_definitions() -> Vec<Value> {
                     "before": {"type": "integer"},
                     "after": {"type": "integer"}
                 }
+            }),
+        ),
+        tool(
+            "list_tasks",
+            "List local tasks in a channel.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string", "description": "Optional channel UUID or #name; defaults to the agent channel."},
+                    "status": {"type": "string", "enum": ["todo", "in_progress", "in_review", "done", "all"]}
+                }
+            }),
+        ),
+        tool(
+            "create_tasks",
+            "Create one or more local tasks.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {"title": {"type": "string"}},
+                            "required": ["title"]
+                        }
+                    }
+                },
+                "required": ["tasks"]
+            }),
+        ),
+        tool(
+            "claim_tasks",
+            "Claim local tasks by task number or full source-message UUID.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "task_numbers": {"type": "array", "items": {"type": "integer"}},
+                    "message_ids": {"type": "array", "items": {"type": "string"}}
+                }
+            }),
+        ),
+        tool(
+            "unclaim_task",
+            "Release one task currently claimed by this agent.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "task_number": {"type": "integer"}
+                },
+                "required": ["task_number"]
+            }),
+        ),
+        tool(
+            "update_task_status",
+            "Update the status and optional progress of a local task.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "task_number": {"type": "integer"},
+                    "status": {"type": "string", "enum": ["todo", "in_progress", "in_review", "done"]},
+                    "progress": {"type": "string"}
+                },
+                "required": ["task_number", "status"]
+            }),
+        ),
+        tool(
+            "add_task_dependency",
+            "Make one task depend on another completed task.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "task_number": {"type": "integer"},
+                    "depends_on": {"type": "integer"}
+                },
+                "required": ["task_number", "depends_on"]
+            }),
+        ),
+        tool(
+            "get_task_dependencies",
+            "List task numbers that must complete before a local task can be claimed.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string"},
+                    "task_number": {"type": "integer"}
+                },
+                "required": ["task_number"]
             }),
         ),
         tool(
@@ -547,6 +812,30 @@ fn required_string(
         .ok_or_else(|| BridgeError::Config(format!("{key} is required")))
 }
 
+fn required_array(
+    arguments: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Vec<Value>, BridgeError> {
+    arguments
+        .get(key)
+        .and_then(Value::as_array)
+        .filter(|values| !values.is_empty())
+        .cloned()
+        .ok_or_else(|| BridgeError::Config(format!("{key} is required")))
+}
+
+fn required_i64(
+    arguments: &serde_json::Map<String, Value>,
+    canonical: &str,
+    aliases: &[&str],
+) -> Result<i64, BridgeError> {
+    arguments
+        .get(canonical)
+        .or_else(|| aliases.iter().find_map(|alias| arguments.get(*alias)))
+        .and_then(Value::as_i64)
+        .ok_or_else(|| BridgeError::Config(format!("{canonical} is required")))
+}
+
 fn optional_string(arguments: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
     arguments
         .get(key)
@@ -594,6 +883,42 @@ fn numeric_flag(args: &[String], name: &str) -> Option<i64> {
     flag_value(args, name).and_then(|value| value.parse().ok())
 }
 
+fn required_numeric_flag(args: &[String], name: &str) -> Result<i64, BridgeError> {
+    flag_value(args, name)
+        .ok_or_else(|| BridgeError::Config(format!("{name} is required")))?
+        .parse()
+        .map_err(|_| BridgeError::Config(format!("{name} must be an integer")))
+}
+
+fn numeric_list_flag(args: &[String], name: &str) -> Result<Vec<i64>, BridgeError> {
+    let Some(value) = flag_value(args, name) else {
+        return Ok(Vec::new());
+    };
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|_| BridgeError::Config(format!("{name} must contain integers")))
+        })
+        .collect()
+}
+
+fn string_list_flag(args: &[String], name: &str) -> Vec<String> {
+    flag_value(args, name)
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::TcpListener;
@@ -637,6 +962,11 @@ mod tests {
             .expect("tools")
             .iter()
             .any(|tool| tool["name"] == "send_message"));
+        assert!(list["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "claim_tasks"));
 
         let call = handle_mcp_request(
             &backend,
@@ -681,6 +1011,22 @@ mod tests {
             backend.calls.lock().expect("calls")[1].0,
             "set_working_state"
         );
+
+        let claim = run_action(
+            &backend,
+            &[
+                "task".to_owned(),
+                "claim".to_owned(),
+                "--channel".to_owned(),
+                "#ops".to_owned(),
+                "--task-numbers".to_owned(),
+                "2,3".to_owned(),
+            ],
+        );
+        assert_eq!(claim["ok"], true);
+        let calls = backend.calls.lock().expect("calls");
+        assert_eq!(calls[2].0, "claim_tasks");
+        assert_eq!(calls[2].1["task_numbers"], json!([2, 3]));
     }
 
     #[test]

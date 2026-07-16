@@ -979,6 +979,33 @@ impl Store {
             .transpose()
     }
 
+    /// Returns the task linked to one source message.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or row decoding fails.
+    pub async fn get_task_by_message(
+        &self,
+        channel_id: Uuid,
+        message_id: Uuid,
+    ) -> Result<Option<Task>, StoreError> {
+        let row = query(
+            "SELECT t.id, t.channel_id, t.message_id, t.task_number, t.title, \
+             t.status, t.progress, t.assignee_id, a.name AS assignee_name, \
+             t.created_by_agent_id, t.created_at, t.updated_at \
+             FROM tasks t LEFT JOIN agents a ON a.id = t.assignee_id \
+             WHERE t.channel_id = ? AND t.message_id = ?",
+        )
+        .bind(channel_id)
+        .bind(message_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(task_row_from_sqlite)
+            .transpose()?
+            .map(Task::try_from)
+            .transpose()
+    }
+
     /// Claims an unassigned task for one local agent.
     ///
     /// # Errors

@@ -510,6 +510,26 @@ pub fn router_with_delivery_config(
             get(bridge_read_history),
         )
         .route(
+            "/api/bridge/agents/:agent_id/tasks",
+            get(bridge_list_tasks).post(bridge_create_tasks),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/claim",
+            post(bridge_claim_tasks),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/unclaim",
+            post(bridge_unclaim_task),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/update-status",
+            post(bridge_update_task_status),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/tasks/dependencies",
+            get(bridge_get_task_dependencies).post(bridge_add_task_dependency),
+        )
+        .route(
             "/api/bridge/agents/:agent_id/working",
             get(bridge_get_working_state).post(bridge_set_working_state),
         )
@@ -771,6 +791,328 @@ async fn bridge_read_history(
         .list_message_page(channel_id, query.limit, query.before, query.after)
         .await?;
     Ok(Json(BridgeHistoryResponse { channel, messages }))
+}
+
+#[derive(Deserialize)]
+struct BridgeTaskListQuery {
+    #[serde(default)]
+    channel: String,
+    status: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BridgeTasksResponse {
+    tasks: Vec<Task>,
+}
+
+async fn bridge_list_tasks(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<BridgeTaskListQuery>,
+) -> Result<Json<BridgeTasksResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &query.channel).await?;
+    let status = parse_task_status_filter(query.status.as_deref())?;
+    Ok(Json(BridgeTasksResponse {
+        tasks: state.store.list_tasks(channel_id, status).await?,
+    }))
+}
+
+#[derive(Deserialize)]
+struct BridgeTaskInput {
+    title: String,
+}
+
+#[derive(Deserialize)]
+struct BridgeCreateTasksRequest {
+    #[serde(default)]
+    channel: String,
+    tasks: Vec<BridgeTaskInput>,
+}
+
+async fn bridge_create_tasks(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeCreateTasksRequest>,
+) -> Result<(StatusCode, Json<BridgeTasksResponse>), ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &request.channel).await?;
+    if request.tasks.is_empty() {
+        return Err(ApiError::bad_request("at least one task is required"));
+    }
+    let mut tasks = Vec::with_capacity(request.tasks.len());
+    for input in request.tasks {
+        let title = non_empty("task title", &input.title)?;
+        tasks.push(
+            state
+                .store
+                .create_task(channel_id, title, None, Some(agent.id))
+                .await?,
+        );
+    }
+    Ok((StatusCode::CREATED, Json(BridgeTasksResponse { tasks })))
+}
+
+#[derive(Deserialize)]
+struct BridgeClaimTasksRequest {
+    #[serde(default)]
+    channel: String,
+    #[serde(default, alias = "taskNumbers")]
+    task_numbers: Vec<i64>,
+    #[serde(default, alias = "messageIds")]
+    message_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BridgeTaskMutationResult {
+    success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task_number: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    created: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    task: Option<Task>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BridgeClaimTasksResponse {
+    results: Vec<BridgeTaskMutationResult>,
+}
+
+async fn bridge_claim_tasks(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeClaimTasksRequest>,
+) -> Result<Json<BridgeClaimTasksResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &request.channel).await?;
+    if request.task_numbers.is_empty() && request.message_ids.is_empty() {
+        return Err(ApiError::bad_request(
+            "task_numbers or message_ids is required",
+        ));
+    }
+    let mut results = Vec::with_capacity(request.task_numbers.len() + request.message_ids.len());
+    for task_number in request.task_numbers {
+        match state
+            .store
+            .claim_task(channel_id, task_number, agent.id)
+            .await
+        {
+            Ok(task) => results.push(BridgeTaskMutationResult {
+                success: true,
+                task_number: Some(task.task_number),
+                message_id: None,
+                created: None,
+                task: Some(task),
+                reason: None,
+            }),
+            Err(error) => results.push(BridgeTaskMutationResult {
+                success: false,
+                task_number: Some(task_number),
+                message_id: None,
+                created: None,
+                task: None,
+                reason: Some(error.to_string()),
+            }),
+        }
+    }
+    for message_id in request.message_ids {
+        let result = claim_message_as_task(&state.store, &agent, channel_id, &message_id).await;
+        match result {
+            Ok((task, created)) => results.push(BridgeTaskMutationResult {
+                success: true,
+                task_number: Some(task.task_number),
+                message_id: Some(message_id),
+                created: created.then_some(true),
+                task: Some(task),
+                reason: None,
+            }),
+            Err(error) => results.push(BridgeTaskMutationResult {
+                success: false,
+                task_number: None,
+                message_id: Some(message_id),
+                created: None,
+                task: None,
+                reason: Some(error.message),
+            }),
+        }
+    }
+    Ok(Json(BridgeClaimTasksResponse { results }))
+}
+
+async fn claim_message_as_task(
+    store: &Store,
+    agent: &Agent,
+    channel_id: Uuid,
+    message_id: &str,
+) -> Result<(Task, bool), ApiError> {
+    let message_id = Uuid::parse_str(message_id)
+        .map_err(|_| ApiError::bad_request("message_ids must contain full UUIDs"))?;
+    let message = store
+        .get_message(message_id)
+        .await?
+        .filter(|message| message.channel_id == channel_id)
+        .ok_or_else(|| ApiError::not_found("message not found in task channel"))?;
+    if let Some(task) = store.get_task_by_message(channel_id, message.id).await? {
+        return Ok((
+            store
+                .claim_task(channel_id, task.task_number, agent.id)
+                .await?,
+            false,
+        ));
+    }
+    let task = store
+        .create_task(
+            channel_id,
+            &message.content,
+            Some(message.id),
+            Some(agent.id),
+        )
+        .await?;
+    Ok((
+        store
+            .claim_task(channel_id, task.task_number, agent.id)
+            .await?,
+        true,
+    ))
+}
+
+#[derive(Deserialize)]
+struct BridgeTaskNumberRequest {
+    #[serde(default)]
+    channel: String,
+    #[serde(alias = "taskNumber")]
+    task_number: i64,
+}
+
+async fn bridge_unclaim_task(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeTaskNumberRequest>,
+) -> Result<Json<Task>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &request.channel).await?;
+    let task = state
+        .store
+        .get_task(channel_id, request.task_number)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("task #{} not found", request.task_number)))?;
+    if task.assignee_id != Some(agent.id) {
+        return Err(ApiError::conflict("task is not claimed by this agent"));
+    }
+    Ok(Json(
+        state
+            .store
+            .unclaim_task(channel_id, request.task_number)
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct BridgeUpdateTaskStatusRequest {
+    #[serde(default)]
+    channel: String,
+    #[serde(alias = "taskNumber")]
+    task_number: i64,
+    status: TaskStatus,
+    progress: Option<String>,
+}
+
+async fn bridge_update_task_status(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeUpdateTaskStatusRequest>,
+) -> Result<Json<Task>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &request.channel).await?;
+    let task = state
+        .store
+        .get_task(channel_id, request.task_number)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("task #{} not found", request.task_number)))?;
+    if task.assignee_id.is_some() && task.assignee_id != Some(agent.id) {
+        return Err(ApiError::conflict("task is claimed by another agent"));
+    }
+    Ok(Json(
+        state
+            .store
+            .update_task_status(
+                channel_id,
+                request.task_number,
+                request.status,
+                request.progress.as_deref(),
+            )
+            .await?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct BridgeTaskDependenciesQuery {
+    #[serde(default)]
+    channel: String,
+    task_number: i64,
+}
+
+async fn bridge_get_task_dependencies(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<BridgeTaskDependenciesQuery>,
+) -> Result<Json<TaskDependenciesResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &query.channel).await?;
+    if state
+        .store
+        .get_task(channel_id, query.task_number)
+        .await?
+        .is_none()
+    {
+        return Err(ApiError::not_found(format!(
+            "task #{} not found",
+            query.task_number
+        )));
+    }
+    Ok(Json(TaskDependenciesResponse {
+        task_number: query.task_number,
+        depends_on: state
+            .store
+            .get_task_dependencies(channel_id, query.task_number)
+            .await?,
+    }))
+}
+
+#[derive(Deserialize)]
+struct BridgeAddTaskDependencyRequest {
+    #[serde(default)]
+    channel: String,
+    #[serde(alias = "taskNumber")]
+    task_number: i64,
+    #[serde(alias = "dependsOn")]
+    depends_on: i64,
+}
+
+async fn bridge_add_task_dependency(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeAddTaskDependencyRequest>,
+) -> Result<Json<TaskDependenciesResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &request.channel).await?;
+    state
+        .store
+        .add_task_dependency(channel_id, request.task_number, request.depends_on)
+        .await?;
+    Ok(Json(TaskDependenciesResponse {
+        task_number: request.task_number,
+        depends_on: state
+            .store
+            .get_task_dependencies(channel_id, request.task_number)
+            .await?,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1167,6 +1509,13 @@ impl ApiError {
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.into(),
         }
     }
