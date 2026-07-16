@@ -49,9 +49,7 @@ pub fn build_spawn_args(ctx: &SpawnContext) -> Vec<String> {
         "--print".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
-        "--yolo".to_string(),
-        "--approve-mcps".to_string(),
-        "--trust".to_string(),
+        "--force".to_string(),
     ];
 
     if !ctx.model.is_empty() {
