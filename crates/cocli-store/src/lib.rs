@@ -224,6 +224,18 @@ pub struct DeliveryStats {
     pub max_attempts: i64,
 }
 
+/// Durable current-work anchor exposed through the local bridge.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct WorkingState {
+    pub agent_id: Uuid,
+    pub summary: String,
+    pub channel_name: Option<String>,
+    pub task_number: Option<i64>,
+    pub next_step_hint: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 struct MessageRow {
     id: Uuid,
     channel_id: Uuid,
@@ -358,6 +370,35 @@ impl Store {
             .fetch_all(&self.pool)
             .await?;
         rows.into_iter().map(channel_from_row).collect()
+    }
+
+    /// Returns one channel by identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn get_channel(&self, channel_id: Uuid) -> Result<Option<Channel>, StoreError> {
+        let row = query("SELECT id, name, created_at FROM channels WHERE id = ?")
+            .bind(channel_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(channel_from_row).transpose()
+    }
+
+    /// Returns one channel by its exact local name.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn get_channel_by_name(&self, name: &str) -> Result<Option<Channel>, StoreError> {
+        let row = query(
+            "SELECT id, name, created_at FROM channels \
+             WHERE name = ? ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(channel_from_row).transpose()
     }
 
     /// Creates an agent attached to a channel.
@@ -527,6 +568,166 @@ impl Store {
             .map(message_row_from_sqlite)
             .map(|row| row.and_then(Message::try_from))
             .collect()
+    }
+
+    /// Lists a bounded message page in ascending sequence order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query or persisted enum decoding fails.
+    pub async fn list_message_page(
+        &self,
+        channel_id: Uuid,
+        limit: i64,
+        before: Option<i64>,
+        after: Option<i64>,
+    ) -> Result<Vec<Message>, StoreError> {
+        let rows = query(
+            "SELECT id, channel_id, seq, agent_id, role, content, created_at \
+             FROM messages \
+             WHERE channel_id = ? \
+               AND (? IS NULL OR seq < ?) \
+               AND (? IS NULL OR seq > ?) \
+             ORDER BY seq DESC LIMIT ?",
+        )
+        .bind(channel_id)
+        .bind(before)
+        .bind(before)
+        .bind(after)
+        .bind(after)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(&self.pool)
+        .await?;
+        let mut messages: Vec<Message> = rows
+            .into_iter()
+            .map(message_row_from_sqlite)
+            .map(|row| row.and_then(Message::try_from))
+            .collect::<Result<_, _>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
+    /// Consumes unread channel messages for one agent and advances its cursor.
+    ///
+    /// Messages authored by the same agent are skipped. The cursor is also
+    /// advanced when a durable delivery completes, so the source message does
+    /// not reappear through `check_messages`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the transaction fails.
+    pub async fn consume_agent_inbox(
+        &self,
+        agent_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Message>, StoreError> {
+        let agent = match self.get_agent(agent_id).await? {
+            Some(agent) => agent,
+            None => return Ok(Vec::new()),
+        };
+        let mut transaction = self.pool.begin().await?;
+        let cursor: i64 = query_scalar(
+            "SELECT COALESCE( \
+                 (SELECT last_read_seq FROM agent_inbox_state WHERE agent_id = ?), 0)",
+        )
+        .bind(agent_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let rows = query(
+            "SELECT id, channel_id, seq, agent_id, role, content, created_at \
+             FROM messages \
+             WHERE channel_id = ? AND seq > ? \
+               AND (agent_id IS NULL OR agent_id != ?) \
+             ORDER BY seq LIMIT ?",
+        )
+        .bind(agent.channel_id)
+        .bind(cursor)
+        .bind(agent_id)
+        .bind(limit.clamp(1, 200))
+        .fetch_all(&mut *transaction)
+        .await?;
+        let messages: Vec<Message> = rows
+            .into_iter()
+            .map(message_row_from_sqlite)
+            .map(|row| row.and_then(Message::try_from))
+            .collect::<Result<_, _>>()?;
+        if let Some(last) = messages.last() {
+            upsert_inbox_cursor(&mut transaction, agent_id, last.seq, Utc::now()).await?;
+        }
+        transaction.commit().await?;
+        Ok(messages)
+    }
+
+    /// Stores or updates one agent's current-work anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn set_working_state(
+        &self,
+        agent_id: Uuid,
+        summary: &str,
+        channel_name: Option<&str>,
+        task_number: Option<i64>,
+        next_step_hint: Option<&str>,
+    ) -> Result<WorkingState, StoreError> {
+        let now = Utc::now();
+        query(
+            "INSERT INTO agent_working_state \
+             (agent_id, summary, channel_name, task_number, next_step_hint, started_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(agent_id) DO UPDATE SET \
+               summary = excluded.summary, channel_name = excluded.channel_name, \
+               task_number = excluded.task_number, next_step_hint = excluded.next_step_hint, \
+               updated_at = excluded.updated_at",
+        )
+        .bind(agent_id)
+        .bind(summary)
+        .bind(channel_name)
+        .bind(task_number)
+        .bind(next_step_hint)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        self.get_working_state(agent_id)
+            .await?
+            .ok_or(StoreError::InvalidValue {
+                kind: "working state",
+                value: agent_id.to_string(),
+            })
+    }
+
+    /// Returns one agent's current-work anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn get_working_state(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkingState>, StoreError> {
+        let row = query(
+            "SELECT agent_id, summary, channel_name, task_number, next_step_hint, \
+             started_at, updated_at FROM agent_working_state WHERE agent_id = ?",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(working_state_from_row).transpose()
+    }
+
+    /// Clears one agent's current-work anchor.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn clear_working_state(&self, agent_id: Uuid) -> Result<bool, StoreError> {
+        let result = query("DELETE FROM agent_working_state WHERE agent_id = ?")
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// Returns one persisted message by identifier.
@@ -790,6 +991,13 @@ impl Store {
         if deleted.rows_affected() != 1 {
             return Err(StoreError::DeliveryNotInFlight(delivery.id));
         }
+        upsert_inbox_cursor(
+            &mut transaction,
+            delivery.agent_id,
+            delivery.seq,
+            Utc::now(),
+        )
+        .await?;
         let seq: i64 =
             query_scalar("SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE channel_id = ?")
                 .bind(delivery.channel_id)
@@ -867,6 +1075,7 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
     for migration in [
         include_str!("../migrations/0001_local_loop.sql"),
         include_str!("../migrations/0002_delivery_queue.sql"),
+        include_str!("../migrations/0003_agent_bridge_state.sql"),
     ] {
         for statement in migration.split(';') {
             let statement = statement.trim();
@@ -924,4 +1133,37 @@ fn delivery_row_from_sqlite(row: SqliteRow) -> Result<DeliveryRow, StoreError> {
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
     })
+}
+
+fn working_state_from_row(row: SqliteRow) -> Result<WorkingState, StoreError> {
+    Ok(WorkingState {
+        agent_id: row.try_get("agent_id")?,
+        summary: row.try_get("summary")?,
+        channel_name: row.try_get("channel_name")?,
+        task_number: row.try_get("task_number")?,
+        next_step_hint: row.try_get("next_step_hint")?,
+        started_at: row.try_get("started_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+async fn upsert_inbox_cursor(
+    transaction: &mut sqlx_core::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    agent_id: Uuid,
+    seq: i64,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx_core::Error> {
+    query(
+        "INSERT INTO agent_inbox_state (agent_id, last_read_seq, updated_at) \
+         VALUES (?, ?, ?) \
+         ON CONFLICT(agent_id) DO UPDATE SET \
+           last_read_seq = MAX(agent_inbox_state.last_read_seq, excluded.last_read_seq), \
+           updated_at = excluded.updated_at",
+    )
+    .bind(agent_id)
+    .bind(seq)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }

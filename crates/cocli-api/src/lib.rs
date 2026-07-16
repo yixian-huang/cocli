@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -474,6 +474,26 @@ pub fn router_with_delivery_config(
         .route("/api/agents/:agent_id/turn/steer", post(steer_turn))
         .route("/api/agents/:agent_id/thread/fork", post(fork_thread))
         .route("/api/agents/:agent_id/recovery/probe", post(probe_recovery))
+        .route(
+            "/api/bridge/agents/:agent_id/messages",
+            post(bridge_send_message),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/inbox",
+            get(bridge_check_messages),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/history",
+            get(bridge_read_history),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/working",
+            get(bridge_get_working_state).post(bridge_set_working_state),
+        )
+        .route(
+            "/api/bridge/agents/:agent_id/working/clear",
+            post(bridge_clear_working_state),
+        )
         .with_state(AppState {
             store,
             runtime,
@@ -647,6 +667,178 @@ async fn probe_recovery(
 ) -> Result<Json<RuntimeRecoveryProbeResult>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
     Ok(Json(state.runtime.probe_recovery(&agent).await?))
+}
+
+#[derive(Deserialize)]
+struct BridgeSendMessageRequest {
+    #[serde(default)]
+    target: String,
+    content: String,
+}
+
+async fn bridge_send_message(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeSendMessageRequest>,
+) -> Result<(StatusCode, Json<Message>), ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let content = non_empty("message content", &request.content)?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &request.target).await?;
+    let message = state
+        .store
+        .append_message(channel_id, Some(agent.id), MessageRole::Assistant, content)
+        .await?;
+    Ok((StatusCode::CREATED, Json(message)))
+}
+
+#[derive(Deserialize)]
+struct BridgeInboxQuery {
+    #[serde(default = "default_bridge_message_limit")]
+    limit: i64,
+}
+
+#[derive(Serialize)]
+struct BridgeInboxResponse {
+    messages: Vec<Message>,
+}
+
+async fn bridge_check_messages(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<BridgeInboxQuery>,
+) -> Result<Json<BridgeInboxResponse>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    let messages = state
+        .store
+        .consume_agent_inbox(agent_id, query.limit)
+        .await?;
+    Ok(Json(BridgeInboxResponse { messages }))
+}
+
+#[derive(Deserialize)]
+struct BridgeHistoryQuery {
+    #[serde(default)]
+    channel: String,
+    #[serde(default = "default_bridge_message_limit")]
+    limit: i64,
+    before: Option<i64>,
+    after: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct BridgeHistoryResponse {
+    channel: Channel,
+    messages: Vec<Message>,
+}
+
+async fn bridge_read_history(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<BridgeHistoryQuery>,
+) -> Result<Json<BridgeHistoryResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let channel_id = resolve_bridge_channel(&state.store, &agent, &query.channel).await?;
+    let channel = state
+        .store
+        .get_channel(channel_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("channel not found"))?;
+    let messages = state
+        .store
+        .list_message_page(channel_id, query.limit, query.before, query.after)
+        .await?;
+    Ok(Json(BridgeHistoryResponse { channel, messages }))
+}
+
+#[derive(Deserialize)]
+struct BridgeSetWorkingStateRequest {
+    summary: String,
+    #[serde(default, alias = "channelName")]
+    channel_name: Option<String>,
+    #[serde(default, alias = "taskNumber")]
+    task_number: Option<i64>,
+    #[serde(default, alias = "nextStepHint")]
+    next_step_hint: Option<String>,
+}
+
+#[derive(Serialize)]
+struct BridgeWorkingStateResponse {
+    state: Option<cocli_store::WorkingState>,
+}
+
+async fn bridge_get_working_state(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<BridgeWorkingStateResponse>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(BridgeWorkingStateResponse {
+        state: state.store.get_working_state(agent_id).await?,
+    }))
+}
+
+async fn bridge_set_working_state(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+    Json(request): Json<BridgeSetWorkingStateRequest>,
+) -> Result<Json<BridgeWorkingStateResponse>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    let summary = non_empty("working summary", &request.summary)?;
+    let working = state
+        .store
+        .set_working_state(
+            agent_id,
+            summary,
+            request.channel_name.as_deref(),
+            request.task_number,
+            request.next_step_hint.as_deref(),
+        )
+        .await?;
+    Ok(Json(BridgeWorkingStateResponse {
+        state: Some(working),
+    }))
+}
+
+#[derive(Serialize)]
+struct BridgeClearWorkingStateResponse {
+    cleared: bool,
+}
+
+async fn bridge_clear_working_state(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<BridgeClearWorkingStateResponse>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(BridgeClearWorkingStateResponse {
+        cleared: state.store.clear_working_state(agent_id).await?,
+    }))
+}
+
+fn default_bridge_message_limit() -> i64 {
+    50
+}
+
+async fn resolve_bridge_channel(
+    store: &Store,
+    agent: &Agent,
+    target: &str,
+) -> Result<Uuid, ApiError> {
+    let target = target.trim();
+    if target.is_empty() {
+        return Ok(agent.channel_id);
+    }
+    if let Ok(channel_id) = Uuid::parse_str(target) {
+        return store
+            .get_channel(channel_id)
+            .await?
+            .map(|channel| channel.id)
+            .ok_or_else(|| ApiError::not_found("channel not found"));
+    }
+    let name = target.strip_prefix('#').unwrap_or(target);
+    store
+        .get_channel_by_name(name)
+        .await?
+        .map(|channel| channel.id)
+        .ok_or_else(|| ApiError::not_found("channel not found"))
 }
 
 async fn require_agent(store: &Store, agent_id: Uuid) -> Result<Agent, ApiError> {

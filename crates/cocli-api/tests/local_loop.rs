@@ -366,6 +366,132 @@ async fn panicking_runtime_task_is_deferred_instead_of_sticking_in_flight() {
 }
 
 #[tokio::test]
+async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
+    let store = Store::in_memory().await.expect("store opens");
+    let app = router(store, Arc::new(FakeRuntime));
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "bridge"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let (_, first) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "first",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let (_, second) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "second",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let first_id = first["id"].as_str().expect("first id");
+    let second_id = second["id"].as_str().expect("second id");
+
+    let (send_status, sent) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{first_id}/messages"),
+        json!({"target": "#bridge", "content": "peer update"}),
+    )
+    .await;
+    assert_eq!(send_status, StatusCode::CREATED);
+    assert_eq!(sent["content"], "peer update");
+    assert_eq!(sent["agent_id"], first_id);
+
+    let (_, inbox) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/inbox?limit=10"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(inbox["messages"].as_array().map(Vec::len), Some(1));
+    assert_eq!(inbox["messages"][0]["content"], "peer update");
+    let (_, consumed) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/inbox?limit=10"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(consumed["messages"], json!([]));
+    let (_, own_inbox) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{first_id}/inbox"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(own_inbox["messages"], json!([]));
+
+    let (_, history) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/history?limit=10"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(history["channel"]["name"], "bridge");
+    assert_eq!(history["messages"][0]["content"], "peer update");
+
+    let (_, working) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/working"),
+        json!({
+            "summary": "implement MCP",
+            "channelName": "bridge",
+            "taskNumber": 3,
+            "nextStepHint": "run protocol tests"
+        }),
+    )
+    .await;
+    assert_eq!(working["state"]["summary"], "implement MCP");
+    assert_eq!(working["state"]["task_number"], 3);
+    let (_, current) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/working"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(current["state"]["next_step_hint"], "run protocol tests");
+    let (_, cleared) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{second_id}/working/clear"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(cleared["cleared"], true);
+    let (_, empty) = json_request(
+        app,
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/working"),
+        json!({}),
+    )
+    .await;
+    assert!(empty["state"].is_null());
+}
+
+#[tokio::test]
 async fn runtime_control_routes_expose_status_and_typed_unsupported_errors() {
     let store = Store::in_memory().await.expect("store should open");
     let app = router(store, Arc::new(FakeRuntime));
