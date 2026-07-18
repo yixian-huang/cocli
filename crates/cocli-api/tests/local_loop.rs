@@ -379,6 +379,20 @@ async fn json_request(
     (status, body)
 }
 
+async fn status_request(app: axum::Router, method: &str, uri: &str, body: Value) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request should build"),
+    )
+    .await
+    .expect("request should complete")
+    .status()
+}
+
 async fn bridge_json_request(
     app: axum::Router,
     method: &str,
@@ -404,6 +418,319 @@ async fn bridge_json_request(
         .expect("response body should load");
     let body = serde_json::from_slice(&bytes).expect("response should be JSON");
     (status, body)
+}
+
+async fn bridge_status_request(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    body: Value,
+    token: &str,
+) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string()))
+            .expect("request should build"),
+    )
+    .await
+    .expect("request should complete")
+    .status()
+}
+
+#[tokio::test]
+async fn agent_channel_ontology_routes_support_standalone_membership_and_workspaces() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+
+    let (agent_status, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "name": "solo",
+            "description": "Persistent generalist",
+            "instructions": "Prefer explicit evidence.",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    assert_eq!(agent_status, StatusCode::CREATED);
+    assert_eq!(agent["description"], "Persistent generalist");
+    assert_eq!(agent["instructions"], "Prefer explicit evidence.");
+    assert!(agent.get("channel_id").is_none());
+    let agent_id = agent["id"].as_str().expect("agent id");
+    assert_eq!(
+        status_request(
+            app.clone(),
+            "GET",
+            &format!("/api/agents/{agent_id}/direct-channel"),
+            json!({}),
+        )
+        .await,
+        StatusCode::NOT_FOUND,
+    );
+
+    let (message_status, direct_reply) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        json!({"content": "work directly with me"}),
+    )
+    .await;
+    assert_eq!(message_status, StatusCode::CREATED);
+    assert_eq!(
+        direct_reply["replies"][0]["content"],
+        "echo: work directly with me"
+    );
+    assert!(direct_reply["message"].get("channel_id").is_none());
+    assert!(direct_reply["replies"][0].get("channel_id").is_none());
+
+    let (history_status, direct_history) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/messages"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(history_status, StatusCode::OK);
+    assert_eq!(direct_history.as_array().map(Vec::len), Some(2));
+    assert!(direct_history
+        .as_array()
+        .expect("direct messages")
+        .iter()
+        .all(|message| message.get("channel_id").is_none()));
+
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "planning"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+
+    let (join_status, membership) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/agents"),
+        json!({
+            "agent_id": agent_id,
+            "role": "planner",
+            "delivery_policy": "subscribed"
+        }),
+    )
+    .await;
+    assert_eq!(join_status, StatusCode::CREATED);
+    assert_eq!(membership["agent_id"], agent_id);
+
+    let (channels_status, channels) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/channels"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(channels_status, StatusCode::OK);
+    assert_eq!(channels.as_array().expect("channels array").len(), 1);
+    assert!(channels
+        .as_array()
+        .expect("channels array")
+        .iter()
+        .all(|channel| channel["is_system"] == false));
+
+    let (workspace_status, workspace) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/workspaces"),
+        json!({
+            "kind": "directory",
+            "locator": "/tmp/planning",
+            "metadata": {"label": "Planning files"}
+        }),
+    )
+    .await;
+    assert_eq!(workspace_status, StatusCode::CREATED);
+    assert_eq!(workspace["metadata"]["label"], "Planning files");
+
+    let delete_status = status_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/channels/{channel_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::NO_CONTENT);
+
+    let (agents_status, agents) = json_request(app, "GET", "/api/agents", json!({})).await;
+    assert_eq!(agents_status, StatusCode::OK);
+    assert_eq!(agents.as_array().expect("agents array").len(), 1);
+}
+
+#[tokio::test]
+async fn bridge_agents_can_create_and_organize_persistent_subjects() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), Arc::new(FakeRuntime));
+    let (_, founder) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({"name": "founder", "runtime": "fake"}),
+    )
+    .await;
+    let founder_id = founder["id"].as_str().expect("founder id");
+    let token = store
+        .agent_bridge_token(founder_id.parse().expect("founder uuid"))
+        .await
+        .expect("bridge token query")
+        .expect("bridge token");
+
+    let (channel_status, channel) = bridge_json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{founder_id}/channels"),
+        json!({
+            "name": "research",
+            "description": "Long-running investigation",
+            "goal": "Produce an evidence-backed answer",
+            "idempotency_key": "create-research",
+            "source_session_id": "session-founder"
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(channel_status, StatusCode::CREATED);
+    assert_eq!(channel["description"], "Long-running investigation");
+    assert_eq!(channel["goal"], "Produce an evidence-backed answer");
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let (replay_status, replayed_channel) = bridge_json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{founder_id}/channels"),
+        json!({
+            "name": "research",
+            "description": "Long-running investigation",
+            "goal": "Produce an evidence-backed answer",
+            "idempotency_key": "create-research",
+            "source_session_id": "session-founder"
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(replay_status, StatusCode::OK);
+    assert_eq!(replayed_channel["id"], channel_id);
+
+    let (agent_status, reviewer) = bridge_json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{founder_id}/agents"),
+        json!({
+            "name": "reviewer",
+            "instructions": "Challenge unsupported conclusions.",
+            "channel": channel_id,
+            "role": "reviewer",
+            "idempotency_key": "create-reviewer",
+            "source_channel_id": channel_id
+        }),
+        &token,
+    )
+    .await;
+    assert_eq!(agent_status, StatusCode::CREATED);
+    assert_eq!(
+        reviewer["runtime"], "fake",
+        "creator Runtime is the default"
+    );
+    assert_eq!(
+        reviewer["instructions"],
+        "Challenge unsupported conclusions."
+    );
+    let reviewer_id = reviewer["id"].as_str().expect("reviewer id");
+
+    let (_, observer) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({"name": "observer", "runtime": "fake"}),
+    )
+    .await;
+    let observer_id = observer["id"].as_str().expect("observer id");
+    let (join_status, membership) = bridge_json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{founder_id}/channels/join-agent"),
+        json!({"channel": channel_id, "agent_id": observer_id, "role": "observer"}),
+        &token,
+    )
+    .await;
+    assert_eq!(join_status, StatusCode::CREATED);
+    assert_eq!(membership["agent_id"], observer_id);
+
+    let (members_status, members) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/channels/{channel_id}/agents"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(members_status, StatusCode::OK);
+    let member_ids = members
+        .as_array()
+        .expect("channel members")
+        .iter()
+        .filter_map(|agent| agent["id"].as_str())
+        .collect::<Vec<_>>();
+    assert!(member_ids.contains(&founder_id));
+    assert!(member_ids.contains(&reviewer_id));
+    assert!(member_ids.contains(&observer_id));
+
+    let (operations_status, operations) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{founder_id}/operations"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(operations_status, StatusCode::OK);
+    let actions = operations
+        .as_array()
+        .expect("operation audit")
+        .iter()
+        .filter_map(|operation| operation["action"].as_str())
+        .collect::<Vec<_>>();
+    assert!(actions.contains(&"channel.create"));
+    assert!(actions.contains(&"agent.create"));
+    assert!(actions.contains(&"channel.join_agent"));
+
+    let (runtime_status, runtime_error) = bridge_json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/bridge/agents/{founder_id}/agents"),
+        json!({"name": "invalid-runtime", "runtime": "missing"}),
+        &token,
+    )
+    .await;
+    assert_eq!(runtime_status, StatusCode::BAD_REQUEST);
+    assert!(runtime_error["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("unknown runtime")));
+
+    let (forbidden_status, _) = bridge_json_request(
+        app,
+        "GET",
+        &format!("/api/bridge/agents/{reviewer_id}/history?channel=missing"),
+        json!({}),
+        &store
+            .agent_bridge_token(reviewer_id.parse().expect("reviewer uuid"))
+            .await
+            .expect("bridge token query")
+            .expect("reviewer token"),
+    )
+    .await;
+    assert_eq!(forbidden_status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -783,123 +1110,41 @@ async fn library_reinstall_and_uninstall_are_serialized() {
 }
 
 #[tokio::test]
-async fn wiki_routes_match_browser_contract_and_preserve_history() {
+async fn wiki_is_not_exposed_as_a_core_api() {
     let store = Store::in_memory().await.expect("store should open");
-    let app = router(store, Arc::new(FakeRuntime));
-    let target_path = "roadmap%2Flocal-loop";
-    let source_path = "notes%2Fimplementation";
+    let app = router(store.clone(), Arc::new(FakeRuntime));
+    assert_eq!(
+        status_request(app.clone(), "GET", "/api/wiki/pages", json!({})).await,
+        StatusCode::NOT_FOUND
+    );
 
-    let (created_status, created) = json_request(
-        app.clone(),
-        "PUT",
-        &format!("/api/wiki/pages/{target_path}"),
-        json!({
-            "title": "Local Loop",
-            "content": "# Local Loop\n\nInitial.",
-            "tags": ["roadmap", "local"],
-            "updatedBy": "planner"
-        }),
-    )
-    .await;
-    assert_eq!(created_status, StatusCode::OK);
-    assert_eq!(created["version"], 1);
-    assert_eq!(created["path"], "roadmap/local-loop");
-
-    let (source_status, _) = json_request(
-        app.clone(),
-        "PUT",
-        &format!("/api/wiki/pages/{source_path}"),
-        json!({
-            "title": "Implementation",
-            "content": "See [[roadmap/local-loop]].",
-            "tags": ["notes"]
-        }),
-    )
-    .await;
-    assert_eq!(source_status, StatusCode::OK);
-
-    let (list_status, listed) = json_request(
-        app.clone(),
-        "GET",
-        "/api/wiki/pages?q=Local&tag=roadmap",
-        json!({}),
-    )
-    .await;
-    assert_eq!(list_status, StatusCode::OK);
-    assert_eq!(listed["pages"].as_array().map(Vec::len), Some(1));
-    assert_eq!(listed["pages"][0]["title"], "Local Loop");
-
-    let (_, updated) = json_request(
-        app.clone(),
-        "PUT",
-        &format!("/api/wiki/pages/{target_path}"),
-        json!({
-            "title": "Local Product Loop",
-            "content": "# Local Product Loop\n\nComplete.",
-            "tags": ["roadmap"],
-            "ifVersion": 1
-        }),
-    )
-    .await;
-    assert_eq!(updated["version"], 2);
-
-    let (conflict_status, conflict) = json_request(
-        app.clone(),
-        "PUT",
-        &format!("/api/wiki/pages/{target_path}"),
-        json!({
-            "title": "Stale",
-            "content": "stale",
-            "ifVersion": 1
-        }),
-    )
-    .await;
-    assert_eq!(conflict_status, StatusCode::CONFLICT);
-    assert!(conflict["error"]
-        .as_str()
-        .is_some_and(|error| error.contains("current=2")));
-
-    let (revision_status, revisions) = json_request(
-        app.clone(),
-        "GET",
-        &format!("/api/wiki/pages/{target_path}/revisions"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(revision_status, StatusCode::OK);
-    assert_eq!(revisions["revisions"][0]["version"], 2);
-    assert_eq!(revisions["revisions"][1]["version"], 1);
-
-    let (backlink_status, backlinks) = json_request(
-        app.clone(),
-        "GET",
-        &format!("/api/wiki/pages/{target_path}/backlinks"),
-        json!({}),
-    )
-    .await;
-    assert_eq!(backlink_status, StatusCode::OK);
-    assert_eq!(backlinks["backlinks"][0]["path"], "notes/implementation");
-
-    let (revert_status, reverted) = json_request(
-        app.clone(),
-        "POST",
-        &format!("/api/wiki/pages/{target_path}/revert"),
-        json!({"version": 1}),
-    )
-    .await;
-    assert_eq!(revert_status, StatusCode::OK);
-    assert_eq!(reverted["page"]["version"], 3);
-    assert_eq!(reverted["page"]["title"], "Local Loop");
-
-    let (get_status, page) = json_request(
+    let channel = store
+        .create_channel("wiki-negative")
+        .await
+        .expect("channel");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "wiki-negative-agent",
+            "fake",
+            None,
+            AgentStatus::Running,
+        )
+        .await
+        .expect("agent");
+    let token = store
+        .ensure_agent_bridge_token(agent.id)
+        .await
+        .expect("bridge token");
+    let status = bridge_status_request(
         app,
         "GET",
-        &format!("/api/wiki/pages/{target_path}"),
+        &format!("/api/bridge/agents/{}/wiki/pages", agent.id),
         json!({}),
+        &token,
     )
     .await;
-    assert_eq!(get_status, StatusCode::OK);
-    assert_eq!(page["content"], "# Local Loop\n\nInitial.");
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -1030,11 +1275,6 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
     assert_eq!(list_status, StatusCode::OK);
     assert_eq!(namespace["entries"].as_array().map(Vec::len), Some(2));
 
-    let (wiki_status, wiki_pages) =
-        json_request(app.clone(), "GET", "/api/wiki/pages", json!({})).await;
-    assert_eq!(wiki_status, StatusCode::OK);
-    assert_eq!(wiki_pages["pages"].as_array().map(Vec::len), Some(0));
-
     let (_, other_channel) = json_request(
         app.clone(),
         "POST",
@@ -1054,78 +1294,6 @@ async fn memory_routes_support_private_shared_write_read_and_move() {
     )
     .await;
     assert_eq!(forbidden_status, StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn bridge_wiki_routes_attribute_agent_writes_and_search_pages() {
-    let store = Store::in_memory().await.expect("store should open");
-    let app = router(store.clone(), Arc::new(FakeRuntime));
-    let (_, channel) = json_request(
-        app.clone(),
-        "POST",
-        "/api/channels",
-        json!({"name": "wiki-bridge"}),
-    )
-    .await;
-    let channel_id = channel["id"].as_str().expect("channel id");
-    let (_, agent) = json_request(
-        app.clone(),
-        "POST",
-        "/api/agents",
-        json!({
-            "channel_id": channel_id,
-            "name": "wiki-writer",
-            "runtime": "fake",
-            "model": "test-model"
-        }),
-    )
-    .await;
-    let agent_id = agent["id"].as_str().expect("agent id");
-    let bridge_token = store
-        .agent_bridge_token(agent_id.parse().expect("agent uuid"))
-        .await
-        .expect("bridge token query")
-        .expect("bridge token");
-    let encoded_path = "reference%2Fbridge-api";
-
-    let (write_status, written) = bridge_json_request(
-        app.clone(),
-        "PUT",
-        &format!("/api/bridge/agents/{agent_id}/wiki/pages/{encoded_path}"),
-        json!({
-            "title": "Bridge API",
-            "content_md": "# Bridge API\n\nDurable.",
-            "tags": ["reference"],
-            "reason": "record contract"
-        }),
-        &bridge_token,
-    )
-    .await;
-    assert_eq!(write_status, StatusCode::OK);
-    assert_eq!(written["updatedBy"], "wiki-writer");
-    assert_eq!(written["path"], "reference/bridge-api");
-
-    let (search_status, search) = bridge_json_request(
-        app.clone(),
-        "GET",
-        &format!("/api/bridge/agents/{agent_id}/wiki/pages?q=Durable&limit=10"),
-        json!({}),
-        &bridge_token,
-    )
-    .await;
-    assert_eq!(search_status, StatusCode::OK);
-    assert_eq!(search["pages"].as_array().map(Vec::len), Some(1));
-
-    let (read_status, read) = bridge_json_request(
-        app,
-        "GET",
-        &format!("/api/bridge/agents/{agent_id}/wiki/pages/{encoded_path}"),
-        json!({}),
-        &bridge_token,
-    )
-    .await;
-    assert_eq!(read_status, StatusCode::OK);
-    assert_eq!(read["content"], "# Bridge API\n\nDurable.");
 }
 
 #[tokio::test]
@@ -1187,7 +1355,97 @@ async fn post_message_persists_user_message_and_fake_agent_reply() {
 }
 
 #[tokio::test]
-async fn failed_runtime_start_rolls_back_agent_creation() {
+async fn global_search_finds_channels_agents_messages_and_tasks() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let (_, channel) = json_request(
+        app.clone(),
+        "POST",
+        "/api/channels",
+        json!({"name": "needle-channel"}),
+    )
+    .await;
+    let channel_id = channel["id"].as_str().expect("channel id");
+    let _ = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "channel_id": channel_id,
+            "name": "needle-agent",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let _ = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/messages"),
+        json!({"content": "needle message"}),
+    )
+    .await;
+    let _ = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/tasks"),
+        json!({"title": "needle task"}),
+    )
+    .await;
+    let (status, body) = json_request(app, "GET", "/api/search?q=needle", json!({})).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let kinds = body["results"]
+        .as_array()
+        .expect("search results")
+        .iter()
+        .filter_map(|result| result["kind"].as_str())
+        .collect::<Vec<_>>();
+    assert!(kinds.contains(&"channel"));
+    assert!(kinds.contains(&"agent"));
+    assert!(kinds.contains(&"message"));
+    assert!(kinds.contains(&"task"));
+}
+
+#[tokio::test]
+async fn global_search_routes_direct_messages_to_the_agent_subject() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let (_, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({
+            "name": "researcher",
+            "runtime": "fake",
+            "model": "test-model"
+        }),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id");
+    let (message_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/agents/{agent_id}/messages"),
+        json!({"content": "private-needle"}),
+    )
+    .await;
+    assert_eq!(message_status, StatusCode::CREATED);
+
+    let (status, body) = json_request(app, "GET", "/api/search?q=private-needle", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let results = body["results"].as_array().expect("search results");
+    assert!(!results.is_empty());
+    assert!(results.iter().all(|result| result["kind"] == "message"));
+    assert!(results.iter().all(|result| result["agentId"] == agent_id));
+    assert!(results.iter().all(|result| result["channelId"].is_null()));
+    assert!(results.iter().all(|result| result["title"]
+        .as_str()
+        .is_some_and(|title| title.starts_with("@researcher"))));
+}
+
+#[tokio::test]
+async fn agent_creation_is_persistent_and_runtime_start_is_lazy() {
     let store = Store::in_memory().await.expect("store should open");
     let app = router(store.clone(), Arc::new(FailingStartRuntime));
     let (_, channel) = json_request(
@@ -1199,7 +1457,7 @@ async fn failed_runtime_start_rolls_back_agent_creation() {
     .await;
 
     let (status, body) = json_request(
-        app,
+        app.clone(),
         "POST",
         "/api/agents",
         json!({
@@ -1211,15 +1469,23 @@ async fn failed_runtime_start_rolls_back_agent_creation() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(body["error"], "simulated startup failure");
-    assert!(
-        store
-            .list_agents()
-            .await
-            .expect("agents should list")
-            .is_empty(),
-        "failed startup must not leave an agent marked as running"
+    assert_eq!(status, StatusCode::CREATED);
+    let agent_id = body["id"].as_str().expect("agent id");
+    assert_eq!(body["lifecycle_status"], "active");
+
+    let (start_status, start_error) = json_request(
+        app,
+        "POST",
+        &format!("/api/agents/{agent_id}/start"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(start_status, StatusCode::BAD_GATEWAY);
+    assert_eq!(start_error["error"], "simulated startup failure");
+    assert_eq!(
+        store.list_agents().await.expect("agents should list").len(),
+        1,
+        "a Runtime failure must not erase the persistent Agent identity"
     );
 }
 
@@ -1857,10 +2123,21 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
     .await;
     assert_eq!(own_inbox["messages"], json!([]));
 
-    let (_, history) = bridge_json_request(
+    let (missing_target_status, missing_target_error) = bridge_json_request(
         app.clone(),
         "GET",
         &format!("/api/bridge/agents/{second_id}/history?limit=10"),
+        json!({}),
+        &second_token,
+    )
+    .await;
+    assert_eq!(missing_target_status, StatusCode::BAD_REQUEST);
+    assert_eq!(missing_target_error["error"], "channel target is required");
+
+    let (_, history) = bridge_json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/bridge/agents/{second_id}/history?channel=bridge&limit=10"),
         json!({}),
         &second_token,
     )
@@ -1872,7 +2149,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks"),
-        json!({"tasks": [{"title": "prepare"}, {"title": "ship"}]}),
+        json!({"channel": "bridge", "tasks": [{"title": "prepare"}, {"title": "ship"}]}),
         &second_token,
     )
     .await;
@@ -1883,7 +2160,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/dependencies"),
-        json!({"task_number": 2, "depends_on": 1}),
+        json!({"channel": "bridge", "task_number": 2, "depends_on": 1}),
         &second_token,
     )
     .await;
@@ -1892,7 +2169,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
-        json!({"task_numbers": [2]}),
+        json!({"channel": "bridge", "task_numbers": [2]}),
         &second_token,
     )
     .await;
@@ -1905,7 +2182,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
-        json!({"task_numbers": [1]}),
+        json!({"channel": "bridge", "task_numbers": [1]}),
         &second_token,
     )
     .await;
@@ -1914,7 +2191,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/update-status"),
-        json!({"task_number": 1, "status": "done", "progress": "verified"}),
+        json!({"channel": "bridge", "task_number": 1, "status": "done", "progress": "verified"}),
         &second_token,
     )
     .await;
@@ -1923,7 +2200,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
-        json!({"task_numbers": [2]}),
+        json!({"channel": "bridge", "task_numbers": [2]}),
         &second_token,
     )
     .await;
@@ -1931,7 +2208,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
     let (_, tasks) = bridge_json_request(
         app.clone(),
         "GET",
-        &format!("/api/bridge/agents/{second_id}/tasks?status=all"),
+        &format!("/api/bridge/agents/{second_id}/tasks?channel=bridge&status=all"),
         json!({}),
         &second_token,
     )
@@ -1941,7 +2218,7 @@ async fn local_bridge_routes_support_message_inbox_history_and_working_state() {
         app.clone(),
         "POST",
         &format!("/api/bridge/agents/{second_id}/tasks/claim"),
-        json!({"message_ids": [sent["id"]]}),
+        json!({"channel": "bridge", "message_ids": [sent["id"]]}),
         &second_token,
     )
     .await;

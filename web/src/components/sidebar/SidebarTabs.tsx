@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { BookOpenText, History, KanbanSquare, KeyRound, ShieldCheck } from 'lucide-react'
+import { History, KanbanSquare, KeyRound, ShieldCheck } from 'lucide-react'
 import { ChannelList } from './ChannelList'
 import { DMList } from './DMList'
 import { ThreadInbox } from './ThreadInbox'
@@ -45,7 +45,6 @@ export function SidebarTabs() {
       next === 'history' ? `${base}/history` :
       next === 'zone_tasks' ? `${base}/tasks` :
       next === 'zone_members' ? `${base}/members` :
-      next === 'zone_wiki' ? `${base}/wiki` :
       next === 'zone_credentials' ? `${base}/keys` :
       base
 
@@ -125,15 +124,6 @@ export function SidebarTabs() {
               </button>
               {isAdmin && (
                 <>
-                  <button
-                    onClick={() => openWorkspacePanel('zone_wiki')}
-                    className={`w-full mt-1 flex items-center gap-2 px-2 py-1.5 rounded text-sm ${
-                      panel === 'zone_wiki' ? 'bg-primary/10 text-primary font-medium' : 'hover:bg-accent/50 text-foreground/80'
-                    }`}
-                  >
-                    <BookOpenText className="w-4 h-4" />
-                    {t('sidebar.wikiAdmin')}
-                  </button>
                   <button
                     onClick={() => openWorkspacePanel('zone_credentials')}
                     className={`w-full mt-1 flex items-center gap-2 px-2 py-1.5 rounded text-sm ${

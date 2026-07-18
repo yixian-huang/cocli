@@ -11,29 +11,123 @@ export interface RuntimeInfo {
 export interface Channel {
   id: string
   name: string
+  description: string | null
+  goal: string | null
+  kind: 'standard' | 'direct'
+  is_system: boolean
+  direct_agent_id: string | null
+  created_by_agent_id: string | null
+  created_by_channel_id: string | null
   created_at: string
 }
 
 export type AgentStatus = 'running' | 'stopped'
+export type AgentLifecycleStatus = 'active' | 'paused' | 'archived'
 
 export interface Agent {
   id: string
-  channel_id: string
   name: string
+  description: string | null
+  instructions: string | null
   runtime: string
   model: string | null
   status: AgentStatus
+  lifecycle_status: AgentLifecycleStatus
+  created_by_agent_id: string | null
+  created_by_channel_id: string | null
   created_at: string
+}
+
+export interface ChannelAgent {
+  channel_id: string
+  agent_id: string
+  role: string | null
+  delivery_policy: 'subscribed' | 'muted'
+  joined_at: string
+  created_by_agent_id: string | null
+  created_by_channel_id: string | null
+}
+
+export type BuiltInWorkspaceProviderKey = 'managed' | 'directory' | 'git' | 'external'
+
+export interface Workspace {
+  id: string
+  provider_key: string
+  descriptor_version: number
+  display_name: string
+  portable_locator: string | null
+  metadata: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  owner_type?: 'agent' | 'channel' | null
+  owner_id?: string | null
+  kind?: string | null
+  locator?: string | null
+}
+
+export interface AgentOperation {
+  id: string
+  caller_agent_id: string
+  action: string
+  idempotency_key: string | null
+  request_fingerprint: string
+  result_type: 'agent' | 'channel' | 'membership'
+  result_id: string
+  source_channel_id: string | null
+  source_session_id: string | null
+  created_at: string
+}
+
+export interface WorkingState {
+  agent_id: string
+  summary: string
+  channel_name: string | null
+  task_number: number | null
+  next_step_hint: string | null
+  started_at: string
+  updated_at: string
 }
 
 export interface Message {
   id: string
-  channel_id: string
+  channel_id?: string
   seq: number
   agent_id: string | null
   role: 'user' | 'assistant'
   content: string
   created_at: string
+}
+
+export interface LiveEvent {
+  kind: string
+  channelId: string | null
+  agentId: string | null
+  messageId: string | null
+  payload: Record<string, unknown>
+  occurredAt: string
+}
+
+export type LiveConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'unavailable'
+
+export interface RuntimeSessionStatus {
+  agent_id: string
+  running: boolean
+  active_turn: boolean
+  supports_turn_cancel: boolean
+  supports_turn_steer: boolean
+  supports_thread_fork: boolean
+}
+
+export interface GlobalSearchResult {
+  kind: 'channel' | 'agent' | 'message' | 'task'
+  id: string
+  title: string
+  snippet: string
+  channelId: string | null
+  agentId: string | null
+  messageId: string | null
+  taskNumber: number | null
+  path: string | null
 }
 
 export type RuntimeSkillCompatibility = 'supported' | 'uncertain' | 'unsupported' | 'unknown'
@@ -113,44 +207,6 @@ export interface MemoryTopic {
   updated: string
   body: string
   path: string
-  version: number
-}
-
-export interface WikiPage {
-  id: string
-  path: string
-  title: string
-  content: string
-  tags: string[]
-  version: number
-  createdAt: string
-  updatedAt: string
-  updatedBy?: string
-}
-
-export interface WikiPageSummary {
-  path: string
-  title: string
-  tags: string[]
-  version: number
-  updatedAt: string
-  updatedBy?: string
-}
-
-export interface WikiRevision {
-  version: number
-  title: string
-  content: string
-  tags: string[]
-  createdAt: string
-  createdBy?: string
-  reason?: string
-}
-
-export interface WikiBacklink {
-  path: string
-  title: string
-  updatedAt: string
   version: number
 }
 
@@ -260,17 +316,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const localApi = {
+  globalSearch: (query: string) =>
+    request<{ results: GlobalSearchResult[] }>(`/api/search?q=${encodeURIComponent(query)}`),
   listRuntimes: () => request<RuntimeInfo[]>('/api/runtimes'),
   listChannels: () => request<Channel[]>('/api/channels'),
-  createChannel: (name: string) =>
+  createChannel: (input: { name: string; description?: string; goal?: string }) =>
     request<Channel>('/api/channels', {
       method: 'POST',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify(input),
     }),
   listAgents: () => request<Agent[]>('/api/agents'),
   createAgent: (input: {
-    channel_id: string
+    channel_id?: string
     name: string
+    description?: string
+    instructions?: string
     runtime: string
     model: string | null
   }) =>
@@ -278,8 +338,57 @@ export const localApi = {
       method: 'POST',
       body: JSON.stringify(input),
     }),
+  listAgentChannels: (agentId: string) =>
+    request<Channel[]>(`/api/agents/${agentId}/channels`),
+  listAgentMessages: (agentId: string) =>
+    request<Message[]>(`/api/agents/${agentId}/messages`),
+  postAgentMessage: (agentId: string, content: string) =>
+    request<PostMessageResponse>(`/api/agents/${agentId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content }),
+    }),
+  listAgentOperations: (agentId: string) =>
+    request<AgentOperation[]>(`/api/agents/${agentId}/operations`),
+  getAgentWorkingState: (agentId: string) =>
+    request<WorkingState | null>(`/api/agents/${agentId}/working`),
+  listChannelMembers: (channelId: string) =>
+    request<Agent[]>(`/api/channels/${channelId}/agents`),
+  addChannelMember: (
+    channelId: string,
+    input: { agent_id: string; role?: string; delivery_policy?: 'subscribed' | 'muted' },
+  ) =>
+    request<ChannelAgent>(`/api/channels/${channelId}/agents`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listChannelWorkspaces: (channelId: string) =>
+    request<Workspace[]>(`/api/channels/${channelId}/workspaces`),
+  attachChannelWorkspace: (
+    channelId: string,
+    input: { kind: BuiltInWorkspaceProviderKey; locator?: string; metadata?: Record<string, unknown> },
+  ) =>
+    request<Workspace>(`/api/channels/${channelId}/workspaces`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listAgentWorkspaces: (agentId: string) =>
+    request<Workspace[]>(`/api/agents/${agentId}/workspaces`),
+  attachAgentWorkspace: (
+    agentId: string,
+    input: { kind: BuiltInWorkspaceProviderKey; locator?: string; metadata?: Record<string, unknown> },
+  ) =>
+    request<Workspace>(`/api/agents/${agentId}/workspaces`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
   setAgentStatus: (agentId: string, status: AgentStatus) =>
     request<Agent>(`/api/agents/${agentId}/${status === 'running' ? 'start' : 'stop'}`, {
+      method: 'POST',
+    }),
+  getRuntimeStatus: (agentId: string) =>
+    request<RuntimeSessionStatus>(`/api/agents/${agentId}/runtime`),
+  cancelTurn: (agentId: string) =>
+    request<{ ok: boolean }>(`/api/agents/${agentId}/turn/cancel`, {
       method: 'POST',
     }),
   listMessages: (channelId: string) =>
@@ -289,6 +398,27 @@ export const localApi = {
       method: 'POST',
       body: JSON.stringify({ content }),
     }),
+  subscribeToEvents: (
+    onEvent: (event: LiveEvent) => void,
+    onConnectionState?: (state: LiveConnectionState) => void,
+  ) => {
+    if (typeof EventSource === 'undefined') {
+      onConnectionState?.('unavailable')
+      return () => undefined
+    }
+    onConnectionState?.('connecting')
+    const source = new EventSource('/api/events')
+    source.onopen = () => onConnectionState?.('connected')
+    source.onerror = () => onConnectionState?.('reconnecting')
+    source.onmessage = (message) => {
+      try {
+        onEvent(JSON.parse(message.data) as LiveEvent)
+      } catch {
+        // Ignore malformed transient events; durable state remains reloadable.
+      }
+    }
+    return () => source.close()
+  },
   listSkillCompatibility: () =>
     request<Record<string, RuntimeSkillCompatibility>>('/api/runtimes/compatibility'),
   listSkillLibrary: () =>
@@ -439,46 +569,6 @@ export const localApi = {
           type: input.type,
           topic: input.topic,
         }),
-      },
-    ),
-  listWikiPages: (query?: string, tag?: string) => {
-    const params = new URLSearchParams()
-    if (query) params.set('q', query)
-    if (tag) params.set('tag', tag)
-    params.set('limit', '200')
-    return request<{ pages: WikiPageSummary[] }>(`/api/wiki/pages?${params}`)
-  },
-  getWikiPage: (path: string) =>
-    request<WikiPage>(`/api/wiki/pages/${encodeURIComponent(path)}`),
-  upsertWikiPage: (
-    path: string,
-    input: {
-      title: string
-      content: string
-      tags: string[]
-      updatedBy?: string
-      reason?: string
-      ifVersion?: number
-    },
-  ) =>
-    request<WikiPage>(`/api/wiki/pages/${encodeURIComponent(path)}`, {
-      method: 'PUT',
-      body: JSON.stringify(input),
-    }),
-  listWikiRevisions: (path: string) =>
-    request<{ revisions: WikiRevision[] }>(
-      `/api/wiki/pages/${encodeURIComponent(path)}/revisions`,
-    ),
-  listWikiBacklinks: (path: string) =>
-    request<{ backlinks: WikiBacklink[] }>(
-      `/api/wiki/pages/${encodeURIComponent(path)}/backlinks`,
-    ),
-  revertWikiPage: (path: string, version: number) =>
-    request<{ page: WikiPage }>(
-      `/api/wiki/pages/${encodeURIComponent(path)}/revert`,
-      {
-        method: 'POST',
-        body: JSON.stringify({ version, updatedBy: 'local-user' }),
       },
     ),
   listRuntimeSessions: (agentId: string, type?: string) => {

@@ -5,8 +5,7 @@ use sqlx_core::query_scalar::query_scalar;
 use sqlx_core::row::Row;
 use uuid::Uuid;
 
-use super::wiki::upsert_wiki_page_in_transaction;
-use super::{Store, StoreError, WikiPage};
+use super::{Store, StoreError};
 
 const MEMORY_INDEX_FILENAME: &str = "MEMORY.md";
 const MEMORY_INDEX_HEADER: &str =
@@ -97,16 +96,18 @@ impl Store {
         &self,
         namespace: MemoryNamespace,
     ) -> Result<MemoryDocument, StoreError> {
-        Ok(match self.get_wiki_page(&namespace.index_path()).await? {
-            Some(page) => MemoryDocument {
-                body: page.content,
-                version: page.version,
+        Ok(
+            match self.get_memory_document(&namespace.index_path()).await? {
+                Some(page) => MemoryDocument {
+                    body: page.content,
+                    version: page.version,
+                },
+                None => MemoryDocument {
+                    body: String::new(),
+                    version: 0,
+                },
             },
-            None => MemoryDocument {
-                body: String::new(),
-                version: 0,
-            },
-        })
+        )
     }
 
     /// Reads one validated typed memory topic.
@@ -118,7 +119,7 @@ impl Store {
     ) -> Result<Option<MemoryTopic>, StoreError> {
         validate_memory_type(memory_type)?;
         validate_topic_slug(topic)?;
-        self.get_wiki_page(&namespace.topic_path(memory_type, topic))
+        self.get_memory_document(&namespace.topic_path(memory_type, topic))
             .await?
             .map(|page| memory_topic_from_page(page, memory_type, topic))
             .transpose()
@@ -129,7 +130,7 @@ impl Store {
         &self,
         namespace: MemoryNamespace,
     ) -> Result<Vec<MemoryDocumentEntry>, StoreError> {
-        self.list_wiki_pages_by_prefix(&namespace.prefix())
+        self.list_memory_documents_by_prefix(&namespace.prefix())
             .await
             .map(|pages| {
                 pages
@@ -169,14 +170,11 @@ impl Store {
         let content = render_topic_content(description, memory_type, &updated, body);
         let topic_path = namespace.topic_path(memory_type, topic);
         let mut transaction = self.pool.begin().await?;
-        let page = upsert_wiki_page_in_transaction(
+        let page = upsert_memory_document_in_transaction(
             &mut transaction,
             &topic_path,
-            topic,
             &content,
-            &memory_tags(namespace, memory_type),
             updated_by,
-            Some("memory topic write"),
             if_version,
         )
         .await?;
@@ -213,11 +211,11 @@ impl Store {
         let to_path = to.topic_path(memory_type, topic);
         let mut transaction = self.pool.begin().await?;
         let source_content: String =
-            query_scalar("SELECT content_md FROM wiki_pages WHERE path = ?")
+            query_scalar("SELECT content_md FROM memory_documents WHERE path = ?")
                 .bind(&from_path)
                 .fetch_optional(&mut *transaction)
                 .await?
-                .ok_or_else(|| StoreError::WikiPageNotFound(from_path.clone()))?;
+                .ok_or_else(|| StoreError::MemoryTopicNotFound(from_path.clone()))?;
         let frontmatter = parse_memory_frontmatter(&source_content);
         let updated = Utc::now().format("%Y-%m-%d").to_string();
         let content = render_topic_content(
@@ -227,18 +225,15 @@ impl Store {
             &frontmatter.body,
         );
 
-        upsert_wiki_page_in_transaction(
+        upsert_memory_document_in_transaction(
             &mut transaction,
             &to_path,
-            topic,
             &content,
-            &memory_tags(to, memory_type),
             updated_by,
-            Some("memory topic move"),
             None,
         )
         .await?;
-        query("DELETE FROM wiki_pages WHERE path = ?")
+        query("DELETE FROM memory_documents WHERE path = ?")
             .bind(&from_path)
             .execute(&mut *transaction)
             .await?;
@@ -263,15 +258,114 @@ pub struct MemoryDocumentEntry {
     pub version: i64,
 }
 
+#[derive(Clone, Debug)]
+struct MemoryRecord {
+    path: String,
+    content: String,
+    version: i64,
+}
+
+impl Store {
+    async fn get_memory_document(&self, path: &str) -> Result<Option<MemoryRecord>, StoreError> {
+        let row = query("SELECT path, content_md, version FROM memory_documents WHERE path = ?")
+            .bind(path)
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(memory_record_from_row).transpose()
+    }
+
+    async fn list_memory_documents_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<Vec<MemoryRecord>, StoreError> {
+        let rows = query(
+            "SELECT path, content_md, version FROM memory_documents \
+             WHERE path LIKE ? ORDER BY path",
+        )
+        .bind(format!("{prefix}%"))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(memory_record_from_row).collect()
+    }
+}
+
+fn memory_record_from_row(row: sqlx_sqlite::SqliteRow) -> Result<MemoryRecord, StoreError> {
+    Ok(MemoryRecord {
+        path: row.try_get("path")?,
+        content: row.try_get("content_md")?,
+        version: row.try_get("version")?,
+    })
+}
+
+async fn upsert_memory_document_in_transaction(
+    transaction: &mut sqlx_core::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
+    path: &str,
+    content: &str,
+    updated_by: Option<&str>,
+    if_version: Option<i64>,
+) -> Result<MemoryRecord, StoreError> {
+    let now = Utc::now();
+    let existing = query("SELECT id, version FROM memory_documents WHERE path = ?")
+        .bind(path)
+        .fetch_optional(&mut **transaction)
+        .await?;
+    let version = if let Some(existing) = existing {
+        let id: Uuid = existing.try_get("id")?;
+        let current_version: i64 = existing.try_get("version")?;
+        if let Some(attempted_version) = if_version.filter(|version| *version > 0) {
+            if attempted_version != current_version {
+                return Err(StoreError::MemoryVersionConflict {
+                    path: path.to_owned(),
+                    current_version,
+                    attempted_version,
+                });
+            }
+        }
+        let version = current_version + 1;
+        query(
+            "UPDATE memory_documents SET content_md = ?, version = ?, updated_at = ?, \
+             updated_by = ? WHERE id = ?",
+        )
+        .bind(content)
+        .bind(version)
+        .bind(now)
+        .bind(updated_by)
+        .bind(id)
+        .execute(&mut **transaction)
+        .await?;
+        version
+    } else {
+        query(
+            "INSERT INTO memory_documents \
+             (id, path, content_md, version, created_at, updated_at, updated_by) \
+             VALUES (?, ?, ?, 1, ?, ?, ?)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(path)
+        .bind(content)
+        .bind(now)
+        .bind(now)
+        .bind(updated_by)
+        .execute(&mut **transaction)
+        .await?;
+        1
+    };
+    Ok(MemoryRecord {
+        path: path.to_owned(),
+        content: content.to_owned(),
+        version,
+    })
+}
+
 async fn regenerate_memory_index(
     transaction: &mut sqlx_core::transaction::Transaction<'_, sqlx_sqlite::Sqlite>,
     namespace: MemoryNamespace,
     updated_by: Option<&str>,
-) -> Result<WikiPage, StoreError> {
+) -> Result<MemoryRecord, StoreError> {
     let prefix = namespace.prefix();
     let index_path = namespace.index_path();
     let rows = query(
-        "SELECT path, content_md FROM wiki_pages \
+        "SELECT path, content_md FROM memory_documents \
          WHERE path LIKE ? AND path != ? ORDER BY path",
     )
     .bind(format!("{prefix}%"))
@@ -316,17 +410,7 @@ async fn regenerate_memory_index(
             limit: MAX_INDEX_LINES,
         });
     }
-    upsert_wiki_page_in_transaction(
-        transaction,
-        &index_path,
-        MEMORY_INDEX_FILENAME,
-        &body,
-        &memory_tags(namespace, "index"),
-        updated_by,
-        Some("regenerate memory index"),
-        None,
-    )
-    .await
+    upsert_memory_document_in_transaction(transaction, &index_path, &body, updated_by, None).await
 }
 
 async fn enforce_namespace_size(
@@ -335,7 +419,7 @@ async fn enforce_namespace_size(
 ) -> Result<(), StoreError> {
     let bytes: i64 = query_scalar(
         "SELECT COALESCE(SUM(LENGTH(CAST(content_md AS BLOB))), 0) \
-         FROM wiki_pages WHERE path LIKE ?",
+         FROM memory_documents WHERE path LIKE ?",
     )
     .bind(format!("{prefix}%"))
     .fetch_one(&mut **transaction)
@@ -350,7 +434,7 @@ async fn enforce_namespace_size(
 }
 
 fn memory_topic_from_page(
-    page: WikiPage,
+    page: MemoryRecord,
     memory_type: &str,
     topic: &str,
 ) -> Result<MemoryTopic, StoreError> {
@@ -408,17 +492,6 @@ fn render_topic_content(description: &str, memory_type: &str, updated: &str, bod
     format!(
         "---\ndescription: {description}\ntype: {memory_type}\nupdated: {updated}\n---\n\n{body}"
     )
-}
-
-fn memory_tags(namespace: MemoryNamespace, memory_type: &str) -> Vec<String> {
-    vec![
-        "memory".to_owned(),
-        match namespace.scope() {
-            MemoryScope::Agent => "agent".to_owned(),
-            MemoryScope::Channel => "channel".to_owned(),
-        },
-        memory_type.to_owned(),
-    ]
 }
 
 struct ParsedMemory {

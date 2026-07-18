@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LocalApp } from './LocalApp'
 
 const runtime = {
@@ -15,7 +15,28 @@ const runtime = {
 const channel = {
   id: 'channel-1',
   name: 'product-loop',
+  description: null,
+  goal: null,
+  kind: 'standard',
+  is_system: false,
+  direct_agent_id: null,
+  created_by_agent_id: null,
+  created_by_channel_id: null,
   created_at: '2026-07-16T09:00:00Z',
+}
+
+const createdAgent = {
+  id: 'agent-1',
+  name: 'builder',
+  description: null,
+  instructions: null,
+  runtime: 'fake',
+  model: 'test-model',
+  status: 'running',
+  lifecycle_status: 'active',
+  created_by_agent_id: null,
+  created_by_channel_id: null,
+  created_at: '2026-07-16T09:01:00Z',
 }
 
 function jsonResponse(body: unknown, status = 200) {
@@ -26,8 +47,13 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe('LocalApp', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   beforeEach(() => {
     let skillInstalled = false
+    let agentCreated = false
     let taskState: Array<{
       id: string
       channelId: string
@@ -51,17 +77,6 @@ describe('LocalApp', () => {
       path: string
       version: number
     } | null = null
-    let wikiPages: Array<{
-      id: string
-      path: string
-      title: string
-      content: string
-      tags: string[]
-      version: number
-      createdAt: string
-      updatedAt: string
-      updatedBy?: string
-    }> = []
     localStorage.clear()
     window.matchMedia = vi.fn().mockReturnValue({
       matches: false,
@@ -72,11 +87,28 @@ describe('LocalApp', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/runtimes') return jsonResponse([runtime])
+      if (path === '/api/search?q=needle') {
+        return jsonResponse({
+          results: [{
+            kind: 'message',
+            id: 'message-search',
+            title: '#product-loop · message #8',
+            snippet: 'needle in local history',
+            channelId: channel.id,
+            agentId: null,
+            messageId: 'message-search',
+            taskNumber: null,
+            path: null,
+          }],
+        })
+      }
       if (path === '/api/runtimes/compatibility') {
         return jsonResponse({ fake: 'supported' })
       }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
-      if (path === '/api/agents' && !init?.method) return jsonResponse([])
+      if (path === '/api/agents' && !init?.method) {
+        return jsonResponse(agentCreated ? [createdAgent] : [])
+      }
       if (path === '/api/zones/local/skills/library' && !init?.method) {
         return jsonResponse({
           entries: [{
@@ -98,16 +130,75 @@ describe('LocalApp', () => {
         })
       }
       if (path === `/api/channels/${channel.id}/messages` && !init?.method) return jsonResponse([])
+      if (path === `/api/channels/${channel.id}/agents` && !init?.method) {
+        return jsonResponse(agentCreated ? [createdAgent] : [])
+      }
+      if (path === `/api/channels/${channel.id}/workspaces` && !init?.method) {
+        return jsonResponse([])
+      }
       if (path === '/api/agents' && init?.method === 'POST') {
+        agentCreated = true
+        return jsonResponse(createdAgent, 201)
+      }
+      if (path === '/api/agents/agent-1/messages' && !init?.method) {
+        return jsonResponse([])
+      }
+      if (path === '/api/agents/agent-1/messages' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { content: string }
         return jsonResponse({
-          id: 'agent-1',
-          channel_id: channel.id,
-          name: 'builder',
-          runtime: 'fake',
-          model: 'test-model',
-          status: 'running',
-          created_at: '2026-07-16T09:01:00Z',
+          message: {
+            id: 'direct-message-1',
+            seq: 1,
+            agent_id: null,
+            role: 'user',
+            content: body.content,
+            created_at: '2026-07-16T09:06:00Z',
+          },
+          replies: [{
+            id: 'direct-message-2',
+            seq: 2,
+            agent_id: 'agent-1',
+            role: 'assistant',
+            content: `direct: ${body.content}`,
+            created_at: '2026-07-16T09:06:01Z',
+          }],
         }, 201)
+      }
+      if (path === '/api/agents/agent-1/channels' && !init?.method) {
+        return jsonResponse([channel])
+      }
+      if (path === '/api/agents/agent-1/workspaces' && !init?.method) {
+        return jsonResponse([])
+      }
+      if (path === '/api/agents/agent-1/workspaces' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { kind: string; locator: string }
+        return jsonResponse({
+          id: 'workspace-1',
+          provider_key: body.kind,
+          descriptor_version: 1,
+          display_name: `${body.kind} workspace`,
+          portable_locator: body.kind === 'external' ? body.locator : null,
+          owner_type: 'agent',
+          owner_id: 'agent-1',
+          kind: body.kind,
+          locator: body.locator,
+          metadata: {},
+          created_at: '2026-07-16T09:07:00Z',
+          updated_at: '2026-07-16T09:07:00Z',
+        }, 201)
+      }
+      if (path === '/api/agents/agent-1/working' && !init?.method) {
+        return jsonResponse(null)
+      }
+      if (path === '/api/agents/agent-1/operations' && !init?.method) {
+        return jsonResponse([])
+      }
+      if (path === '/api/agents/agent-1/stop' && init?.method === 'POST') {
+        return jsonResponse({
+          ...createdAgent,
+          status: 'stopped',
+          lifecycle_status: 'paused',
+        })
       }
       if (path === '/api/agents/agent-1/skills' && !init?.method) {
         return jsonResponse({
@@ -255,59 +346,6 @@ describe('LocalApp', () => {
         }
         return jsonResponse(memoryTopic)
       }
-      if (path === '/api/wiki/pages?limit=200' && !init?.method) {
-        return jsonResponse({
-          pages: wikiPages.map((page) => ({
-            path: page.path,
-            title: page.title,
-            tags: page.tags,
-            version: page.version,
-            updatedAt: page.updatedAt,
-            updatedBy: page.updatedBy,
-          })),
-        })
-      }
-      if (path === '/api/wiki/pages/roadmap%2Flocal-loop' && init?.method === 'PUT') {
-        const body = JSON.parse(String(init.body)) as {
-          title: string
-          content: string
-          tags: string[]
-          ifVersion?: number
-        }
-        const nextVersion = body.ifVersion ? body.ifVersion + 1 : 1
-        const page = {
-          id: 'wiki-1',
-          path: 'roadmap/local-loop',
-          title: body.title,
-          content: body.content,
-          tags: body.tags,
-          version: nextVersion,
-          createdAt: '2026-07-16T09:10:00Z',
-          updatedAt: '2026-07-16T09:10:00Z',
-          updatedBy: 'local-user',
-        }
-        wikiPages = [page]
-        return jsonResponse(page)
-      }
-      if (path === '/api/wiki/pages/roadmap%2Flocal-loop' && !init?.method) {
-        return jsonResponse(wikiPages[0])
-      }
-      if (path === '/api/wiki/pages/roadmap%2Flocal-loop/revisions' && !init?.method) {
-        return jsonResponse({
-          revisions: wikiPages.length === 0 ? [] : [{
-            version: wikiPages[0].version,
-            title: wikiPages[0].title,
-            content: wikiPages[0].content,
-            tags: wikiPages[0].tags,
-            createdAt: wikiPages[0].updatedAt,
-            createdBy: 'local-user',
-            reason: 'Initial page',
-          }],
-        })
-      }
-      if (path === '/api/wiki/pages/roadmap%2Flocal-loop/backlinks' && !init?.method) {
-        return jsonResponse({ backlinks: [] })
-      }
       if (path === `/api/channels/${channel.id}/tasks` && !init?.method) {
         return jsonResponse(taskState)
       }
@@ -415,6 +453,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Set up your first local task' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
 
@@ -426,6 +465,85 @@ describe('LocalApp', () => {
 
     expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Ship the loop')).toBeInTheDocument())
+    expect(screen.queryByRole('heading', { name: 'Set up your first local task' })).not.toBeInTheDocument()
+  })
+
+  it('renders live runtime events from the execution stream', async () => {
+    class FakeEventSource {
+      static instance: FakeEventSource | null = null
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+      onmessage: ((event: MessageEvent<string>) => void) | null = null
+      readonly url: string
+
+      constructor(url: string) {
+        this.url = url
+        FakeEventSource.instance = this
+      }
+
+      close() {}
+    }
+    vi.stubGlobal('EventSource', FakeEventSource)
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    const eventSource = FakeEventSource.instance
+    expect(eventSource?.url).toBe('/api/events')
+    eventSource?.onopen?.()
+    eventSource?.onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({
+        kind: 'text_delta',
+        channelId: channel.id,
+        agentId: 'agent-live',
+        messageId: 'message-live',
+        payload: { text: 'Streaming now' },
+        occurredAt: '2026-07-16T09:02:00Z',
+      }),
+    }))
+
+    expect(await screen.findByText('Streaming now')).toBeInTheDocument()
+    expect(screen.getByText('Live execution connected')).toBeInTheDocument()
+  })
+
+  it('uses a persistent Agent as a first-class task surface', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+    expect(await screen.findByText('builder')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
+    expect(await screen.findByRole('heading', { name: '@builder' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Workspace location'), {
+      target: { value: '/tmp/general-purpose-work' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Attach Workspace' }))
+    expect(await screen.findByText('directory workspace · directory')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByPlaceholderText('Describe the requirement for this Agent…'), {
+      target: { value: 'Research a non-code topic' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Run task' }))
+    expect(await screen.findByText('direct: Research a non-code topic')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Pause Agent' }))
+    expect(await screen.findByText('paused')).toBeInTheDocument()
+  })
+
+  it('searches durable local data and exposes a state backup download', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Download application-state backup' }))
+      .toHaveAttribute('href', '/api/backups/state')
+    fireEvent.click(screen.getByRole('button', { name: 'Global search' }))
+    fireEvent.change(screen.getByRole('textbox', { name: 'Global search' }), {
+      target: { value: 'needle' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }))
+
+    expect(await screen.findByText('needle in local history')).toBeInTheDocument()
   })
 
   it('refreshes the active channel so durable background replies appear', async () => {
@@ -494,6 +612,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
     expect(await screen.findByText('builder')).toBeInTheDocument()
 
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     fireEvent.click(screen.getByRole('button', { name: 'Skills' }))
     expect(await screen.findByRole('heading', { name: 'Skills workspace' })).toBeInTheDocument()
     expect(await screen.findByText('Review local changes')).toBeInTheDocument()
@@ -553,7 +672,7 @@ describe('LocalApp', () => {
     expect(await screen.findByText('#1 Prepare release')).toBeInTheDocument()
   })
 
-  it('creates durable Agent memory and a versioned wiki page', async () => {
+  it('creates durable Agent memory from the Channel knowledge context', async () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
@@ -561,7 +680,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
     expect(await screen.findByText('builder')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Knowledge' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Memory' }))
     expect(await screen.findByRole('heading', { name: 'Knowledge workspace' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'New topic' }))
     fireEvent.change(screen.getByLabelText('Topic slug'), {
@@ -581,22 +700,7 @@ describe('LocalApp', () => {
         '# Decisions\n\nStay local-first.',
       )
     })
-
-    fireEvent.click(screen.getByRole('button', { name: 'Wiki' }))
-    fireEvent.click(screen.getByRole('button', { name: 'New page' }))
-    fireEvent.change(screen.getByLabelText('Page path'), {
-      target: { value: 'roadmap/local-loop' },
-    })
-    fireEvent.change(screen.getByLabelText('Title'), {
-      target: { value: 'Local product loop' },
-    })
-    fireEvent.change(screen.getByLabelText('Markdown content'), {
-      target: { value: '# Local product loop\n\nComplete.' },
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Create page' }))
-
-    expect(await screen.findByRole('heading', { name: 'Local product loop' })).toBeInTheDocument()
-    expect(await screen.findByText('Complete.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Wiki' })).not.toBeInTheDocument()
   })
 
   it('inspects runtime history and jumps back to the source message', async () => {
@@ -613,6 +717,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Run task' }))
     expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
 
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     fireEvent.click(screen.getByRole('button', { name: 'History' }))
     expect(await screen.findByRole('heading', { name: 'Runtime history' })).toBeInTheDocument()
     expect(await screen.findByText('session-1')).toBeInTheDocument()
@@ -628,6 +733,7 @@ describe('LocalApp', () => {
     const sourceMessage = screen.getByText('Ship the loop').closest('article')
     expect(sourceMessage).toHaveClass('history-target')
 
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     fireEvent.click(screen.getByRole('button', { name: 'History' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Activity' }))
     expect(await screen.findByText('Recording local history')).toBeInTheDocument()

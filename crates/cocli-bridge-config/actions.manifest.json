@@ -117,72 +117,6 @@
       ]
     },
     {
-      "action": "wiki.search",
-      "tool": "mcp_wiki_search",
-      "cli": [
-        "wiki",
-        "search"
-      ],
-      "tier": "extended",
-      "section": "Wiki",
-      "summary": "search wiki pages",
-      "example": "cocli wiki search --query \"...\"",
-      "flags": [
-        "--query",
-        "--q",
-        "--limit"
-      ]
-    },
-    {
-      "action": "wiki.read",
-      "tool": "mcp_wiki_read",
-      "cli": [
-        "wiki",
-        "read"
-      ],
-      "tier": "extended",
-      "section": "Wiki",
-      "summary": "read wiki content",
-      "example": "cocli wiki read --path messaging/some-page [--section \"Heading\"] [--range L10-L50]",
-      "flags": [
-        "--path",
-        "--section",
-        "--range"
-      ]
-    },
-    {
-      "action": "wiki.write",
-      "tool": "mcp_wiki_write",
-      "cli": [
-        "wiki",
-        "write"
-      ],
-      "tier": "extended",
-      "section": "Wiki",
-      "summary": "write or update a wiki page",
-      "example": "cocli wiki write --path messaging/page --title \"Title\" --content \"...\" [--if-version N]",
-      "flags": [
-        "--path",
-        "--title",
-        "--content",
-        "--content-md",
-        "--if-version",
-        "--stdin"
-      ]
-    },
-    {
-      "action": "wiki.list",
-      "tool": "mcp_wiki_list",
-      "cli": [
-        "wiki",
-        "list"
-      ],
-      "tier": "extended",
-      "section": "Wiki",
-      "summary": "list wiki pages",
-      "example": "cocli wiki list"
-    },
-    {
       "action": "memory.list",
       "tool": "memory_index_list",
       "cli": [
@@ -385,19 +319,104 @@
       "example": "cocli server list"
     },
     {
-      "action": "server.create_channel",
-      "tool": "create_channel",
+      "action": "channel.list",
+      "tool": "channel_list",
       "cli": [
-        "server",
-        "create-channel"
+        "channel",
+        "list"
       ],
-      "tier": "extended",
-      "section": "Self / Reminders / Server",
-      "summary": "create a channel",
-      "example": "cocli server create-channel --name ops",
+      "tier": "core",
+      "section": "Channels",
+      "summary": "list channels visible to this persistent agent",
+      "example": "cocli channel list [--scope member|all] [--query \"...\"]",
+      "flags": [
+        "--scope",
+        "--query",
+        "--q"
+      ]
+    },
+    {
+      "action": "channel.create",
+      "tool": "channel_create",
+      "cli": [
+        "channel",
+        "create"
+      ],
+      "tier": "core",
+      "section": "Channels",
+      "summary": "create a persistent channel for organizing work",
+      "example": "cocli channel create --name ops [--description \"...\"] [--goal \"...\"] [--idempotency-key key]",
       "flags": [
         "--name",
-        "--description"
+        "--description",
+        "--goal",
+        "--idempotency-key",
+        "--source-channel-id",
+        "--source-session-id"
+      ]
+    },
+    {
+      "action": "channel.join_agent",
+      "tool": "channel_join_agent",
+      "cli": [
+        "channel",
+        "join-agent"
+      ],
+      "tier": "core",
+      "section": "Channels",
+      "summary": "add an existing persistent agent to a channel",
+      "example": "cocli channel join-agent --channel \"#ops\" --agent-id <uuid> [--role reviewer]",
+      "flags": [
+        "--channel",
+        "--agent-id",
+        "--role",
+        "--idempotency-key",
+        "--source-channel-id",
+        "--source-session-id"
+      ]
+    },
+    {
+      "action": "agent.list",
+      "tool": "agent_list",
+      "cli": [
+        "agent",
+        "list"
+      ],
+      "tier": "core",
+      "section": "Agents",
+      "summary": "list persistent agents visible to this agent",
+      "example": "cocli agent list [--channel \"#ops\"] [--query \"...\"]",
+      "flags": [
+        "--channel",
+        "--channel-id",
+        "--status",
+        "--query",
+        "--q"
+      ]
+    },
+    {
+      "action": "agent.create",
+      "tool": "agent_create",
+      "cli": [
+        "agent",
+        "create"
+      ],
+      "tier": "core",
+      "section": "Agents",
+      "summary": "create a persistent agent that can participate in channels",
+      "example": "cocli agent create --name reviewer [--instructions \"...\"] [--channel \"#ops\"] [--idempotency-key key]",
+      "flags": [
+        "--name",
+        "--description",
+        "--instructions",
+        "--runtime",
+        "--model",
+        "--channel",
+        "--channel-id",
+        "--role",
+        "--idempotency-key",
+        "--source-channel-id",
+        "--source-session-id"
       ]
     },
     {

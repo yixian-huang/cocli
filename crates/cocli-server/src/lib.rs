@@ -7,12 +7,18 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use async_trait::async_trait;
+use axum::extract::State;
+use axum::http::{header, HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use axum::Router;
 use cocli_api::{
-    reconcile_skill_state, router, RuntimeService, SqliteRuntimeBridgeTokenProvider,
-    SqliteRuntimeHistorySink, SqliteRuntimeKnowledgeProvider,
+    reconcile_skill_state, router_with_live_events, LiveEvent, LiveEventSink, RuntimeService,
+    SqliteRuntimeBridgeTokenProvider, SqliteRuntimeHistorySink, SqliteRuntimeKnowledgeProvider,
 };
 use cocli_store::{Store, StoreError};
+use cocli_ws::EventHub;
 use tokio::net::TcpListener;
 
 pub use runtime::{LocalRuntimeConfig, LocalRuntimeService, RuntimeSetupError};
@@ -34,6 +40,26 @@ pub struct Server {
     listener: TcpListener,
     app: Router,
     data_dir: PathBuf,
+}
+
+struct HubLiveEventSink {
+    hub: EventHub,
+}
+
+#[derive(Clone)]
+struct BackupState {
+    store: Store,
+    data_dir: PathBuf,
+}
+
+#[async_trait]
+impl LiveEventSink for HubLiveEventSink {
+    async fn emit(&self, event: LiveEvent) {
+        match serde_json::to_value(event) {
+            Ok(value) => self.hub.publish(value),
+            Err(error) => tracing::warn!(%error, "failed to serialize live event"),
+        }
+    }
 }
 
 impl Server {
@@ -61,12 +87,26 @@ impl Server {
         runtime.set_bridge_token_provider(Arc::new(SqliteRuntimeBridgeTokenProvider::new(
             store.clone(),
         )));
+        let event_hub = EventHub::default();
+        let live_events: Arc<dyn LiveEventSink> = Arc::new(HubLiveEventSink {
+            hub: event_hub.clone(),
+        });
+        runtime.set_live_event_sink(Arc::clone(&live_events));
         reconcile_skill_state(&store, &runtime)
             .await
             .map_err(ServerError::Runtime)?;
+        let backup_router = Router::new()
+            .route("/api/backups/state", get(download_state_backup))
+            .with_state(BackupState {
+                store: store.clone(),
+                data_dir: config.data_dir.clone(),
+            });
         Ok(Self {
             listener,
-            app: router(store, runtime).merge(cocli_web::router(config.web_dir)),
+            app: router_with_live_events(store, runtime, live_events)
+                .merge(cocli_ws::router(event_hub))
+                .merge(backup_router)
+                .merge(cocli_web::router(config.web_dir)),
             data_dir: config.data_dir,
         })
     }
@@ -96,6 +136,54 @@ impl Server {
     }
 }
 
+async fn download_state_backup(State(state): State<BackupState>) -> Response {
+    let backup_dir = state.data_dir.join("backups");
+    let snapshot_path = backup_dir.join(format!("download-{}.sqlite3", uuid::Uuid::new_v4()));
+    let snapshot = async {
+        tokio::fs::create_dir_all(&backup_dir)
+            .await
+            .map_err(|error| error.to_string())?;
+        state
+            .store
+            .export_snapshot(&snapshot_path)
+            .await
+            .map_err(|error| error.to_string())?;
+        tokio::fs::read(&snapshot_path)
+            .await
+            .map_err(|error| error.to_string())
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&snapshot_path).await;
+
+    match snapshot {
+        Ok(bytes) => {
+            let filename = format!(
+                "attachment; filename=\"cocli-state-{}.sqlite3\"",
+                chrono::Utc::now().format("%Y%m%d-%H%M%S")
+            );
+            let mut response = bytes.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/vnd.sqlite3"),
+            );
+            if let Ok(value) = HeaderValue::from_str(&filename) {
+                response
+                    .headers_mut()
+                    .insert(header::CONTENT_DISPOSITION, value);
+            }
+            response
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to export application state backup");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to export application state backup",
+            )
+                .into_response()
+        }
+    }
+}
+
 fn database_path(data_dir: &Path) -> PathBuf {
     data_dir.join("cocli.sqlite3")
 }
@@ -120,6 +208,7 @@ pub enum ServerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use cocli_api::EchoRuntimeService;
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -143,5 +232,33 @@ mod tests {
             !temp.path().join("data").exists(),
             "validation should happen before local state is created"
         );
+    }
+
+    #[tokio::test]
+    async fn downloads_a_sqlite_application_state_snapshot() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let store = Store::open(temp.path().join("cocli.sqlite3"))
+            .await
+            .expect("store should open");
+        store
+            .create_channel("portable")
+            .await
+            .expect("channel should be created");
+
+        let response = download_state_backup(State(BackupState {
+            store,
+            data_dir: temp.path().to_path_buf(),
+        }))
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE),
+            Some(&HeaderValue::from_static("application/vnd.sqlite3"))
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("backup body should load");
+        assert!(bytes.starts_with(b"SQLite format 3"));
     }
 }

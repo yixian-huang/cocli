@@ -69,12 +69,24 @@ fn stdio_process_initializes_and_lists_tools() {
         .as_array()
         .expect("tool list")
         .iter()
-        .any(|tool| tool["name"] == "mcp_wiki_read"));
+        .any(|tool| tool["name"] == "memory_write"));
+    assert!(!responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tool list")
+        .iter()
+        .any(|tool| tool["name"]
+            .as_str()
+            .is_some_and(|name| name.contains("wiki"))));
     assert!(responses[1]["result"]["tools"]
         .as_array()
         .expect("tool list")
         .iter()
-        .any(|tool| tool["name"] == "memory_write"));
+        .any(|tool| tool["name"] == "channel_create"));
+    assert!(responses[1]["result"]["tools"]
+        .as_array()
+        .expect("tool list")
+        .iter()
+        .any(|tool| tool["name"] == "agent_create"));
 }
 
 #[test]

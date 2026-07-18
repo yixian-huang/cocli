@@ -11,8 +11,8 @@ pub const LOCAL_INITIALIZATION_PROMPT: &str =
 #[derive(Clone, Copy, Debug)]
 pub struct LocalPromptConfig<'a> {
     pub agent_id: &'a str,
-    pub channel_id: &'a str,
     pub agent_name: &'a str,
+    pub instructions: &'a str,
     pub runtime: &'a str,
     pub model: &'a str,
     pub workspace_dir: &'a Path,
@@ -35,6 +35,14 @@ pub fn build_local_system_prompt(config: &LocalPromptConfig<'_>) -> String {
         config.agent_name, config.agent_name
     )
     .expect("write to string");
+    if !config.instructions.trim().is_empty() {
+        writeln!(
+            out,
+            "\n## Durable Instructions\n\n{}",
+            config.instructions.trim()
+        )
+        .expect("write to string");
+    }
     writeln!(
         out,
         "\n# Local Runtime\n\n- Agent ID: {}\n- Runtime: {}\n- Model: {}\n- Current date: {}",
@@ -58,10 +66,12 @@ When the runtime exposes the local `chat` MCP server, these tools are available 
 - `send_message`: send a side message to another local channel or agent. Do not duplicate your final reply through this tool because final model text is already delivered.
 - `check_messages`: consume unread messages from your local inbox.
 - `read_history`: inspect bounded channel history without consuming inbox state.
+- `channel_list` and `channel_create`: inspect or create durable collaboration contexts.
+- `agent_list` and `agent_create`: inspect or create durable agents whose identity survives runtime sessions.
+- `channel_join_agent`: invite an existing agent into a channel so it can participate in shared work.
 - `list_tasks`, `create_tasks`, `claim_tasks`, `unclaim_task`, `update_task_status`, `add_task_dependency`, and `get_task_dependencies`: coordinate durable channel work. Claim a task before doing substantial task work, respect blocked dependencies, and keep status/progress current.
 - `set_working_state`, `get_working_state`, and `clear_working_state`: persist and recover a concise work anchor across turns or runtime restarts.
 - `memory_index_list`, `memory_read`, `memory_write`, and `memory_move`: read or update durable L1/L2 memory through SQLite.
-- `mcp_wiki_search`, `mcp_wiki_read`, `mcp_wiki_write`, and `mcp_wiki_list`: use the independent local knowledge base.
 
 Use collaboration tools only when they advance the requested work. Do not invent memory or knowledge-base tools that are not exposed by the runtime.
 "#,
@@ -76,7 +86,7 @@ Your persistent workspace is:
 {}
 
 - Files in this directory survive runtime restarts and thread forks.
-- Use the workspace for project files, notes, and durable handoff context.
+- Use the workspace for task materials, notes, and durable handoff context.
 - When work spans turns or context resets, record the current goal, completed work, decisions, blockers, and next step in `MEMORY.md`.
 - You may work outside this directory only when the user request explicitly places another local path in scope.
 "#,
@@ -92,7 +102,7 @@ Your persistent workspace is:
 - SQLite is the source of truth. The generated `memory/` tree is a read-only runtime mirror.
 - Use the memory tools to write or move durable memory; do not edit generated mirror files directly.
 - Agent-private L1 memory is mirrored under `memory/`.
-- Current-channel L2 memory is mirrored under `memory/channels/{}`.
+- Memory shared by member Channels is mirrored under `memory/channels/<channel-id>/`.
 
 ## L1 Agent Memory Index
 
@@ -102,7 +112,6 @@ Your persistent workspace is:
 
 {}
 "#,
-        config.channel_id,
         memory_index_or_empty(config.agent_memory_index),
         memory_index_or_empty(config.channel_memory_index),
     )
@@ -112,10 +121,10 @@ Your persistent workspace is:
 
 # Operating Discipline
 
-- Inspect the relevant files and state before changing code.
-- Keep changes scoped, reviewable, and consistent with existing project patterns.
-- For code changes, run the smallest useful tests first, then broader checks when risk warrants them.
-- Preserve unrelated user changes and avoid destructive operations unless explicitly requested.
+- Inspect the relevant context and available evidence before acting.
+- Keep work scoped to the request and consistent with the domain and workspace in use.
+- Use domain-appropriate validation before claiming a result is complete.
+- Preserve unrelated user state and avoid destructive operations unless explicitly requested.
 - Report concrete results, validation evidence, and any remaining blocker.
 
 # Context and Session Continuity
@@ -170,8 +179,8 @@ mod tests {
     fn local_prompt_describes_direct_reply_and_persistent_workspace() {
         let prompt = build_local_system_prompt(&LocalPromptConfig {
             agent_id: "agent-1",
-            channel_id: "channel-1",
             agent_name: "builder",
+            instructions: "Prefer concise, evidence-backed answers.",
             runtime: "codex",
             model: "",
             workspace_dir: Path::new("/tmp/cocli/agent-1"),
@@ -192,7 +201,13 @@ mod tests {
         assert!(prompt.contains("project_alpha.md"));
         assert!(prompt.contains("feedback_beta.md"));
         assert!(prompt.contains("memory_write"));
-        assert!(prompt.contains("mcp_wiki_search"));
+        assert!(prompt.contains("channel_create"));
+        assert!(prompt.contains("agent_create"));
+        assert!(prompt.contains("channel_join_agent"));
+        assert!(prompt.contains("Prefer concise, evidence-backed answers."));
+        assert!(!prompt.contains("mcp_wiki_search"));
+        assert!(!prompt.contains("For code changes"));
+        assert!(!prompt.contains("changing code"));
         assert!(!prompt.contains("MUST go through send_message"));
     }
 

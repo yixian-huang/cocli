@@ -23,3 +23,7 @@ dirs = { workspace = true }
 cocli-api = { path = "../../crates/cocli-api" }
 cocli-reaper = { path = "../../crates/cocli-reaper" }
 cocli-server = { path = "../../crates/cocli-server" }
+cocli-store = { path = "../../crates/cocli-store" }
+
+[dev-dependencies]
+tempfile = { workspace = true }

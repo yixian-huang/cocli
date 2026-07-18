@@ -124,7 +124,12 @@ pub fn compact_reinforcement_commands() -> String {
         .filter(|cmd| {
             matches!(
                 cmd.section.as_str(),
-                "Messaging" | "Wiki" | "Tasks" | "Memory" | "Self / Reminders / Server"
+                "Messaging"
+                    | "Channels"
+                    | "Agents"
+                    | "Tasks"
+                    | "Memory"
+                    | "Self / Reminders / Server"
             )
         })
         .map(|cmd| format!("`cocli {} {}`", cmd.cli[0], cmd.cli[1]))
@@ -169,9 +174,13 @@ mod tests {
             "cocli message digest",
             "cocli message check",
             "cocli message send",
+            "cocli channel list",
+            "cocli channel create",
+            "cocli channel join-agent",
+            "cocli agent list",
+            "cocli agent create",
             "cocli task list",
             "cocli task claim",
-            "cocli wiki search",
         ] {
             assert!(prompt.contains(needle), "missing {needle}");
         }
@@ -184,6 +193,11 @@ mod tests {
             "cocli message digest",
             "cocli message check",
             "cocli message send",
+            "cocli channel list",
+            "cocli channel create",
+            "cocli channel join-agent",
+            "cocli agent list",
+            "cocli agent create",
             "cocli task list",
             "cocli task claim",
         ] {
@@ -192,7 +206,6 @@ mod tests {
         for absent in [
             "cocli message drill",
             "cocli message history",
-            "cocli wiki search",
             "cocli memory list",
             "cocli reminder schedule",
         ] {
@@ -203,8 +216,8 @@ mod tests {
         }
         assert_eq!(
             core_cli_phrases().len(),
-            5,
-            "Grok pilot core set should remain five commands"
+            10,
+            "core set should include messaging, channel, agent, and task commands"
         );
     }
 }

@@ -71,7 +71,7 @@ async fn memory_write_updates_topic_revision_and_generated_index_atomically() {
         .expect_err("stale write should conflict");
     assert!(matches!(
         conflict,
-        StoreError::WikiVersionConflict {
+        StoreError::MemoryVersionConflict {
             current_version: 2,
             attempted_version: 1,
             ..

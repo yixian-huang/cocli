@@ -72,8 +72,7 @@
   color: var(--accent);
 }
 
-.memory-workspace,
-.wiki-workspace {
+.memory-workspace {
   display: grid;
   width: min(1540px, 100%);
   height: calc(100vh - 180px);
@@ -104,18 +103,14 @@
 
 .knowledge-controls label,
 .memory-create-form label,
-.wiki-create-form label,
-.knowledge-edit-form label,
-.wiki-save-row label {
+.knowledge-edit-form label {
   display: grid;
   gap: 6px;
 }
 
 .knowledge-controls label > span,
 .memory-create-form label > span,
-.wiki-create-form label > span,
 .knowledge-edit-form label > span,
-.wiki-save-row label > span,
 .control-label {
   color: var(--muted);
   font-family: var(--font-signal);
@@ -151,12 +146,8 @@
 .knowledge-filter-row select,
 .memory-create-form input,
 .memory-create-form textarea,
-.wiki-create-form input,
-.wiki-create-form textarea,
 .knowledge-edit-form input,
-.knowledge-edit-form textarea,
-.revision-select select,
-.wiki-save-row input {
+.knowledge-edit-form textarea {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: var(--radius-xs);
@@ -168,17 +159,13 @@
 .knowledge-filter-row input,
 .knowledge-filter-row select,
 .memory-create-form input,
-.wiki-create-form input,
-.knowledge-edit-form input,
-.revision-select select,
-.wiki-save-row input {
+.knowledge-edit-form input {
   min-height: 36px;
   padding: 0 10px;
   font-size: 12px;
 }
 
 .memory-create-form textarea,
-.wiki-create-form textarea,
 .knowledge-edit-form textarea {
   resize: vertical;
   padding: 10px;
@@ -195,8 +182,7 @@
 .knowledge-sidebar-actions button,
 .knowledge-editor-header button,
 .knowledge-edit-form button,
-.memory-create-form > button,
-.wiki-create-form > button {
+.memory-create-form > button {
   display: inline-flex;
   min-height: 34px;
   align-items: center;
@@ -225,15 +211,13 @@
 }
 
 .knowledge-edit-form button.primary,
-.memory-create-form > button,
-.wiki-create-form > button {
+.memory-create-form > button {
   border-color: var(--accent);
   background: var(--accent);
   color: var(--accent-ink);
 }
 
-.memory-create-form,
-.wiki-create-form {
+.memory-create-form {
   display: grid;
   gap: var(--space-3);
   max-height: 440px;
@@ -263,14 +247,6 @@
   background: transparent;
   color: var(--text-soft);
   text-align: left;
-}
-
-.wiki-workspace .knowledge-list > button {
-  grid-template-columns: minmax(0, 1fr) auto;
-}
-
-.wiki-workspace .knowledge-list > button strong {
-  grid-column: 1 / -1;
 }
 
 .knowledge-list > button:hover {
@@ -441,161 +417,6 @@
   line-height: 1.55;
 }
 
-.wiki-field-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: var(--space-3);
-}
-
-.wiki-save-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: var(--space-3);
-}
-
-.revision-select {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--muted);
-}
-
-.revision-select select {
-  width: auto;
-  max-width: 210px;
-}
-
-.wiki-preview {
-  min-height: 0;
-  flex: 1;
-  overflow-y: auto;
-  padding: var(--space-5) clamp(20px, 5vw, 64px);
-}
-
-.wiki-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: var(--space-4);
-}
-
-.wiki-tags span {
-  border: 1px solid var(--line);
-  border-radius: var(--radius-full);
-  padding: 3px 8px;
-  color: var(--muted);
-  font-family: var(--font-signal);
-  font-size: 9px;
-}
-
-.local-markdown {
-  max-width: 880px;
-  color: var(--text-soft);
-  font-size: 14px;
-  line-height: 1.72;
-}
-
-.local-markdown h1,
-.local-markdown h2,
-.local-markdown h3 {
-  color: var(--text);
-  letter-spacing: -0.025em;
-}
-
-.local-markdown a {
-  color: var(--accent);
-}
-
-.local-markdown blockquote {
-  margin-left: 0;
-  border-left: 3px solid var(--line-accent);
-  padding-left: var(--space-4);
-  color: var(--muted);
-}
-
-.local-markdown :not(pre) > code {
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  padding: 1px 5px;
-  background: var(--surface);
-  font-family: var(--font-signal);
-  font-size: 0.9em;
-}
-
-.local-markdown table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.local-markdown th,
-.local-markdown td {
-  border: 1px solid var(--line);
-  padding: 7px 9px;
-  text-align: left;
-}
-
-.wiki-backlinks {
-  display: grid;
-  max-width: 880px;
-  gap: var(--space-2);
-  margin-top: var(--space-8);
-  border-top: 1px solid var(--line);
-  padding-top: var(--space-4);
-}
-
-.wiki-backlinks h3 {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  margin: 0;
-  color: var(--muted);
-  font-family: var(--font-signal);
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.wiki-backlinks p {
-  margin: 0;
-  color: var(--quiet);
-  font-size: 12px;
-}
-
-.wiki-backlinks button {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  border: 1px solid var(--line);
-  border-radius: var(--radius-xs);
-  padding: 9px 10px;
-  background: var(--surface);
-  color: var(--text-soft);
-  text-align: left;
-}
-
-.wiki-backlinks button:hover {
-  border-color: var(--line-accent);
-}
-
-.wiki-backlinks button span {
-  color: var(--quiet);
-  font-family: var(--font-signal);
-  font-size: 9px;
-}
-
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
 @media (max-width: 900px) {
   .local-knowledge-workspace {
     padding: var(--space-3);
@@ -611,8 +432,7 @@
     align-self: flex-start;
   }
 
-  .memory-workspace,
-  .wiki-workspace {
+  .memory-workspace {
     height: auto;
     min-height: 0;
     grid-template-columns: 1fr;
@@ -631,9 +451,7 @@
 }
 
 @media (max-width: 560px) {
-  .knowledge-filter-row,
-  .wiki-field-row,
-  .wiki-save-row {
+  .knowledge-filter-row {
     grid-template-columns: 1fr;
   }
 
@@ -647,22 +465,7 @@
     flex-wrap: wrap;
   }
 
-  .knowledge-editor-header button,
-  .revision-select {
+  .knowledge-editor-header button {
     flex: 1;
-  }
-
-  .revision-select select {
-    width: 100%;
-    max-width: none;
-  }
-
-  .wiki-preview {
-    padding: var(--space-4);
-  }
-
-  .wiki-backlinks button {
-    align-items: flex-start;
-    flex-direction: column;
   }
 }

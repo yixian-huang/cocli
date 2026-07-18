@@ -26,7 +26,6 @@ import type { LocalCopyKey } from './localization'
 
 interface LocalMemoryWorkspaceProps {
   agents: Agent[]
-  channels: Channel[]
   t: (key: LocalCopyKey, values?: Record<string, string | number>) => string
 }
 
@@ -60,10 +59,11 @@ function editableMemoryBody(body: string): string {
 
 export function LocalMemoryWorkspace({
   agents,
-  channels,
   t,
 }: LocalMemoryWorkspaceProps) {
   const [agentId, setAgentId] = useState(agents[0]?.id ?? '')
+  const [memberChannels, setMemberChannels] = useState<Channel[]>([])
+  const [channelId, setChannelId] = useState('')
   const [scope, setScope] = useState<MemoryScope>('agent')
   const [entries, setEntries] = useState<MemoryEntry[]>([])
   const [selectedKey, setSelectedKey] = useState('')
@@ -86,16 +86,15 @@ export function LocalMemoryWorkspace({
     [agentId, agents],
   )
   const selectedChannel = useMemo(
-    () => channels.find((channel) => channel.id === selectedAgent?.channel_id) ?? null,
-    [channels, selectedAgent],
+    () => memberChannels.find((channel) => channel.id === channelId) ?? null,
+    [channelId, memberChannels],
   )
   const agentOptions = useMemo(
     () => agents.map((agent) => ({
       value: agent.id,
       label: agent.name,
-      meta: channels.find((channel) => channel.id === agent.channel_id)?.name,
     })),
-    [agents, channels],
+    [agents],
   )
   const typeOptions = useMemo(
     () => MEMORY_TYPES.map((type) => ({
@@ -103,6 +102,13 @@ export function LocalMemoryWorkspace({
       label: t(`memoryType${type[0].toUpperCase()}${type.slice(1)}` as LocalCopyKey),
     })),
     [t],
+  )
+  const channelOptions = useMemo(
+    () => memberChannels.map((channel) => ({
+      value: channel.id,
+      label: `# ${channel.name}`,
+    })),
+    [memberChannels],
   )
   const visibleEntries = useMemo(() => {
     const normalized = filter.trim().toLocaleLowerCase()
@@ -116,7 +122,7 @@ export function LocalMemoryWorkspace({
   }, [entries, filter, typeFilter])
 
   const loadEntries = useCallback(async () => {
-    if (!selectedAgent) {
+    if (!selectedAgent || (scope === 'channel' && !selectedChannel)) {
       setEntries([])
       setSelectedKey('')
       setTopic(null)
@@ -128,7 +134,7 @@ export function LocalMemoryWorkspace({
       const response = await localApi.listMemory(
         selectedAgent.id,
         scope,
-        scope === 'channel' ? selectedAgent.channel_id : undefined,
+        scope === 'channel' ? selectedChannel?.id : undefined,
       )
       const nextEntries = response.entries
         .map(parseMemoryEntry)
@@ -144,13 +150,41 @@ export function LocalMemoryWorkspace({
     } finally {
       setLoading(false)
     }
-  }, [scope, selectedAgent, t])
+  }, [scope, selectedAgent, selectedChannel, t])
 
   useEffect(() => {
     setAgentId((current) => (
       agents.some((agent) => agent.id === current) ? current : agents[0]?.id ?? ''
     ))
   }, [agents])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!agentId) {
+      setMemberChannels([])
+      setChannelId('')
+      return
+    }
+    void localApi.listAgentChannels(agentId)
+      .then((nextChannels) => {
+        if (cancelled) return
+        const visibleChannels = nextChannels.filter((channel) => !channel.is_system)
+        setMemberChannels(visibleChannels)
+        setChannelId((current) => (
+          visibleChannels.some((channel) => channel.id === current)
+            ? current
+            : visibleChannels[0]?.id ?? ''
+        ))
+      })
+      .catch((nextError: unknown) => {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : t('memoryLoadError'))
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [agentId, t])
 
   useEffect(() => {
     setSelectedKey('')
@@ -172,7 +206,7 @@ export function LocalMemoryWorkspace({
       scope,
       type as MemoryType,
       topicSlug,
-      scope === 'channel' ? selectedAgent.channel_id : undefined,
+      scope === 'channel' ? selectedChannel?.id : undefined,
     )
       .then((nextTopic) => {
         if (cancelled) return
@@ -191,7 +225,7 @@ export function LocalMemoryWorkspace({
     return () => {
       cancelled = true
     }
-  }, [scope, selectedAgent, selectedKey, t])
+  }, [scope, selectedAgent, selectedChannel, selectedKey, t])
 
   const runAction = useCallback(async (key: string, task: () => Promise<void>) => {
     setAction(key)
@@ -207,12 +241,17 @@ export function LocalMemoryWorkspace({
 
   function createTopic(event: FormEvent) {
     event.preventDefault()
-    if (!selectedAgent || !newTopic.trim() || !newBody.trim()) return
+    if (
+      !selectedAgent
+      || (scope === 'channel' && !selectedChannel)
+      || !newTopic.trim()
+      || !newBody.trim()
+    ) return
     const slug = newTopic.trim().toLocaleLowerCase().replace(/[^a-z0-9_]+/g, '_')
     void runAction('create', async () => {
       const created = await localApi.writeMemoryTopic(selectedAgent.id, {
         scope,
-        channelId: scope === 'channel' ? selectedAgent.channel_id : undefined,
+        channelId: scope === 'channel' ? selectedChannel?.id : undefined,
         type: newType,
         topic: slug,
         description: newDescription.trim(),
@@ -229,11 +268,11 @@ export function LocalMemoryWorkspace({
 
   function saveTopic(event: FormEvent) {
     event.preventDefault()
-    if (!selectedAgent || !topic) return
+    if (!selectedAgent || !topic || (scope === 'channel' && !selectedChannel)) return
     void runAction('save', async () => {
       const updated = await localApi.writeMemoryTopic(selectedAgent.id, {
         scope,
-        channelId: scope === 'channel' ? selectedAgent.channel_id : undefined,
+        channelId: scope === 'channel' ? selectedChannel?.id : undefined,
         type: topic.type,
         topic: topic.topic,
         description: draftDescription.trim(),
@@ -247,14 +286,14 @@ export function LocalMemoryWorkspace({
   }
 
   function moveTopic() {
-    if (!selectedAgent || !topic) return
+    if (!selectedAgent || !topic || (scope === 'agent' && !selectedChannel)) return
     const destination: MemoryScope = scope === 'agent' ? 'channel' : 'agent'
     void runAction('move', async () => {
       await localApi.moveMemoryTopic(selectedAgent.id, {
         fromScope: scope,
-        fromChannelId: scope === 'channel' ? selectedAgent.channel_id : undefined,
+        fromChannelId: scope === 'channel' ? selectedChannel?.id : undefined,
         toScope: destination,
-        toChannelId: destination === 'channel' ? selectedAgent.channel_id : undefined,
+        toChannelId: destination === 'channel' ? selectedChannel?.id : undefined,
         type: topic.type,
         topic: topic.topic,
       })
@@ -302,12 +341,26 @@ export function LocalMemoryWorkspace({
               <button
                 type="button"
                 className={scope === 'channel' ? 'active' : ''}
+                disabled={memberChannels.length === 0}
                 onClick={() => setScope('channel')}
               >
                 {t('memoryShared')}
               </button>
             </div>
           </div>
+          {scope === 'channel' && (
+            <label>
+              <span>{t('memoryChannel')}</span>
+              <LocalSelect
+                id="memory-channel"
+                ariaLabel={t('memoryChannel')}
+                value={channelId}
+                options={channelOptions}
+                onChange={setChannelId}
+                placeholder={t('tasksSelectChannel')}
+              />
+            </label>
+          )}
           <p className="scope-note">
             {scope === 'agent'
               ? t('memoryPrivateDescription', { agent: selectedAgent?.name ?? '' })

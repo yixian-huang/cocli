@@ -22,7 +22,6 @@ import {
 import {
   localApi,
   type Agent,
-  type Channel,
   type RuntimeActivity,
   type RuntimeSession,
   type RuntimeTrajectoryEntry,
@@ -34,7 +33,6 @@ import './LocalHistoryWorkspace.css'
 
 interface LocalHistoryWorkspaceProps {
   agents: Agent[]
-  channels: Channel[]
   onOpenMessage: (channelId: string, messageId: string) => void
   t: (key: LocalCopyKey, values?: Record<string, string | number>) => string
 }
@@ -139,7 +137,6 @@ function HistoryEntry({
 
 export function LocalHistoryWorkspace({
   agents,
-  channels,
   onOpenMessage,
   t,
 }: LocalHistoryWorkspaceProps) {
@@ -164,9 +161,8 @@ export function LocalHistoryWorkspace({
     () => agents.map((agent) => ({
       value: agent.id,
       label: agent.name,
-      meta: channels.find((channel) => channel.id === agent.channel_id)?.name,
     })),
-    [agents, channels],
+    [agents],
   )
   const selectedSession = useMemo(
     () => sessions.find((session) => session.sessionId === selectedSessionId) ?? null,

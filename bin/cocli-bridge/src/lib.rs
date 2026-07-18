@@ -327,139 +327,149 @@ impl ToolBackend for HttpToolBackend {
             "clear_working_state" => {
                 self.request_json("POST", &self.agent_path("/working/clear"), Some(&json!({})))
             }
-            "mcp_wiki_search" => {
+            "channel_list" => {
                 let mut query = url::form_urlencoded::Serializer::new(String::new());
-                query.append_pair("q", &required_string(&arguments, "query")?);
-                query.append_pair(
-                    "limit",
-                    &optional_i64(&arguments, "limit")
-                        .unwrap_or(50)
-                        .clamp(1, 200)
-                        .to_string(),
-                );
-                let response = self.request_json(
+                append_optional_query(&arguments, &mut query, "scope", &[]);
+                append_optional_query(&arguments, &mut query, "q", &["query"]);
+                let query = query.finish();
+                let suffix = if query.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{query}")
+                };
+                self.request_json(
                     "GET",
-                    &format!("{}?{}", self.agent_path("/wiki/pages"), query.finish()),
+                    &format!("{}{}", self.agent_path("/channels"), suffix),
                     None,
-                )?;
-                let results = response
-                    .get("pages")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .map(|page| {
-                        json!({
-                            "path": page.get("path").cloned().unwrap_or(Value::Null),
-                            "title": page.get("title").cloned().unwrap_or(Value::Null),
-                            "snippet": ""
-                        })
-                    })
-                    .collect::<Vec<_>>();
-                Ok(json!({"results": results}))
+                )
             }
-            "mcp_wiki_list" => {
-                let mut query = url::form_urlencoded::Serializer::new(String::new());
-                query.append_pair("limit", "200");
-                let mut response = self.request_json(
-                    "GET",
-                    &format!("{}?{}", self.agent_path("/wiki/pages"), query.finish()),
-                    None,
-                )?;
-                let tags = optional_string_array(&arguments, "tags")?;
-                if !tags.is_empty() {
-                    if let Some(pages) = response.get_mut("pages").and_then(Value::as_array_mut) {
-                        pages.retain(|page| {
-                            page.get("tags")
-                                .and_then(Value::as_array)
-                                .is_some_and(|page_tags| {
-                                    tags.iter().all(|tag| {
-                                        page_tags
-                                            .iter()
-                                            .any(|page_tag| page_tag.as_str() == Some(tag))
-                                    })
-                                })
-                        });
-                    }
-                }
-                if let Some(limit) = optional_i64(&arguments, "limit") {
-                    if let Some(pages) = response.get_mut("pages").and_then(Value::as_array_mut) {
-                        pages.truncate(limit.clamp(1, 200) as usize);
-                    }
-                }
-                Ok(response)
-            }
-            "mcp_wiki_read" => {
-                let path = required_string(&arguments, "path")?;
-                let encoded = encode_path_segment(&path);
-                let mut page = self.request_json(
-                    "GET",
-                    &self.agent_path(&format!("/wiki/pages/{encoded}")),
-                    None,
-                )?;
-                let section = optional_string(&arguments, "section");
-                let range = optional_string(&arguments, "range");
-                if section.is_some() && range.is_some() {
-                    return Err(BridgeError::Config(
-                        "section and range are mutually exclusive".to_owned(),
-                    ));
-                }
-                if let Some(content) = page
-                    .get("content")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned)
-                {
-                    let total_lines = if content.is_empty() {
-                        0
-                    } else {
-                        content.bytes().filter(|byte| *byte == b'\n').count() + 1
-                    };
-                    let sliced = if let Some(section) = section {
-                        let sliced = slice_markdown_section(&content, &section)?;
-                        page["section"] = Value::String(section);
-                        sliced
-                    } else if let Some(range) = range {
-                        let sliced = slice_markdown_range(&content, &range)?;
-                        page["returnedLines"] = Value::String(range);
-                        sliced
-                    } else {
-                        content
-                    };
-                    page["totalLines"] = Value::Number((total_lines as u64).into());
-                    page["content_md"] = Value::String(sliced);
-                    page.as_object_mut()
-                        .expect("wiki page response should be an object")
-                        .remove("content");
-                }
-                rename_json_field(&mut page, "updatedAt", "updated_at");
-                Ok(page)
-            }
-            "mcp_wiki_write" => {
-                let path = required_string(&arguments, "path")?;
-                let encoded = encode_path_segment(&path);
+            "channel_create" => {
                 let mut body = serde_json::Map::new();
                 body.insert(
-                    "title".to_owned(),
-                    Value::String(required_string(&arguments, "title")?),
+                    "name".to_owned(),
+                    Value::String(required_string(&arguments, "name")?),
                 );
+                copy_optional(&arguments, &mut body, "description", &[]);
+                copy_optional(&arguments, &mut body, "goal", &[]);
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "idempotency_key",
+                    &["idempotencyKey"],
+                );
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "source_channel_id",
+                    &["sourceChannelId"],
+                );
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "source_session_id",
+                    &["sourceSessionId"],
+                );
+                self.request_json(
+                    "POST",
+                    &self.agent_path("/channels"),
+                    Some(&Value::Object(body)),
+                )
+            }
+            "agent_list" => {
+                let mut query = url::form_urlencoded::Serializer::new(String::new());
+                append_optional_query(&arguments, &mut query, "channel", &["channel_id"]);
+                append_optional_query(&arguments, &mut query, "status", &[]);
+                append_optional_query(&arguments, &mut query, "q", &["query"]);
+                let query = query.finish();
+                let suffix = if query.is_empty() {
+                    String::new()
+                } else {
+                    format!("?{query}")
+                };
+                self.request_json(
+                    "GET",
+                    &format!("{}{}", self.agent_path("/agents"), suffix),
+                    None,
+                )
+            }
+            "agent_create" => {
+                let mut body = serde_json::Map::new();
                 body.insert(
-                    "content_md".to_owned(),
+                    "name".to_owned(),
+                    Value::String(required_string(&arguments, "name")?),
+                );
+                copy_optional(&arguments, &mut body, "description", &[]);
+                copy_optional(&arguments, &mut body, "instructions", &[]);
+                copy_optional(&arguments, &mut body, "runtime", &[]);
+                copy_optional(&arguments, &mut body, "model", &[]);
+                copy_optional(&arguments, &mut body, "channel", &["channel_id"]);
+                copy_optional(&arguments, &mut body, "role", &[]);
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "idempotency_key",
+                    &["idempotencyKey"],
+                );
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "source_channel_id",
+                    &["sourceChannelId"],
+                );
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "source_session_id",
+                    &["sourceSessionId"],
+                );
+                self.request_json(
+                    "POST",
+                    &self.agent_path("/agents"),
+                    Some(&Value::Object(body)),
+                )
+            }
+            "channel_join_agent" => {
+                let mut body = serde_json::Map::new();
+                body.insert(
+                    "channel".to_owned(),
                     Value::String(required_string_alias(
                         &arguments,
-                        "content_md",
-                        &["content"],
+                        "channel",
+                        &["channel_id", "target"],
                     )?),
                 );
-                copy_optional(&arguments, &mut body, "tags", &[]);
-                copy_optional(&arguments, &mut body, "reason", &[]);
-                copy_optional(&arguments, &mut body, "ifVersion", &["if_version"]);
-                let mut response = self.request_json(
-                    "PUT",
-                    &self.agent_path(&format!("/wiki/pages/{encoded}")),
+                body.insert(
+                    "agent_id".to_owned(),
+                    Value::String(required_string_alias(
+                        &arguments,
+                        "agent_id",
+                        &["agent", "member_agent_id"],
+                    )?),
+                );
+                copy_optional(&arguments, &mut body, "role", &[]);
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "idempotency_key",
+                    &["idempotencyKey"],
+                );
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "source_channel_id",
+                    &["sourceChannelId"],
+                );
+                copy_optional(
+                    &arguments,
+                    &mut body,
+                    "source_session_id",
+                    &["sourceSessionId"],
+                );
+                self.request_json(
+                    "POST",
+                    &self.agent_path("/channels/join-agent"),
                     Some(&Value::Object(body)),
-                )?;
-                rename_json_field(&mut response, "content", "content_md");
-                rename_json_field(&mut response, "updatedAt", "updated_at");
-                Ok(response)
+                )
             }
             "memory_index_list" => {
                 let query = memory_scope_query(&arguments, "scope", "channel_id")?;
@@ -666,16 +676,17 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
             "task.update_status" => Ok((args[0].clone(), "update_task_status", payload)),
             "task.add_dependency" => Ok((args[0].clone(), "add_task_dependency", payload)),
             "task.get_dependencies" => Ok((args[0].clone(), "get_task_dependencies", payload)),
-            "wiki.search" => Ok((args[0].clone(), "mcp_wiki_search", payload)),
-            "wiki.read" => Ok((args[0].clone(), "mcp_wiki_read", payload)),
-            "wiki.write" => Ok((args[0].clone(), "mcp_wiki_write", payload)),
-            "wiki.list" => Ok((args[0].clone(), "mcp_wiki_list", payload)),
             "memory.list" | "memory.index_list" => {
                 Ok((args[0].clone(), "memory_index_list", payload))
             }
             "memory.read" => Ok((args[0].clone(), "memory_read", payload)),
             "memory.write" => Ok((args[0].clone(), "memory_write", payload)),
             "memory.move" => Ok((args[0].clone(), "memory_move", payload)),
+            "channel.list" => Ok((args[0].clone(), "channel_list", payload)),
+            "channel.create" => Ok((args[0].clone(), "channel_create", payload)),
+            "channel.join_agent" => Ok((args[0].clone(), "channel_join_agent", payload)),
+            "agent.list" => Ok((args[0].clone(), "agent_list", payload)),
+            "agent.create" => Ok((args[0].clone(), "agent_create", payload)),
             "self.set_working_state" => Ok((args[0].clone(), "set_working_state", payload)),
             "self.get_working_state" => Ok((args[0].clone(), "get_working_state", payload)),
             "self.clear_working_state" => Ok((args[0].clone(), "clear_working_state", payload)),
@@ -776,47 +787,6 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
                 "task_number": required_numeric_flag(rest, "--task-number")?
             }),
         )),
-        ("wiki", "search") => Ok((
-            "wiki.search".to_owned(),
-            "mcp_wiki_search",
-            json!({
-                "query": flag_value(rest, "--query")
-                    .or_else(|| flag_value(rest, "--q"))
-                    .ok_or_else(|| BridgeError::Config("--query is required".to_owned()))?,
-                "limit": numeric_flag(rest, "--limit").unwrap_or(50)
-            }),
-        )),
-        ("wiki", "read") => Ok((
-            "wiki.read".to_owned(),
-            "mcp_wiki_read",
-            json!({
-                "path": required_flag(rest, "--path")?,
-                "section": flag_value(rest, "--section"),
-                "range": flag_value(rest, "--range")
-            }),
-        )),
-        ("wiki", "write") => Ok((
-            "wiki.write".to_owned(),
-            "mcp_wiki_write",
-            json!({
-                "path": required_flag(rest, "--path")?,
-                "title": required_flag(rest, "--title")?,
-                "content_md": flag_value(rest, "--content-md")
-                    .or_else(|| flag_value(rest, "--content"))
-                    .ok_or_else(|| BridgeError::Config("--content is required".to_owned()))?,
-                "tags": string_list_flag(rest, "--tags"),
-                "reason": flag_value(rest, "--reason"),
-                "ifVersion": numeric_flag(rest, "--if-version")
-            }),
-        )),
-        ("wiki", "list") => Ok((
-            "wiki.list".to_owned(),
-            "mcp_wiki_list",
-            json!({
-                "tags": string_list_flag(rest, "--tags"),
-                "limit": numeric_flag(rest, "--limit").unwrap_or(50)
-            }),
-        )),
         ("memory", "list") | ("memory", "index-list") => Ok((
             "memory.list".to_owned(),
             "memory_index_list",
@@ -860,6 +830,63 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
                 "to_channel_id": flag_value(rest, "--to-channel-id"),
                 "type": required_flag(rest, "--type")?,
                 "topic": required_flag(rest, "--topic")?
+            }),
+        )),
+        ("channel", "list") => Ok((
+            "channel.list".to_owned(),
+            "channel_list",
+            json!({
+                "scope": flag_value(rest, "--scope"),
+                "q": flag_value(rest, "--query").or_else(|| flag_value(rest, "--q"))
+            }),
+        )),
+        ("channel", "create") => Ok((
+            "channel.create".to_owned(),
+            "channel_create",
+            json!({
+                "name": required_flag(rest, "--name")?,
+                "description": flag_value(rest, "--description"),
+                "goal": flag_value(rest, "--goal"),
+                "idempotency_key": flag_value(rest, "--idempotency-key"),
+                "source_channel_id": flag_value(rest, "--source-channel-id"),
+                "source_session_id": flag_value(rest, "--source-session-id")
+            }),
+        )),
+        ("channel", "join-agent") => Ok((
+            "channel.join_agent".to_owned(),
+            "channel_join_agent",
+            json!({
+                "channel": required_flag(rest, "--channel")?,
+                "agent_id": required_flag(rest, "--agent-id")?,
+                "role": flag_value(rest, "--role"),
+                "idempotency_key": flag_value(rest, "--idempotency-key"),
+                "source_channel_id": flag_value(rest, "--source-channel-id"),
+                "source_session_id": flag_value(rest, "--source-session-id")
+            }),
+        )),
+        ("agent", "list") => Ok((
+            "agent.list".to_owned(),
+            "agent_list",
+            json!({
+                "channel": flag_value(rest, "--channel").or_else(|| flag_value(rest, "--channel-id")),
+                "status": flag_value(rest, "--status"),
+                "q": flag_value(rest, "--query").or_else(|| flag_value(rest, "--q"))
+            }),
+        )),
+        ("agent", "create") => Ok((
+            "agent.create".to_owned(),
+            "agent_create",
+            json!({
+                "name": required_flag(rest, "--name")?,
+                "description": flag_value(rest, "--description"),
+                "instructions": flag_value(rest, "--instructions"),
+                "runtime": flag_value(rest, "--runtime"),
+                "model": flag_value(rest, "--model"),
+                "channel": flag_value(rest, "--channel").or_else(|| flag_value(rest, "--channel-id")),
+                "role": flag_value(rest, "--role"),
+                "idempotency_key": flag_value(rest, "--idempotency-key"),
+                "source_channel_id": flag_value(rest, "--source-channel-id"),
+                "source_session_id": flag_value(rest, "--source-session-id")
             }),
         )),
         ("self", "set-work") => Ok((
@@ -1020,58 +1047,6 @@ fn tool_definitions() -> Vec<Value> {
             }),
         ),
         tool(
-            "mcp_wiki_search",
-            "Search local wiki pages by query.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 200}
-                },
-                "required": ["query"]
-            }),
-        ),
-        tool(
-            "mcp_wiki_read",
-            "Read a local wiki page, optionally slicing one heading section or line range.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "section": {"type": "string"},
-                    "range": {"type": "string", "description": "L10-L50 or L10-"}
-                },
-                "required": ["path"]
-            }),
-        ),
-        tool(
-            "mcp_wiki_write",
-            "Create or update a local wiki page with optional optimistic concurrency.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string"},
-                    "title": {"type": "string"},
-                    "content_md": {"type": "string"},
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "reason": {"type": "string"},
-                    "ifVersion": {"type": "integer", "minimum": 1}
-                },
-                "required": ["path", "title", "content_md"]
-            }),
-        ),
-        tool(
-            "mcp_wiki_list",
-            "List local wiki pages with optional exact tag filters.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "tags": {"type": "array", "items": {"type": "string"}},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 200}
-                }
-            }),
-        ),
-        tool(
             "memory_index_list",
             "Read the L1 agent-private or L2 channel-shared memory index.",
             json!({
@@ -1127,6 +1102,81 @@ fn tool_definitions() -> Vec<Value> {
                     "topic": {"type": "string"}
                 },
                 "required": ["from_scope", "to_scope", "type", "topic"]
+            }),
+        ),
+        tool(
+            "channel_list",
+            "List channels visible to this persistent agent.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "scope": {"type": "string", "enum": ["member", "all"], "description": "Defaults to channels where this agent is a member."},
+                    "q": {"type": "string", "description": "Optional name/description search."}
+                }
+            }),
+        ),
+        tool(
+            "channel_create",
+            "Create a persistent channel for organizing work.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "source_channel_id": {"type": "string"},
+                    "source_session_id": {"type": "string"}
+                },
+                "required": ["name"]
+            }),
+        ),
+        tool(
+            "agent_list",
+            "List persistent agents visible to this agent.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string", "description": "Optional channel UUID or #name filter."},
+                    "status": {"type": "string"},
+                    "q": {"type": "string", "description": "Optional name/description search."}
+                }
+            }),
+        ),
+        tool(
+            "agent_create",
+            "Create a persistent agent that can participate in channels.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "instructions": {"type": "string"},
+                    "runtime": {"type": "string"},
+                    "model": {"type": "string"},
+                    "channel": {"type": "string", "description": "Optional channel UUID or #name to join after creation."},
+                    "role": {"type": "string", "description": "Optional role within the joined channel."},
+                    "idempotency_key": {"type": "string"},
+                    "source_channel_id": {"type": "string"},
+                    "source_session_id": {"type": "string"}
+                },
+                "required": ["name"]
+            }),
+        ),
+        tool(
+            "channel_join_agent",
+            "Add an existing persistent agent to a channel.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "channel": {"type": "string", "description": "Channel UUID or #name."},
+                    "agent_id": {"type": "string"},
+                    "role": {"type": "string"},
+                    "idempotency_key": {"type": "string"},
+                    "source_channel_id": {"type": "string"},
+                    "source_session_id": {"type": "string"}
+                },
+                "required": ["channel", "agent_id"]
             }),
         ),
         tool(
@@ -1252,27 +1302,6 @@ fn required_string_alias(
         .ok_or_else(|| BridgeError::Config(format!("{canonical} is required")))
 }
 
-fn optional_string_array(
-    arguments: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<Vec<String>, BridgeError> {
-    let Some(value) = arguments.get(key) else {
-        return Ok(Vec::new());
-    };
-    let values = value
-        .as_array()
-        .ok_or_else(|| BridgeError::Config(format!("{key} must be an array")))?;
-    values
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| BridgeError::Config(format!("{key} must contain strings")))
-        })
-        .collect()
-}
-
 fn memory_scope_query(
     arguments: &serde_json::Map<String, Value>,
     scope_key: &str,
@@ -1309,98 +1338,6 @@ fn memory_scope_serializer(
         query.append_pair("channel_id", &channel_id);
     }
     Ok(query)
-}
-
-fn encode_path_segment(path: &str) -> String {
-    url::form_urlencoded::byte_serialize(path.as_bytes()).collect()
-}
-
-fn rename_json_field(value: &mut Value, from: &str, to: &str) {
-    let Some(object) = value.as_object_mut() else {
-        return;
-    };
-    if let Some(field) = object.remove(from) {
-        object.insert(to.to_owned(), field);
-    }
-}
-
-fn slice_markdown_range(content: &str, range: &str) -> Result<String, BridgeError> {
-    let range = range.trim();
-    let Some(range) = range.strip_prefix('L') else {
-        return Err(BridgeError::Config(
-            "range must use L{start}-L{end} or L{start}-".to_owned(),
-        ));
-    };
-    let Some((start, end)) = range.split_once('-') else {
-        return Err(BridgeError::Config(
-            "range must use L{start}-L{end} or L{start}-".to_owned(),
-        ));
-    };
-    let start = start
-        .parse::<usize>()
-        .ok()
-        .filter(|start| *start > 0)
-        .ok_or_else(|| BridgeError::Config("range start must be positive".to_owned()))?;
-    let end = if end.is_empty() {
-        None
-    } else {
-        Some(
-            end.strip_prefix('L')
-                .unwrap_or(end)
-                .parse::<usize>()
-                .ok()
-                .filter(|end| *end >= start)
-                .ok_or_else(|| {
-                    BridgeError::Config("range end must be at or after start".to_owned())
-                })?,
-        )
-    };
-    let lines = content.lines().collect::<Vec<_>>();
-    if start > lines.len() {
-        return Err(BridgeError::Config(format!(
-            "range starts after end of page ({} lines)",
-            lines.len()
-        )));
-    }
-    let end = end.unwrap_or(lines.len()).min(lines.len());
-    Ok(lines[start - 1..end].join("\n"))
-}
-
-fn slice_markdown_section(content: &str, section: &str) -> Result<String, BridgeError> {
-    let needle = section.trim().to_ascii_lowercase();
-    if needle.is_empty() {
-        return Err(BridgeError::Config("section must not be empty".to_owned()));
-    }
-    let lines = content.lines().collect::<Vec<_>>();
-    let mut match_index = None;
-    let mut match_level = 0;
-    for (index, line) in lines.iter().enumerate() {
-        let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
-        if !(2..=6).contains(&hashes) || line.as_bytes().get(hashes) != Some(&b' ') {
-            continue;
-        }
-        let heading = line[hashes + 1..].trim().to_ascii_lowercase();
-        if heading.contains(&needle) {
-            match_index = Some(index);
-            match_level = hashes;
-            break;
-        }
-    }
-    let start = match_index
-        .ok_or_else(|| BridgeError::Config(format!("wiki section not found: {section}")))?;
-    let mut end = lines.len();
-    for (index, line) in lines.iter().enumerate().skip(start + 1) {
-        let hashes = line.bytes().take_while(|byte| *byte == b'#').count();
-        if hashes > 0
-            && hashes <= match_level
-            && hashes <= 6
-            && line.as_bytes().get(hashes) == Some(&b' ')
-        {
-            end = index;
-            break;
-        }
-    }
-    Ok(lines[start..end].join("\n"))
 }
 
 fn required_array(
@@ -1450,6 +1387,23 @@ fn copy_optional(
     {
         target.insert(canonical.to_owned(), value.clone());
     }
+}
+
+fn append_optional_query(
+    arguments: &serde_json::Map<String, Value>,
+    query: &mut url::form_urlencoded::Serializer<'_, String>,
+    canonical: &str,
+    aliases: &[&str],
+) {
+    let Some(value) = arguments
+        .get(canonical)
+        .or_else(|| aliases.iter().find_map(|alias| arguments.get(*alias)))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    else {
+        return;
+    };
+    query.append_pair(canonical, value);
 }
 
 fn flag_value(args: &[String], name: &str) -> Option<String> {
@@ -1609,12 +1563,24 @@ mod tests {
             .as_array()
             .expect("tools")
             .iter()
-            .any(|tool| tool["name"] == "mcp_wiki_write"));
+            .any(|tool| tool["name"] == "memory_write"));
+        assert!(!list["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"]
+                .as_str()
+                .is_some_and(|name| name.contains("wiki"))));
         assert!(list["result"]["tools"]
             .as_array()
             .expect("tools")
             .iter()
-            .any(|tool| tool["name"] == "memory_write"));
+            .any(|tool| tool["name"] == "channel_create"));
+        assert!(list["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "agent_create"));
 
         let call = handle_mcp_request(
             &backend,
@@ -1677,22 +1643,6 @@ mod tests {
         assert_eq!(calls[2].1["task_numbers"], json!([2, 3]));
         drop(calls);
 
-        let wiki = run_action(
-            &backend,
-            &[
-                "wiki".to_owned(),
-                "write".to_owned(),
-                "--path".to_owned(),
-                "reference/api".to_owned(),
-                "--title".to_owned(),
-                "API".to_owned(),
-                "--content".to_owned(),
-                "# API".to_owned(),
-                "--if-version".to_owned(),
-                "2".to_owned(),
-            ],
-        );
-        assert_eq!(wiki["ok"], true);
         let memory = run_action(
             &backend,
             &[
@@ -1710,53 +1660,79 @@ mod tests {
         );
         assert_eq!(memory["ok"], true);
         let calls = backend.calls.lock().expect("calls");
-        assert_eq!(calls[3].0, "mcp_wiki_write");
-        assert_eq!(calls[3].1["ifVersion"], 2);
-        assert_eq!(calls[4].0, "memory_write");
-        assert_eq!(calls[4].1["scope"], "agent");
+        assert_eq!(calls[3].0, "memory_write");
+        assert_eq!(calls[3].1["scope"], "agent");
     }
 
     #[test]
-    fn wiki_slicing_and_memory_http_routes_follow_bridge_contract() {
-        assert_eq!(
-            slice_markdown_range("one\ntwo\nthree", "L2-L3").expect("range"),
-            "two\nthree"
-        );
-        assert_eq!(
-            slice_markdown_section("# Root\n\n## First\nA\n### Child\nB\n## Second\nC", "first")
-                .expect("section"),
-            "## First\nA\n### Child\nB"
-        );
+    fn action_parser_supports_agent_and_channel_self_organization() {
+        let backend = FakeBackend::default();
 
-        let (address, server) = serve_one_json(json!({
-            "path": "reference/api",
-            "title": "API",
-            "content": "# Root\n\n## Contract\nLine\n## Other\nSkip",
-            "tags": [],
-            "version": 1,
-            "createdAt": "2026-07-16T00:00:00Z",
-            "updatedAt": "2026-07-16T00:00:00Z"
-        }));
-        let backend = HttpToolBackend::new(BridgeConfig {
-            agent_id: "agent-knowledge".to_owned(),
-            server_url: format!("http://{address}"),
-            auth_token: "test-token".to_owned(),
-        })
-        .expect("bridge backend");
-        let page = backend
-            .call_tool(
-                "mcp_wiki_read",
-                &json!({"path": "reference/api", "section": "contract"}),
-            )
-            .expect("wiki read");
-        assert_eq!(page["content_md"], "## Contract\nLine");
-        assert_eq!(page["section"], "contract");
-        assert_eq!(page["totalLines"], 6);
-        let request = server.join().expect("mock server");
-        assert!(request.starts_with(
-            "GET /api/bridge/agents/agent-knowledge/wiki/pages/reference%2Fapi HTTP/1.1\r\n"
-        ));
+        let channel = run_action(
+            &backend,
+            &[
+                "channel".to_owned(),
+                "create".to_owned(),
+                "--name".to_owned(),
+                "research".to_owned(),
+                "--description".to_owned(),
+                "Long-running research coordination".to_owned(),
+                "--idempotency-key".to_owned(),
+                "idem-channel-1".to_owned(),
+                "--source-session-id".to_owned(),
+                "session-1".to_owned(),
+            ],
+        );
+        assert_eq!(channel["ok"], true);
 
+        let agent = run_action(
+            &backend,
+            &[
+                "agent".to_owned(),
+                "create".to_owned(),
+                "--name".to_owned(),
+                "reviewer".to_owned(),
+                "--instructions".to_owned(),
+                "Review research notes".to_owned(),
+                "--channel".to_owned(),
+                "#research".to_owned(),
+                "--role".to_owned(),
+                "reviewer".to_owned(),
+                "--idempotency-key".to_owned(),
+                "idem-agent-1".to_owned(),
+            ],
+        );
+        assert_eq!(agent["ok"], true);
+
+        let join = run_action(
+            &backend,
+            &[
+                "channel".to_owned(),
+                "join-agent".to_owned(),
+                "--channel".to_owned(),
+                "#research".to_owned(),
+                "--agent-id".to_owned(),
+                "agent-reviewer".to_owned(),
+                "--role".to_owned(),
+                "reviewer".to_owned(),
+            ],
+        );
+        assert_eq!(join["ok"], true);
+
+        let calls = backend.calls.lock().expect("calls");
+        assert_eq!(calls[0].0, "channel_create");
+        assert_eq!(calls[0].1["name"], "research");
+        assert_eq!(calls[0].1["idempotency_key"], "idem-channel-1");
+        assert_eq!(calls[0].1["source_session_id"], "session-1");
+        assert_eq!(calls[1].0, "agent_create");
+        assert_eq!(calls[1].1["channel"], "#research");
+        assert_eq!(calls[1].1["role"], "reviewer");
+        assert_eq!(calls[2].0, "channel_join_agent");
+        assert_eq!(calls[2].1["agent_id"], "agent-reviewer");
+    }
+
+    #[test]
+    fn memory_http_routes_follow_bridge_contract() {
         let (address, server) = serve_one_json(json!({"version": 1}));
         let backend = HttpToolBackend::new(BridgeConfig {
             agent_id: "agent-knowledge".to_owned(),
@@ -1782,6 +1758,58 @@ mod tests {
             .starts_with("POST /api/bridge/agents/agent-knowledge/memory/topic HTTP/1.1\r\n"));
         assert!(request.ends_with(
             r##"{"body":"Ship it","channel_id":"channel-1","description":"Apollo plan","scope":"channel","topic":"apollo","type":"project"}"##
+        ));
+    }
+
+    #[test]
+    fn self_organization_http_routes_follow_bridge_contract() {
+        let (address, server) = serve_one_json(json!({"id": "channel-1"}));
+        let backend = HttpToolBackend::new(BridgeConfig {
+            agent_id: "agent-founder".to_owned(),
+            server_url: format!("http://{address}"),
+            auth_token: "test-token".to_owned(),
+        })
+        .expect("bridge backend");
+        backend
+            .call_tool(
+                "channel_create",
+                &json!({
+                    "name": "research",
+                    "description": "Long-running research coordination",
+                    "idempotency_key": "idem-channel-1",
+                    "source_session_id": "session-1"
+                }),
+            )
+            .expect("channel create");
+        let request = server.join().expect("mock server");
+        assert!(request.starts_with("POST /api/bridge/agents/agent-founder/channels HTTP/1.1\r\n"));
+        assert!(request.contains("Authorization: Bearer test-token\r\n"));
+        assert!(request.ends_with(
+            r##"{"description":"Long-running research coordination","idempotency_key":"idem-channel-1","name":"research","source_session_id":"session-1"}"##
+        ));
+
+        let (address, server) = serve_one_json(json!({"joined": true}));
+        let backend = HttpToolBackend::new(BridgeConfig {
+            agent_id: "agent-founder".to_owned(),
+            server_url: format!("http://{address}"),
+            auth_token: "test-token".to_owned(),
+        })
+        .expect("bridge backend");
+        backend
+            .call_tool(
+                "channel_join_agent",
+                &json!({
+                    "channel": "#research",
+                    "agent_id": "agent-reviewer",
+                    "role": "reviewer"
+                }),
+            )
+            .expect("channel join agent");
+        let request = server.join().expect("mock server");
+        assert!(request
+            .starts_with("POST /api/bridge/agents/agent-founder/channels/join-agent HTTP/1.1\r\n"));
+        assert!(request.ends_with(
+            r##"{"agent_id":"agent-reviewer","channel":"#research","role":"reviewer"}"##
         ));
     }
 

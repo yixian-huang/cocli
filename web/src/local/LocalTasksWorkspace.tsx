@@ -78,6 +78,7 @@ export function LocalTasksWorkspace({
   t,
 }: LocalTasksWorkspaceProps) {
   const [selectedChannelId, setSelectedChannelId] = useState(activeChannelId ?? '')
+  const [channelAgents, setChannelAgents] = useState<Agent[]>([])
   const [tasks, setTasks] = useState<Task[]>([])
   const [dependencies, setDependencies] = useState<Record<number, number[]>>({})
   const [selectedTaskNumber, setSelectedTaskNumber] = useState<number | null>(null)
@@ -96,10 +97,6 @@ export function LocalTasksWorkspace({
   const channelOptions = useMemo(
     () => channels.map((channel) => ({ value: channel.id, label: `# ${channel.name}` })),
     [channels],
-  )
-  const channelAgents = useMemo(
-    () => agents.filter((agent) => agent.channel_id === selectedChannelId),
-    [agents, selectedChannelId],
   )
   const agentOptions = useMemo(
     () => channelAgents.map((agent) => ({
@@ -157,6 +154,26 @@ export function LocalTasksWorkspace({
         : fallback
     if (next !== selectedChannelId) setSelectedChannelId(next)
   }, [activeChannelId, channels, selectedChannelId])
+
+  useEffect(() => {
+    let cancelled = false
+    if (!selectedChannelId) {
+      setChannelAgents([])
+      return
+    }
+    void localApi.listChannelMembers(selectedChannelId)
+      .then((members) => {
+        if (!cancelled) setChannelAgents(members)
+      })
+      .catch((nextError: unknown) => {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : t('tasksLoadError'))
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [agents, selectedChannelId, t])
 
   useEffect(() => {
     setClaimAgentId((current) => (

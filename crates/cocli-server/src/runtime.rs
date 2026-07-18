@@ -16,11 +16,11 @@ use cocli_agent::state::Idle;
 use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
-    RuntimeBridgeTokenProvider, RuntimeError, RuntimeForkResult, RuntimeHistoryEvent,
-    RuntimeHistorySink, RuntimeInfo, RuntimeKnowledgeProvider, RuntimeKnowledgeSnapshot,
-    RuntimeMetricsSnapshot, RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService,
-    RuntimeSessionStatus, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent,
-    RuntimeSkillFileEntry,
+    LiveEvent, LiveEventSink, RuntimeBridgeTokenProvider, RuntimeError, RuntimeForkResult,
+    RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo, RuntimeKnowledgeProvider,
+    RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot, RuntimeRecoveryProbeResult,
+    RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus, RuntimeSkill,
+    RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -98,6 +98,7 @@ pub struct LocalRuntimeService {
     history_sink: OnceLock<Arc<dyn RuntimeHistorySink>>,
     knowledge_provider: OnceLock<Arc<dyn RuntimeKnowledgeProvider>>,
     bridge_token_provider: OnceLock<Arc<dyn RuntimeBridgeTokenProvider>>,
+    live_event_sink: OnceLock<Arc<dyn LiveEventSink>>,
 }
 
 #[derive(Clone)]
@@ -149,6 +150,7 @@ struct LocalSessionContext {
     history_sink: Option<Arc<dyn RuntimeHistorySink>>,
     knowledge_provider: Option<Arc<dyn RuntimeKnowledgeProvider>>,
     bridge_token_provider: Option<Arc<dyn RuntimeBridgeTokenProvider>>,
+    live_event_sink: Option<Arc<dyn LiveEventSink>>,
 }
 
 #[derive(Default)]
@@ -215,12 +217,14 @@ impl LocalRuntimeService {
             history_sink: OnceLock::new(),
             knowledge_provider: OnceLock::new(),
             bridge_token_provider: OnceLock::new(),
+            live_event_sink: OnceLock::new(),
         }
     }
 
     async fn spawn_session(&self, agent: &Agent) -> Result<LocalSessionHandle, RuntimeError> {
         let knowledge_provider = self.knowledge_provider.get().cloned();
         let bridge_token_provider = self.bridge_token_provider.get().cloned();
+        let live_event_sink = self.live_event_sink.get().cloned();
         let running = start_running_actor(
             &self.registry,
             &self.config,
@@ -270,6 +274,7 @@ impl LocalRuntimeService {
                     history_sink,
                     knowledge_provider,
                     bridge_token_provider,
+                    live_event_sink,
                 },
             )
             .await;
@@ -351,7 +356,7 @@ impl LocalRuntimeService {
         let delivery = AgentDeliverMsg {
             agent_id: agent.id.to_string(),
             message: DeliveryMessage {
-                channel_id: agent.channel_id,
+                channel_id: message.channel_id,
                 sender_name: "user".to_owned(),
                 sender_type: "user".to_owned(),
                 content: message.content.clone(),
@@ -399,6 +404,10 @@ impl RuntimeService for LocalRuntimeService {
 
     fn set_bridge_token_provider(&self, provider: Arc<dyn RuntimeBridgeTokenProvider>) {
         let _ = self.bridge_token_provider.set(provider);
+    }
+
+    fn set_live_event_sink(&self, sink: Arc<dyn LiveEventSink>) {
+        let _ = self.live_event_sink.set(sink);
     }
 
     async fn list(&self) -> Vec<RuntimeInfo> {
@@ -854,8 +863,8 @@ async fn start_running_actor(
     let model = agent.model.as_deref().unwrap_or_default();
     let system_prompt = build_local_system_prompt(&LocalPromptConfig {
         agent_id: &agent.id.to_string(),
-        channel_id: &agent.channel_id.to_string(),
         agent_name: &agent.name,
+        instructions: agent.instructions.as_deref().unwrap_or_default(),
         runtime: &agent.runtime,
         model,
         workspace_dir: &workspace_dir,
@@ -875,8 +884,8 @@ async fn start_running_actor(
         workspace_root: config.workspace_root.clone(),
         server_url: config.server_url.clone(),
         auth_token,
-        channel_id: agent.channel_id,
-        channel_name: "local".to_owned(),
+        channel_id: Uuid::nil(),
+        channel_name: String::new(),
         model: model.to_owned(),
         launch_id: Uuid::new_v4().to_string(),
         resume_session: None,
@@ -1170,7 +1179,7 @@ async fn record_session_start(
         sink,
         RuntimeHistoryEvent::SessionStarted {
             agent_id: agent.id,
-            channel_id: agent.channel_id,
+            channel_id: None,
             session_id: running.state.session_id.clone(),
             launch_id: running.state.launch_id.clone(),
             started_at: chrono::Utc::now(),
@@ -1269,6 +1278,12 @@ async fn record_aborted_turn(
     .await
 }
 
+async fn emit_live_event(sink: &Option<Arc<dyn LiveEventSink>>, event: LiveEvent) {
+    if let Some(sink) = sink {
+        sink.emit(event).await;
+    }
+}
+
 async fn run_local_session(
     mut running: AgentActor<cocli_agent::state::Running>,
     mut commands: mpsc::Receiver<LocalSessionCommand>,
@@ -1285,6 +1300,7 @@ async fn run_local_session(
         history_sink,
         knowledge_provider,
         bridge_token_provider,
+        live_event_sink,
     } = context;
     let turn_timeout = config.turn_timeout;
     let mut active: Option<ActiveReply> = None;
@@ -1354,6 +1370,20 @@ async fn run_local_session(
                                 )],
                             });
                             status.write().await.active_turn = true;
+                            emit_live_event(
+                                &live_event_sink,
+                                LiveEvent::new(
+                                    "turn_started",
+                                    Some(channel_id),
+                                    Some(agent.id),
+                                    source_message_id,
+                                    serde_json::json!({
+                                        "runtime": agent.runtime.clone(),
+                                        "model": agent.model.clone(),
+                                    }),
+                                ),
+                            )
+                            .await;
                         }
                         Err(error) => {
                             let _ = reply.send(Err(RuntimeError::Delivery(error)));
@@ -1486,19 +1516,43 @@ async fn run_local_session(
                 }
                 Some(DriverEvent::ThinkingDelta { text }) => {
                     if let Some(turn) = active.as_mut() {
+                        let live_text = text.clone();
                         turn.entries.push(trajectory_entry(
                             "thinking",
                             serde_json::json!({"text": text}),
                         ));
+                        emit_live_event(
+                            &live_event_sink,
+                            LiveEvent::new(
+                                "thinking_delta",
+                                Some(turn.channel_id),
+                                Some(agent.id),
+                                turn.source_message_id,
+                                serde_json::json!({ "text": live_text }),
+                            ),
+                        )
+                        .await;
                     }
                 }
                 Some(DriverEvent::TextDelta { text }) => {
                     if let Some(turn) = active.as_mut() {
                         turn.text.push_str(&text);
+                        let live_text = text.clone();
                         turn.entries.push(trajectory_entry(
                             "text",
                             serde_json::json!({"text": text}),
                         ));
+                        emit_live_event(
+                            &live_event_sink,
+                            LiveEvent::new(
+                                "text_delta",
+                                Some(turn.channel_id),
+                                Some(agent.id),
+                                turn.source_message_id,
+                                serde_json::json!({ "text": live_text }),
+                            ),
+                        )
+                        .await;
                     }
                 }
                 Some(DriverEvent::Error { message, .. }) => {
@@ -1506,14 +1560,41 @@ async fn run_local_session(
                         turn.last_error = Some(message.clone());
                         turn.entries.push(trajectory_entry(
                             "error",
-                            serde_json::json!({"text": message}),
+                            serde_json::json!({"text": message.clone()}),
                         ));
+                        emit_live_event(
+                            &live_event_sink,
+                            LiveEvent::new(
+                                "turn_error",
+                                Some(turn.channel_id),
+                                Some(agent.id),
+                                turn.source_message_id,
+                                serde_json::json!({ "message": message }),
+                            ),
+                        )
+                        .await;
                     }
                 }
                 Some(DriverEvent::ToolCall { id, name, input }) => {
                     let tool_name = name.clone();
                     if let Some(turn) = active.as_mut() {
+                        let live_id = id.clone();
+                        let live_name = name.clone();
                         turn.entries.push(tool_call_entry(id, name, input));
+                        emit_live_event(
+                            &live_event_sink,
+                            LiveEvent::new(
+                                "tool_started",
+                                Some(turn.channel_id),
+                                Some(agent.id),
+                                turn.source_message_id,
+                                serde_json::json!({
+                                    "id": live_id,
+                                    "name": live_name,
+                                }),
+                            ),
+                        )
+                        .await;
                     }
                     persist_history!(record_history(
                         &history_sink,
@@ -1535,6 +1616,8 @@ async fn run_local_session(
                     error,
                 }) => {
                     if let Some(turn) = active.as_mut() {
+                        let live_id = id.clone();
+                        let live_error = error.clone();
                         turn.entries.push(trajectory_entry(
                             "tool_result",
                             serde_json::json!({
@@ -1543,6 +1626,20 @@ async fn run_local_session(
                                 "error": error,
                             }),
                         ));
+                        emit_live_event(
+                            &live_event_sink,
+                            LiveEvent::new(
+                                "tool_finished",
+                                Some(turn.channel_id),
+                                Some(agent.id),
+                                turn.source_message_id,
+                                serde_json::json!({
+                                    "id": live_id,
+                                    "error": live_error,
+                                }),
+                            ),
+                        )
+                        .await;
                     }
                     persist_history!(record_history(
                         &history_sink,
@@ -1603,6 +1700,20 @@ async fn run_local_session(
                             turn.last_error = Some(format!(
                                 "rate limited: type={limit_type} status={limit_status}"
                             ));
+                            emit_live_event(
+                                &live_event_sink,
+                                LiveEvent::new(
+                                    "rate_limited",
+                                    Some(turn.channel_id),
+                                    Some(agent.id),
+                                    turn.source_message_id,
+                                    serde_json::json!({
+                                        "limitType": limit_type,
+                                        "status": limit_status,
+                                    }),
+                                ),
+                            )
+                            .await;
                         }
                     }
                 }
@@ -1684,6 +1795,22 @@ async fn run_local_session(
                                 created_at: ended_at,
                             },
                         ));
+                        emit_live_event(
+                            &live_event_sink,
+                            LiveEvent::new(
+                                "turn_finished",
+                                Some(turn.channel_id),
+                                Some(agent.id),
+                                turn.source_message_id,
+                                serde_json::json!({
+                                    "status": format!("{turn_status:?}"),
+                                    "inputTokens": input_tokens,
+                                    "outputTokens": output_tokens,
+                                    "costUsd": cost_usd,
+                                }),
+                            ),
+                        )
+                        .await;
                         let mut turn = active.take().expect("active turn remains after persistence");
                         if let Some(reply) = turn.reply.take() {
                             let result = completed_turn_result(
@@ -2179,6 +2306,18 @@ mod tests {
     }
 
     struct FailingTurnHistorySink;
+
+    #[derive(Default)]
+    struct RecordingLiveEventSink {
+        events: tokio::sync::Mutex<Vec<LiveEvent>>,
+    }
+
+    #[async_trait]
+    impl LiveEventSink for RecordingLiveEventSink {
+        async fn emit(&self, event: LiveEvent) {
+            self.events.lock().await.push(event);
+        }
+    }
 
     #[async_trait]
     impl RuntimeHistorySink for FailingHistorySink {
@@ -2916,9 +3055,14 @@ mod tests {
             id: Uuid::new_v4(),
             channel_id: Uuid::new_v4(),
             name: "builder".to_owned(),
+            description: None,
+            instructions: None,
             runtime: runtime.to_owned(),
             model: Some("test-model".to_owned()),
             status: cocli_store::AgentStatus::Running,
+            lifecycle_status: cocli_store::AgentLifecycleStatus::Active,
+            created_by_agent_id: None,
+            created_by_channel_id: None,
             created_at: chrono::Utc::now(),
         }
     }
@@ -2958,13 +3102,20 @@ mod tests {
                 recovery_backoff: [Duration::from_millis(1); 5],
             },
         );
+        let live_events = Arc::new(RecordingLiveEventSink::default());
+        service.set_live_event_sink(live_events.clone());
         let agent = Agent {
             id: Uuid::new_v4(),
             channel_id: Uuid::new_v4(),
             name: "builder".to_owned(),
+            description: None,
+            instructions: None,
             runtime: "fake".to_owned(),
             model: Some("test-model".to_owned()),
             status: cocli_store::AgentStatus::Running,
+            lifecycle_status: cocli_store::AgentLifecycleStatus::Active,
+            created_by_agent_id: None,
+            created_by_channel_id: None,
             created_at: chrono::Utc::now(),
         };
         let message = Message {
@@ -2984,6 +3135,16 @@ mod tests {
 
         assert!(reply.contains("ship it"));
         assert_eq!(service.list().await[0].models, vec!["test-model"]);
+        let event_kinds = live_events
+            .events
+            .lock()
+            .await
+            .iter()
+            .map(|event| event.kind.clone())
+            .collect::<Vec<_>>();
+        assert!(event_kinds.iter().any(|kind| kind == "turn_started"));
+        assert!(event_kinds.iter().any(|kind| kind == "text_delta"));
+        assert!(event_kinds.iter().any(|kind| kind == "turn_finished"));
     }
 
     #[tokio::test]
@@ -3078,7 +3239,8 @@ mod tests {
             .expect("captured system prompt");
         assert!(prompt.contains("Alpha decisions"));
         assert!(prompt.contains("Shared feedback"));
-        assert!(prompt.contains(&format!("memory/channels/{}", channel.id)));
+        assert!(prompt.contains("memory/channels/<channel-id>"));
+        assert!(prompt.contains(&channel.id.to_string()));
 
         store
             .write_memory_topic(
@@ -3487,9 +3649,14 @@ mod tests {
             id: Uuid::new_v4(),
             channel_id: Uuid::new_v4(),
             name: "builder".to_owned(),
+            description: None,
+            instructions: None,
             runtime: "bootstrap-write".to_owned(),
             model: Some("test-model".to_owned()),
             status: cocli_store::AgentStatus::Running,
+            lifecycle_status: cocli_store::AgentLifecycleStatus::Active,
+            created_by_agent_id: None,
+            created_by_channel_id: None,
             created_at: chrono::Utc::now(),
         };
         let message = Message {

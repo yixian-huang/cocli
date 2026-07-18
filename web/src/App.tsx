@@ -19,7 +19,6 @@ import { ThreadFocusView } from '@/components/chat/ThreadFocusView'
 import { HistoryPanel } from '@/components/history/HistoryPanel'
 import { ZoneMembersPanel } from '@/components/sidebar/ZoneMembersPanel'
 import { ZoneTaskBoard } from '@/components/tasks/ZoneTaskBoard'
-import { WikiBrowser } from '@/components/wiki/WikiBrowser'
 import { ProviderKeysTab } from '@/components/sidebar/ProviderKeysTab'
 
 const TaskBoard = lazy(() => import('@/components/tasks/TaskBoard').then(m => ({ default: m.TaskBoard })))
@@ -411,11 +410,6 @@ function AppLayout() {
                 {workspacePanel === 'zone_tasks' && (
                   <SectionErrorBoundary name="zone_tasks">
                     <ZoneTaskBoard />
-                  </SectionErrorBoundary>
-                )}
-                {workspacePanel === 'zone_wiki' && (
-                  <SectionErrorBoundary name="zone_wiki">
-                    <WikiBrowser />
                   </SectionErrorBoundary>
                 )}
                 {workspacePanel === 'zone_credentials' && (

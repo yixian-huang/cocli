@@ -7,11 +7,10 @@ use serde::{Deserialize, Serialize};
 use sqlx_core::query::query;
 use sqlx_core::query_scalar::query_scalar;
 use sqlx_core::row::Row;
-use sqlx_sqlite::{SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
+use sqlx_core::transaction::Transaction;
+use sqlx_sqlite::{Sqlite, SqliteConnectOptions, SqlitePool, SqlitePoolOptions, SqliteRow};
 use uuid::Uuid;
 
-mod wiki;
-pub use wiki::{WikiBacklink, WikiPage, WikiPageSummary, WikiRevision};
 mod memory;
 pub use memory::{
     MemoryDocument, MemoryDocumentEntry, MemoryMoveResult, MemoryNamespace, MemoryScope,
@@ -20,6 +19,11 @@ pub use memory::{
 mod skills;
 pub use skills::{
     AgentSkillInstall, NewSkillLibrary, SkillLibraryEntry, SkillLibraryFile, SkillLibraryFileMeta,
+};
+mod workspace;
+pub use workspace::{
+    SubjectType, SubjectWorkspace, Workspace, WorkspaceBinding, WorkspaceBindingState,
+    WorkspaceProviderKey,
 };
 
 /// Errors returned by the local SQLite store.
@@ -74,29 +78,21 @@ pub enum StoreError {
     /// A task dependency would introduce a cycle.
     #[error("circular task dependency detected")]
     TaskDependencyCycle,
-    /// A wiki write used a stale optimistic-concurrency version.
+    /// A memory write used a stale optimistic-concurrency version.
     #[error(
-        "wiki version conflict at path {path:?}: current={current_version}, ifVersion={attempted_version}"
+        "document version conflict at path {path:?}: current={current_version}, ifVersion={attempted_version}"
     )]
-    WikiVersionConflict {
-        /// Canonical page path.
+    MemoryVersionConflict {
+        /// Canonical document path.
         path: String,
         /// Version currently stored.
         current_version: i64,
         /// Version supplied by the caller.
         attempted_version: i64,
     },
-    /// A requested wiki page does not exist.
-    #[error("wiki page not found: {0}")]
-    WikiPageNotFound(String),
-    /// A requested wiki revision does not exist.
-    #[error("wiki revision {version} not found for page {path}")]
-    WikiRevisionNotFound {
-        /// Canonical page path.
-        path: String,
-        /// Requested historical version.
-        version: i64,
-    },
+    /// A requested memory topic does not exist.
+    #[error("memory topic not found: {0}")]
+    MemoryTopicNotFound(String),
     /// A memory topic type is outside the fixed local taxonomy.
     #[error("invalid memory type: {0}")]
     InvalidMemoryType(String),
@@ -161,6 +157,20 @@ pub enum StoreError {
     /// The same library is already installed for an agent.
     #[error("skill library {library_id} is already installed for agent {agent_id}")]
     SkillAlreadyInstalled { agent_id: Uuid, library_id: Uuid },
+    /// A requested logical workspace does not exist.
+    #[error("workspace not found: {0}")]
+    WorkspaceNotFound(Uuid),
+    /// A workspace attachment target does not exist.
+    #[error("{subject_type} not found: {subject_id}")]
+    SubjectNotFound {
+        /// Persisted subject type string.
+        subject_type: &'static str,
+        /// Missing Agent or Channel id.
+        subject_id: Uuid,
+    },
+    /// The current installation has no binding for a requested workspace.
+    #[error("workspace binding not found: {0}")]
+    WorkspaceBindingNotFound(Uuid),
 }
 
 /// A local conversation channel.
@@ -170,8 +180,67 @@ pub struct Channel {
     pub id: Uuid,
     /// User-visible channel name.
     pub name: String,
+    /// Optional durable description of the collaboration context.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Optional durable outcome the channel is organizing toward.
+    #[serde(default)]
+    pub goal: Option<String>,
+    /// Channel type. Direct channels are system-managed one-to-one agent inboxes.
+    #[serde(default = "default_channel_kind")]
+    pub kind: String,
+    /// Whether this channel is managed by cocli rather than explicitly created by a user.
+    #[serde(default)]
+    pub is_system: bool,
+    /// Agent owning a direct channel, when this is a direct channel.
+    #[serde(default)]
+    pub direct_agent_id: Option<Uuid>,
+    /// Agent that created this channel, when created by an agent.
+    #[serde(default)]
+    pub created_by_agent_id: Option<Uuid>,
+    /// Channel context that created this channel, when applicable.
+    #[serde(default)]
+    pub created_by_channel_id: Option<Uuid>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
+}
+
+fn default_channel_kind() -> String {
+    "standard".to_owned()
+}
+
+/// Persistent lifecycle state for an agent identity.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentLifecycleStatus {
+    /// The agent is available for work.
+    Active,
+    /// The agent is retained but should not take new work.
+    Paused,
+    /// The agent is retained for history and should be hidden by default.
+    Archived,
+}
+
+impl AgentLifecycleStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Archived => "archived",
+        }
+    }
+
+    fn parse(value: String) -> Result<Self, StoreError> {
+        match value.as_str() {
+            "active" => Ok(Self::Active),
+            "paused" => Ok(Self::Paused),
+            "archived" => Ok(Self::Archived),
+            _ => Err(StoreError::InvalidValue {
+                kind: "agent lifecycle status",
+                value,
+            }),
+        }
+    }
 }
 
 /// Whether an agent should receive new channel messages.
@@ -209,16 +278,29 @@ impl AgentStatus {
 pub struct Agent {
     /// Stable agent identifier.
     pub id: Uuid,
-    /// Channel receiving this agent's replies.
+    /// Compatibility default channel. Membership is the source of truth for channel participation.
+    #[serde(skip_serializing)]
     pub channel_id: Uuid,
     /// User-visible agent name.
     pub name: String,
+    /// Optional durable summary of the agent's purpose.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Optional durable operating instructions independent of Runtime sessions.
+    #[serde(default)]
+    pub instructions: Option<String>,
     /// Runtime registry key.
     pub runtime: String,
     /// Optional runtime model identifier.
     pub model: Option<String>,
     /// Current delivery status.
     pub status: AgentStatus,
+    /// Persistent identity lifecycle status.
+    pub lifecycle_status: AgentLifecycleStatus,
+    /// Agent that created this agent, when created by an agent.
+    pub created_by_agent_id: Option<Uuid>,
+    /// Channel context that created this agent, when applicable.
+    pub created_by_channel_id: Option<Uuid>,
     /// Creation timestamp.
     pub created_at: DateTime<Utc>,
 }
@@ -227,9 +309,14 @@ struct AgentRow {
     id: Uuid,
     channel_id: Uuid,
     name: String,
+    description: Option<String>,
+    instructions: Option<String>,
     runtime: String,
     model: Option<String>,
     status: String,
+    lifecycle_status: String,
+    created_by_agent_id: Option<Uuid>,
+    created_by_channel_id: Option<Uuid>,
     created_at: DateTime<Utc>,
 }
 
@@ -241,12 +328,61 @@ impl TryFrom<AgentRow> for Agent {
             id: row.id,
             channel_id: row.channel_id,
             name: row.name,
+            description: row.description,
+            instructions: row.instructions,
             runtime: row.runtime,
             model: row.model,
             status: AgentStatus::parse(row.status)?,
+            lifecycle_status: AgentLifecycleStatus::parse(row.lifecycle_status)?,
+            created_by_agent_id: row.created_by_agent_id,
+            created_by_channel_id: row.created_by_channel_id,
             created_at: row.created_at,
         })
     }
+}
+
+/// Agent membership in a channel.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ChannelAgent {
+    /// Channel identifier.
+    pub channel_id: Uuid,
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// Channel-local role label.
+    pub role: Option<String>,
+    /// Whether new channel messages should be delivered to this agent.
+    pub delivery_policy: String,
+    /// Membership creation timestamp.
+    pub joined_at: DateTime<Utc>,
+    /// Agent that created this membership, when applicable.
+    pub created_by_agent_id: Option<Uuid>,
+    /// Channel context that created this membership, when applicable.
+    pub created_by_channel_id: Option<Uuid>,
+}
+
+/// Audited persistent mutation initiated through an Agent capability.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct AgentOperation {
+    /// Stable operation record identifier.
+    pub id: Uuid,
+    /// Agent whose capability authorized the operation.
+    pub caller_agent_id: Uuid,
+    /// Stable action name such as `channel.create`.
+    pub action: String,
+    /// Caller-supplied key used to make retries repeat-safe.
+    pub idempotency_key: Option<String>,
+    /// Canonical request fingerprint used to reject key reuse with new inputs.
+    pub request_fingerprint: String,
+    /// Type of durable subject produced by the operation.
+    pub result_type: String,
+    /// Identifier of the durable result.
+    pub result_id: String,
+    /// Channel context from which the operation originated, when known.
+    pub source_channel_id: Option<Uuid>,
+    /// Runtime session context from which the operation originated, when known.
+    pub source_session_id: Option<String>,
+    /// Creation timestamp.
+    pub created_at: DateTime<Utc>,
 }
 
 /// The author role of a persisted message.
@@ -670,6 +806,7 @@ impl TryFrom<TaskRow> for Task {
 #[derive(Clone, Debug)]
 pub struct Store {
     pool: SqlitePool,
+    installation_id: String,
 }
 
 impl Store {
@@ -698,6 +835,44 @@ impl Store {
         Self::connect(options, 1).await
     }
 
+    /// Writes a transactionally consistent SQLite snapshot to a new file.
+    ///
+    /// The destination must not already exist. Runtime worktrees are not part
+    /// of this application-state snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when SQLite cannot create the snapshot.
+    pub async fn export_snapshot(&self, destination: &Path) -> Result<(), StoreError> {
+        query("VACUUM INTO ?")
+            .bind(destination.to_string_lossy().as_ref())
+            .execute(&self.pool)
+            .await?;
+        let snapshot = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(SqliteConnectOptions::new().filename(destination))
+            .await?;
+        query("DELETE FROM cocli_installation")
+            .execute(&snapshot)
+            .await?;
+        query("DELETE FROM agent_bridge_tokens")
+            .execute(&snapshot)
+            .await?;
+        snapshot.close().await;
+        Ok(())
+    }
+
+    /// Returns the locally generated identifier used to select machine bindings.
+    #[must_use]
+    pub fn current_installation_id(&self) -> &str {
+        &self.installation_id
+    }
+
+    /// Closes all pooled SQLite connections and waits for checked-out handles.
+    pub async fn close(&self) {
+        self.pool.close().await;
+    }
+
     async fn connect(
         options: SqliteConnectOptions,
         max_connections: u32,
@@ -707,7 +882,18 @@ impl Store {
             .connect_with(options)
             .await?;
         apply_schema(&pool).await?;
-        Ok(Self { pool })
+        let installation_id = ensure_installation_id(&pool).await?;
+        query(
+            "UPDATE workspace_bindings SET installation_id = ? \
+             WHERE installation_id = '__current_installation__'",
+        )
+        .bind(&installation_id)
+        .execute(&pool)
+        .await?;
+        Ok(Self {
+            pool,
+            installation_id,
+        })
     }
 
     /// Creates a channel.
@@ -719,15 +905,53 @@ impl Store {
         let channel = Channel {
             id: Uuid::new_v4(),
             name: name.to_owned(),
+            description: None,
+            goal: None,
+            kind: "standard".to_owned(),
+            is_system: false,
+            direct_agent_id: None,
+            created_by_agent_id: None,
+            created_by_channel_id: None,
             created_at: Utc::now(),
         };
-        query("INSERT INTO channels (id, name, created_at) VALUES (?, ?, ?)")
-            .bind(channel.id)
-            .bind(&channel.name)
-            .bind(channel.created_at)
+        query(
+            "INSERT INTO channels \
+             (id, name, description, goal, kind, is_system, direct_agent_id, created_by_agent_id, \
+              created_by_channel_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(channel.id)
+        .bind(&channel.name)
+        .bind(&channel.description)
+        .bind(&channel.goal)
+        .bind(&channel.kind)
+        .bind(channel.is_system)
+        .bind(channel.direct_agent_id)
+        .bind(channel.created_by_agent_id)
+        .bind(channel.created_by_channel_id)
+        .bind(channel.created_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(channel)
+    }
+
+    /// Updates durable descriptive fields for a channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update or follow-up query fails.
+    pub async fn update_channel_profile(
+        &self,
+        channel_id: Uuid,
+        description: Option<&str>,
+        goal: Option<&str>,
+    ) -> Result<Option<Channel>, StoreError> {
+        query("UPDATE channels SET description = ?, goal = ? WHERE id = ?")
+            .bind(description)
+            .bind(goal)
+            .bind(channel_id)
             .execute(&self.pool)
             .await?;
-        Ok(channel)
+        self.get_channel(channel_id).await
     }
 
     /// Lists channels in creation order.
@@ -736,9 +960,12 @@ impl Store {
     ///
     /// Returns [`StoreError`] when the query fails.
     pub async fn list_channels(&self) -> Result<Vec<Channel>, StoreError> {
-        let rows = query("SELECT id, name, created_at FROM channels ORDER BY created_at, id")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = query(
+            "SELECT id, name, description, goal, kind, is_system, direct_agent_id, created_by_agent_id, \
+             created_by_channel_id, created_at FROM channels ORDER BY created_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(channel_from_row).collect()
     }
 
@@ -748,7 +975,10 @@ impl Store {
     ///
     /// Returns [`StoreError`] when the query fails.
     pub async fn get_channel(&self, channel_id: Uuid) -> Result<Option<Channel>, StoreError> {
-        let row = query("SELECT id, name, created_at FROM channels WHERE id = ?")
+        let row = query(
+            "SELECT id, name, description, goal, kind, is_system, direct_agent_id, created_by_agent_id, \
+             created_by_channel_id, created_at FROM channels WHERE id = ?",
+        )
             .bind(channel_id)
             .fetch_optional(&self.pool)
             .await?;
@@ -762,7 +992,8 @@ impl Store {
     /// Returns [`StoreError`] when the query fails.
     pub async fn get_channel_by_name(&self, name: &str) -> Result<Option<Channel>, StoreError> {
         let row = query(
-            "SELECT id, name, created_at FROM channels \
+            "SELECT id, name, description, goal, kind, is_system, direct_agent_id, created_by_agent_id, \
+             created_by_channel_id, created_at FROM channels \
              WHERE name = ? ORDER BY created_at, id LIMIT 1",
         )
         .bind(name)
@@ -788,26 +1019,255 @@ impl Store {
             id: Uuid::new_v4(),
             channel_id,
             name: name.to_owned(),
+            description: None,
+            instructions: None,
             runtime: runtime.to_owned(),
             model: model.map(str::to_owned),
             status,
+            lifecycle_status: AgentLifecycleStatus::Active,
+            created_by_agent_id: None,
+            created_by_channel_id: Some(channel_id),
             created_at: Utc::now(),
         };
+        let mut transaction = self.pool.begin().await?;
         query(
             "INSERT INTO agents \
-             (id, channel_id, name, runtime, model, status, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+             (id, channel_id, name, description, instructions, runtime, model, status, lifecycle_status, \
+              created_by_agent_id, created_by_channel_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(agent.id)
         .bind(agent.channel_id)
         .bind(&agent.name)
+        .bind(&agent.description)
+        .bind(&agent.instructions)
         .bind(&agent.runtime)
         .bind(&agent.model)
         .bind(agent.status.as_str())
+        .bind(agent.lifecycle_status.as_str())
+        .bind(agent.created_by_agent_id)
+        .bind(agent.created_by_channel_id)
         .bind(agent.created_at)
+        .execute(&mut *transaction)
+        .await?;
+        insert_channel_agent_membership(
+            &mut transaction,
+            MembershipInsert {
+                channel_id,
+                agent_id: agent.id,
+                role: None,
+                delivery_policy: delivery_policy_for_status(status),
+                joined_at: agent.created_at,
+                created_by_agent_id: None,
+                created_by_channel_id: Some(channel_id),
+            },
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(agent)
+    }
+
+    /// Creates an agent identity without requiring an explicit user channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the insert fails.
+    pub async fn create_standalone_agent(
+        &self,
+        name: &str,
+        runtime: &str,
+        model: Option<&str>,
+        status: AgentStatus,
+        created_by_agent_id: Option<Uuid>,
+        created_by_channel_id: Option<Uuid>,
+    ) -> Result<Agent, StoreError> {
+        let direct_channel_id = Uuid::new_v4();
+        let now = Utc::now();
+        let agent = Agent {
+            id: Uuid::new_v4(),
+            channel_id: direct_channel_id,
+            name: name.to_owned(),
+            description: None,
+            instructions: None,
+            runtime: runtime.to_owned(),
+            model: model.map(str::to_owned),
+            status,
+            lifecycle_status: AgentLifecycleStatus::Active,
+            created_by_agent_id,
+            created_by_channel_id,
+            created_at: now,
+        };
+        let mut transaction = self.pool.begin().await?;
+        query(
+            "INSERT INTO channels \
+             (id, name, description, goal, kind, is_system, direct_agent_id, created_by_agent_id, \
+              created_by_channel_id, created_at) VALUES (?, ?, NULL, NULL, 'direct', 1, NULL, ?, ?, ?)",
+        )
+        .bind(direct_channel_id)
+        .bind(format!("direct:{}", agent.id))
+        .bind(created_by_agent_id)
+        .bind(created_by_channel_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await?;
+        query(
+            "INSERT INTO agents \
+             (id, channel_id, name, description, instructions, runtime, model, status, lifecycle_status, \
+              created_by_agent_id, created_by_channel_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(agent.id)
+        .bind(agent.channel_id)
+        .bind(&agent.name)
+        .bind(&agent.description)
+        .bind(&agent.instructions)
+        .bind(&agent.runtime)
+        .bind(&agent.model)
+        .bind(agent.status.as_str())
+        .bind(agent.lifecycle_status.as_str())
+        .bind(agent.created_by_agent_id)
+        .bind(agent.created_by_channel_id)
+        .bind(agent.created_at)
+        .execute(&mut *transaction)
+        .await?;
+        insert_channel_agent_membership(
+            &mut transaction,
+            MembershipInsert {
+                channel_id: direct_channel_id,
+                agent_id: agent.id,
+                role: Some("direct"),
+                delivery_policy: delivery_policy_for_status(status),
+                joined_at: now,
+                created_by_agent_id,
+                created_by_channel_id,
+            },
+        )
+        .await?;
+        query("UPDATE channels SET direct_agent_id = ? WHERE id = ?")
+            .bind(agent.id)
+            .bind(direct_channel_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(agent)
+    }
+
+    /// Updates durable descriptive and operating fields for an agent identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update or follow-up query fails.
+    pub async fn update_agent_profile(
+        &self,
+        agent_id: Uuid,
+        description: Option<&str>,
+        instructions: Option<&str>,
+    ) -> Result<Option<Agent>, StoreError> {
+        query("UPDATE agents SET description = ?, instructions = ? WHERE id = ?")
+            .bind(description)
+            .bind(instructions)
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        self.get_agent(agent_id).await
+    }
+
+    /// Returns a previously recorded idempotent Agent operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn get_agent_operation(
+        &self,
+        caller_agent_id: Uuid,
+        action: &str,
+        idempotency_key: &str,
+    ) -> Result<Option<AgentOperation>, StoreError> {
+        let row = query(
+            "SELECT id, caller_agent_id, action, idempotency_key, request_fingerprint, \
+             result_type, result_id, source_channel_id, source_session_id, created_at \
+             FROM agent_operations \
+             WHERE caller_agent_id = ? AND action = ? AND idempotency_key = ?",
+        )
+        .bind(caller_agent_id)
+        .bind(action)
+        .bind(idempotency_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(agent_operation_from_row).transpose()
+    }
+
+    /// Records one capability-scoped Agent mutation for audit and retry safety.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the insert fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_agent_operation(
+        &self,
+        caller_agent_id: Uuid,
+        action: &str,
+        idempotency_key: Option<&str>,
+        request_fingerprint: &str,
+        result_type: &str,
+        result_id: &str,
+        source_channel_id: Option<Uuid>,
+        source_session_id: Option<&str>,
+    ) -> Result<AgentOperation, StoreError> {
+        let operation = AgentOperation {
+            id: Uuid::new_v4(),
+            caller_agent_id,
+            action: action.to_owned(),
+            idempotency_key: idempotency_key.map(str::to_owned),
+            request_fingerprint: request_fingerprint.to_owned(),
+            result_type: result_type.to_owned(),
+            result_id: result_id.to_owned(),
+            source_channel_id,
+            source_session_id: source_session_id.map(str::to_owned),
+            created_at: Utc::now(),
+        };
+        query(
+            "INSERT INTO agent_operations \
+             (id, caller_agent_id, action, idempotency_key, request_fingerprint, \
+              result_type, result_id, source_channel_id, source_session_id, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(operation.id)
+        .bind(operation.caller_agent_id)
+        .bind(&operation.action)
+        .bind(&operation.idempotency_key)
+        .bind(&operation.request_fingerprint)
+        .bind(&operation.result_type)
+        .bind(&operation.result_id)
+        .bind(operation.source_channel_id)
+        .bind(&operation.source_session_id)
+        .bind(operation.created_at)
         .execute(&self.pool)
         .await?;
-        Ok(agent)
+        Ok(operation)
+    }
+
+    /// Lists audited capability-scoped mutations for an Agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn list_agent_operations(
+        &self,
+        caller_agent_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<AgentOperation>, StoreError> {
+        let rows = query(
+            "SELECT id, caller_agent_id, action, idempotency_key, request_fingerprint, \
+             result_type, result_id, source_channel_id, source_session_id, created_at \
+             FROM agent_operations WHERE caller_agent_id = ? \
+             ORDER BY created_at DESC, id DESC LIMIT ?",
+        )
+        .bind(caller_agent_id)
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(agent_operation_from_row).collect()
     }
 
     /// Lists all configured agents.
@@ -817,7 +1277,8 @@ impl Store {
     /// Returns [`StoreError`] when the query or persisted enum decoding fails.
     pub async fn list_agents(&self) -> Result<Vec<Agent>, StoreError> {
         let rows = query(
-            "SELECT id, channel_id, name, runtime, model, status, created_at \
+            "SELECT id, channel_id, name, description, instructions, runtime, model, status, lifecycle_status, \
+             created_by_agent_id, created_by_channel_id, created_at \
              FROM agents ORDER BY created_at, id",
         )
         .fetch_all(&self.pool)
@@ -835,8 +1296,12 @@ impl Store {
     /// Returns [`StoreError`] when the query or persisted enum decoding fails.
     pub async fn list_channel_agents(&self, channel_id: Uuid) -> Result<Vec<Agent>, StoreError> {
         let rows = query(
-            "SELECT id, channel_id, name, runtime, model, status, created_at \
-             FROM agents WHERE channel_id = ? ORDER BY created_at, id",
+            "SELECT agents.id, agents.channel_id, agents.name, agents.description, \
+             agents.instructions, agents.runtime, agents.model, \
+             agents.status, agents.lifecycle_status, agents.created_by_agent_id, \
+             agents.created_by_channel_id, agents.created_at \
+             FROM agents INNER JOIN channel_agents ON channel_agents.agent_id = agents.id \
+             WHERE channel_agents.channel_id = ? ORDER BY channel_agents.joined_at, agents.id",
         )
         .bind(channel_id)
         .fetch_all(&self.pool)
@@ -845,6 +1310,686 @@ impl Store {
             .map(agent_row_from_sqlite)
             .map(|row| row.and_then(Agent::try_from))
             .collect()
+    }
+
+    /// Joins an agent to a channel through the channel membership table.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the membership cannot be persisted.
+    pub async fn add_agent_to_channel(
+        &self,
+        channel_id: Uuid,
+        agent_id: Uuid,
+        role: Option<&str>,
+        delivery_policy: Option<&str>,
+        created_by_agent_id: Option<Uuid>,
+        created_by_channel_id: Option<Uuid>,
+    ) -> Result<ChannelAgent, StoreError> {
+        let now = Utc::now();
+        let policy = delivery_policy.unwrap_or("subscribed");
+        let mut transaction = self.pool.begin().await?;
+        insert_channel_agent_membership(
+            &mut transaction,
+            MembershipInsert {
+                channel_id,
+                agent_id,
+                role,
+                delivery_policy: policy,
+                joined_at: now,
+                created_by_agent_id,
+                created_by_channel_id,
+            },
+        )
+        .await?;
+        query("UPDATE agents SET channel_id = COALESCE(channel_id, ?) WHERE id = ?")
+            .bind(channel_id)
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        self.get_channel_agent(channel_id, agent_id)
+            .await?
+            .ok_or(StoreError::InvalidValue {
+                kind: "channel agent membership",
+                value: format!("{channel_id}/{agent_id}"),
+            })
+    }
+
+    /// Removes an agent from a channel without deleting the agent identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the delete fails.
+    pub async fn remove_agent_from_channel(
+        &self,
+        channel_id: Uuid,
+        agent_id: Uuid,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        query("DELETE FROM channel_agents WHERE channel_id = ? AND agent_id = ?")
+            .bind(channel_id)
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
+        let fallback: Option<Uuid> = query_scalar(
+            "SELECT channel_id FROM channel_agents WHERE agent_id = ? ORDER BY joined_at, channel_id LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        query("UPDATE agents SET channel_id = ? WHERE id = ? AND channel_id = ?")
+            .bind(fallback)
+            .bind(agent_id)
+            .bind(channel_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Lists memberships for one agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn list_agent_channels(&self, agent_id: Uuid) -> Result<Vec<Channel>, StoreError> {
+        let rows = query(
+            "SELECT channels.id, channels.name, channels.description, channels.goal, \
+             channels.kind, channels.is_system, \
+             channels.direct_agent_id, channels.created_by_agent_id, \
+             channels.created_by_channel_id, channels.created_at \
+             FROM channels INNER JOIN channel_agents ON channel_agents.channel_id = channels.id \
+             WHERE channel_agents.agent_id = ? ORDER BY channel_agents.joined_at, channels.id",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(channel_from_row).collect()
+    }
+
+    /// Returns one channel membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn get_channel_agent(
+        &self,
+        channel_id: Uuid,
+        agent_id: Uuid,
+    ) -> Result<Option<ChannelAgent>, StoreError> {
+        let row = query(
+            "SELECT channel_id, agent_id, role, delivery_policy, joined_at, \
+             created_by_agent_id, created_by_channel_id \
+             FROM channel_agents WHERE channel_id = ? AND agent_id = ?",
+        )
+        .bind(channel_id)
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(channel_agent_from_row).transpose()
+    }
+
+    /// Deletes a channel and its channel-scoped state without deleting agents.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the delete fails.
+    pub async fn delete_channel(&self, channel_id: Uuid) -> Result<(), StoreError> {
+        let affected_agents: Vec<Uuid> =
+            query_scalar("SELECT agent_id FROM channel_agents WHERE channel_id = ?")
+                .bind(channel_id)
+                .fetch_all(&self.pool)
+                .await?;
+        for agent_id in &affected_agents {
+            let fallback: Option<Uuid> = query_scalar(
+                "SELECT channel_id FROM channel_agents \
+                 WHERE agent_id = ? AND channel_id != ? ORDER BY joined_at, channel_id LIMIT 1",
+            )
+            .bind(agent_id)
+            .bind(channel_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            if fallback.is_none() {
+                self.ensure_direct_channel_for_agent(*agent_id).await?;
+            }
+        }
+        let mut transaction = self.pool.begin().await?;
+        query("DELETE FROM subject_workspaces WHERE subject_type = 'channel' AND subject_id = ?")
+            .bind(channel_id)
+            .execute(&mut *transaction)
+            .await?;
+        for agent_id in affected_agents {
+            let fallback: Option<Uuid> = query_scalar(
+                "SELECT channel_id FROM channel_agents \
+                 WHERE agent_id = ? AND channel_id != ? ORDER BY joined_at, channel_id LIMIT 1",
+            )
+            .bind(agent_id)
+            .bind(channel_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(fallback) = fallback {
+                query("UPDATE agents SET channel_id = ? WHERE id = ? AND channel_id = ?")
+                    .bind(fallback)
+                    .bind(agent_id)
+                    .bind(channel_id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+        }
+        query("DELETE FROM channels WHERE id = ?")
+            .bind(channel_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Returns the system-managed direct channel for an agent, creating it on first use.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the channel or membership cannot be persisted.
+    pub async fn ensure_direct_channel_for_agent(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Channel, StoreError> {
+        if let Some(channel) = self.get_direct_channel_for_agent(agent_id).await? {
+            return Ok(channel);
+        }
+        let now = Utc::now();
+        let channel = Channel {
+            id: Uuid::new_v4(),
+            name: format!("direct:{agent_id}"),
+            description: None,
+            goal: None,
+            kind: "direct".to_owned(),
+            is_system: true,
+            direct_agent_id: Some(agent_id),
+            created_by_agent_id: None,
+            created_by_channel_id: None,
+            created_at: now,
+        };
+        let mut transaction = self.pool.begin().await?;
+        query(
+            "INSERT INTO channels \
+             (id, name, description, goal, kind, is_system, direct_agent_id, created_by_agent_id, \
+              created_by_channel_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO NOTHING",
+        )
+        .bind(channel.id)
+        .bind(&channel.name)
+        .bind(&channel.description)
+        .bind(&channel.goal)
+        .bind(&channel.kind)
+        .bind(channel.is_system)
+        .bind(channel.direct_agent_id)
+        .bind(channel.created_by_agent_id)
+        .bind(channel.created_by_channel_id)
+        .bind(channel.created_at)
+        .execute(&mut *transaction)
+        .await?;
+        insert_channel_agent_membership(
+            &mut transaction,
+            MembershipInsert {
+                channel_id: channel.id,
+                agent_id,
+                role: Some("direct"),
+                delivery_policy: "subscribed",
+                joined_at: now,
+                created_by_agent_id: None,
+                created_by_channel_id: Some(channel.id),
+            },
+        )
+        .await?;
+        query("UPDATE agents SET channel_id = COALESCE(channel_id, ?) WHERE id = ?")
+            .bind(channel.id)
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(channel)
+    }
+
+    /// Returns the system-managed direct channel for an agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn get_direct_channel_for_agent(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<Channel>, StoreError> {
+        let row = query(
+            "SELECT id, name, description, goal, kind, is_system, direct_agent_id, created_by_agent_id, \
+             created_by_channel_id, created_at FROM channels \
+             WHERE kind = 'direct' AND direct_agent_id = ? ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(channel_from_row).transpose()
+    }
+
+    /// Creates and attaches a workspace through the legacy owner-scoped contract.
+    ///
+    /// The logical descriptor, subject attachment, and current-installation
+    /// binding are persisted separately. A missing local resource is retained
+    /// with a recoverable binding state rather than rejecting the attachment.
+    pub async fn attach_workspace(
+        &self,
+        owner_type: &str,
+        owner_id: Uuid,
+        kind: &str,
+        locator: Option<&str>,
+        metadata: serde_json::Value,
+    ) -> Result<Workspace, StoreError> {
+        let subject_type = SubjectType::parse(owner_type)?;
+        let provider_key = WorkspaceProviderKey::new(kind)?;
+        let display_name = metadata
+            .get("label")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(kind)
+            .to_owned();
+        let portable_locator = (kind == "external").then_some(locator).flatten();
+        let workspace = self
+            .create_workspace(provider_key, &display_name, portable_locator, metadata)
+            .await?;
+        self.attach_existing_workspace(workspace.id, subject_type, owner_id, None)
+            .await?;
+        if let Some(locator) = locator {
+            self.bind_workspace(workspace.id, locator, None).await?;
+        }
+        self.get_contextual_workspace(workspace.id, subject_type, owner_id)
+            .await?
+            .ok_or(StoreError::WorkspaceNotFound(workspace.id))
+    }
+
+    /// Creates a portable logical workspace descriptor without attaching it.
+    pub async fn create_workspace(
+        &self,
+        provider_key: WorkspaceProviderKey,
+        display_name: &str,
+        portable_locator: Option<&str>,
+        metadata: serde_json::Value,
+    ) -> Result<Workspace, StoreError> {
+        let now = Utc::now();
+        let workspace = Workspace {
+            id: Uuid::new_v4(),
+            provider_key: provider_key.clone(),
+            descriptor_version: 1,
+            display_name: display_name.to_owned(),
+            portable_locator: portable_locator.map(str::to_owned),
+            metadata,
+            created_at: now,
+            updated_at: now,
+            owner_type: None,
+            owner_id: None,
+            kind: None,
+            locator: None,
+        };
+        query(
+            "INSERT INTO workspaces \
+             (id, provider_key, descriptor_version, display_name, portable_locator, \
+              metadata_json, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(workspace.id)
+        .bind(provider_key.as_str())
+        .bind(workspace.descriptor_version)
+        .bind(&workspace.display_name)
+        .bind(&workspace.portable_locator)
+        .bind(serde_json::to_string(&workspace.metadata)?)
+        .bind(workspace.created_at)
+        .bind(workspace.updated_at)
+        .execute(&self.pool)
+        .await?;
+        Ok(workspace)
+    }
+
+    /// Attaches an existing logical workspace to an Agent or Channel.
+    pub async fn attach_existing_workspace(
+        &self,
+        workspace_id: Uuid,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+        role: Option<&str>,
+    ) -> Result<SubjectWorkspace, StoreError> {
+        let attached_at = Utc::now();
+        let row = match subject_type {
+            SubjectType::Agent => {
+                query(
+                    "INSERT INTO subject_workspaces \
+                     (workspace_id, subject_type, subject_id, role, attached_at) \
+                     SELECT w.id, 'agent', a.id, ?, ? FROM workspaces w \
+                     JOIN agents a ON a.id = ? WHERE w.id = ? \
+                     ON CONFLICT(workspace_id, subject_type, subject_id) \
+                     DO UPDATE SET role = excluded.role \
+                     RETURNING workspace_id, subject_type, subject_id, role, attached_at",
+                )
+                .bind(role)
+                .bind(attached_at)
+                .bind(subject_id)
+                .bind(workspace_id)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+            SubjectType::Channel => {
+                query(
+                    "INSERT INTO subject_workspaces \
+                     (workspace_id, subject_type, subject_id, role, attached_at) \
+                     SELECT w.id, 'channel', c.id, ?, ? FROM workspaces w \
+                     JOIN channels c ON c.id = ? WHERE w.id = ? \
+                     ON CONFLICT(workspace_id, subject_type, subject_id) \
+                     DO UPDATE SET role = excluded.role \
+                     RETURNING workspace_id, subject_type, subject_id, role, attached_at",
+                )
+                .bind(role)
+                .bind(attached_at)
+                .bind(subject_id)
+                .bind(workspace_id)
+                .fetch_optional(&self.pool)
+                .await?
+            }
+        };
+        let Some(row) = row else {
+            if self.get_workspace(workspace_id).await?.is_none() {
+                return Err(StoreError::WorkspaceNotFound(workspace_id));
+            }
+            return Err(StoreError::SubjectNotFound {
+                subject_type: subject_type.as_str(),
+                subject_id,
+            });
+        };
+        subject_workspace_from_row(row)
+    }
+
+    /// Removes one subject attachment without deleting the workspace or external data.
+    pub async fn detach_workspace(
+        &self,
+        workspace_id: Uuid,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+    ) -> Result<bool, StoreError> {
+        let result = query(
+            "DELETE FROM subject_workspaces \
+             WHERE workspace_id = ? AND subject_type = ? AND subject_id = ?",
+        )
+        .bind(workspace_id)
+        .bind(subject_type.as_str())
+        .bind(subject_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Lists all Agent/Channel attachments for a logical workspace.
+    pub async fn list_workspace_attachments(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<SubjectWorkspace>, StoreError> {
+        let rows = query(
+            "SELECT workspace_id, subject_type, subject_id, role, attached_at \
+             FROM subject_workspaces WHERE workspace_id = ? \
+             ORDER BY attached_at, subject_type, subject_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(subject_workspace_from_row).collect()
+    }
+
+    /// Lists workspaces for one owner through the legacy compatibility contract.
+    pub async fn list_workspaces(
+        &self,
+        owner_type: &str,
+        owner_id: Uuid,
+    ) -> Result<Vec<Workspace>, StoreError> {
+        let subject_type = SubjectType::parse(owner_type)?;
+        let rows = query(
+            "SELECT w.id, w.provider_key, w.descriptor_version, w.display_name, \
+                    w.portable_locator, w.metadata_json, w.created_at, w.updated_at, \
+                    sw.subject_type AS owner_type, sw.subject_id AS owner_id, \
+                    w.provider_key AS kind, wb.local_locator AS locator \
+             FROM subject_workspaces sw JOIN workspaces w ON w.id = sw.workspace_id \
+             LEFT JOIN workspace_bindings wb ON wb.workspace_id = w.id AND wb.installation_id = ? \
+             WHERE sw.subject_type = ? AND sw.subject_id = ? ORDER BY sw.attached_at, w.id",
+        )
+        .bind(&self.installation_id)
+        .bind(subject_type.as_str())
+        .bind(owner_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(workspace_from_row).collect()
+    }
+
+    /// Returns one portable logical workspace by identifier.
+    pub async fn get_workspace(&self, workspace_id: Uuid) -> Result<Option<Workspace>, StoreError> {
+        let row = query(
+            "SELECT w.id, w.provider_key, w.descriptor_version, w.display_name, \
+                    w.portable_locator, w.metadata_json, w.created_at, w.updated_at, \
+                    NULL AS owner_type, NULL AS owner_id, w.provider_key AS kind, \
+                    wb.local_locator AS locator \
+             FROM workspaces w LEFT JOIN workspace_bindings wb \
+                  ON wb.workspace_id = w.id AND wb.installation_id = ? WHERE w.id = ?",
+        )
+        .bind(&self.installation_id)
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(workspace_from_row).transpose()
+    }
+
+    async fn get_contextual_workspace(
+        &self,
+        workspace_id: Uuid,
+        subject_type: SubjectType,
+        subject_id: Uuid,
+    ) -> Result<Option<Workspace>, StoreError> {
+        let row = query(
+            "SELECT w.id, w.provider_key, w.descriptor_version, w.display_name, \
+                    w.portable_locator, w.metadata_json, w.created_at, w.updated_at, \
+                    sw.subject_type AS owner_type, sw.subject_id AS owner_id, \
+                    w.provider_key AS kind, wb.local_locator AS locator \
+             FROM subject_workspaces sw JOIN workspaces w ON w.id = sw.workspace_id \
+             LEFT JOIN workspace_bindings wb ON wb.workspace_id = w.id AND wb.installation_id = ? \
+             WHERE w.id = ? AND sw.subject_type = ? AND sw.subject_id = ?",
+        )
+        .bind(&self.installation_id)
+        .bind(workspace_id)
+        .bind(subject_type.as_str())
+        .bind(subject_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(workspace_from_row).transpose()
+    }
+
+    /// Updates portable descriptor fields without changing attachments or bindings.
+    pub async fn update_workspace(
+        &self,
+        workspace_id: Uuid,
+        display_name: &str,
+        portable_locator: Option<&str>,
+        metadata: serde_json::Value,
+    ) -> Result<Option<Workspace>, StoreError> {
+        let result = query(
+            "UPDATE workspaces SET display_name = ?, portable_locator = ?, metadata_json = ?, \
+             updated_at = ? WHERE id = ?",
+        )
+        .bind(display_name)
+        .bind(portable_locator)
+        .bind(serde_json::to_string(&metadata)?)
+        .bind(Utc::now())
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.get_workspace(workspace_id).await
+    }
+
+    /// Deletes only cocli's logical record, attachments, and bindings.
+    pub async fn delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StoreError> {
+        let result = query("DELETE FROM workspaces WHERE id = ?")
+            .bind(workspace_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// Creates or replaces the current installation's local binding and validates it.
+    pub async fn bind_workspace(
+        &self,
+        workspace_id: Uuid,
+        local_locator: &str,
+        secret_ref: Option<&str>,
+    ) -> Result<WorkspaceBinding, StoreError> {
+        self.bind_workspace_for_installation(
+            workspace_id,
+            &self.installation_id,
+            local_locator,
+            secret_ref,
+        )
+        .await?;
+        self.verify_workspace_binding(workspace_id).await
+    }
+
+    /// Persists a binding hint for an explicit installation without selecting it as current.
+    pub async fn bind_workspace_for_installation(
+        &self,
+        workspace_id: Uuid,
+        installation_id: &str,
+        local_locator: &str,
+        secret_ref: Option<&str>,
+    ) -> Result<WorkspaceBinding, StoreError> {
+        if self.get_workspace(workspace_id).await?.is_none() {
+            return Err(StoreError::WorkspaceNotFound(workspace_id));
+        }
+        query(
+            "INSERT INTO workspace_bindings \
+             (workspace_id, installation_id, local_locator, state, capabilities_json, secret_ref, \
+              last_verified_at, error_code, error_message) VALUES (?, ?, ?, 'resolving', '{}', ?, NULL, NULL, NULL) \
+             ON CONFLICT(workspace_id, installation_id) DO UPDATE SET \
+              local_locator = excluded.local_locator, state = 'resolving', secret_ref = excluded.secret_ref, \
+              last_verified_at = NULL, error_code = NULL, error_message = NULL",
+        )
+        .bind(workspace_id)
+        .bind(installation_id)
+        .bind(local_locator)
+        .bind(secret_ref)
+        .execute(&self.pool)
+        .await?;
+        self.get_workspace_binding(workspace_id, installation_id)
+            .await?
+            .ok_or(StoreError::WorkspaceBindingNotFound(workspace_id))
+    }
+
+    /// Validates the current installation's binding through the built-in Provider boundary.
+    pub async fn verify_workspace_binding(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceBinding, StoreError> {
+        let workspace = self
+            .get_workspace(workspace_id)
+            .await?
+            .ok_or(StoreError::WorkspaceNotFound(workspace_id))?;
+        let binding = self
+            .current_workspace_binding(workspace_id)
+            .await?
+            .ok_or(StoreError::WorkspaceBindingNotFound(workspace_id))?;
+        let validation = workspace::validate_workspace_binding(
+            &workspace.provider_key,
+            binding.local_locator.as_deref(),
+        );
+        let verified_at = Utc::now();
+        query(
+            "UPDATE workspace_bindings SET state = ?, capabilities_json = ?, last_verified_at = ?, \
+             error_code = ?, error_message = ? WHERE workspace_id = ? AND installation_id = ?",
+        )
+        .bind(validation.state.as_str())
+        .bind(serde_json::to_string(&validation.capabilities)?)
+        .bind(verified_at)
+        .bind(&validation.error_code)
+        .bind(&validation.error_message)
+        .bind(workspace_id)
+        .bind(&self.installation_id)
+        .execute(&self.pool)
+        .await?;
+        self.current_workspace_binding(workspace_id)
+            .await?
+            .ok_or(StoreError::WorkspaceBindingNotFound(workspace_id))
+    }
+
+    /// Resolves a ready current-machine binding to its local locator.
+    pub async fn resolve_workspace(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<String>, StoreError> {
+        let binding = self.verify_workspace_binding(workspace_id).await?;
+        Ok((binding.state == WorkspaceBindingState::Ready)
+            .then_some(binding.local_locator)
+            .flatten())
+    }
+
+    /// Returns the current installation's binding only.
+    pub async fn current_workspace_binding(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<WorkspaceBinding>, StoreError> {
+        if let Some(binding) = self
+            .get_workspace_binding(workspace_id, &self.installation_id)
+            .await?
+        {
+            return Ok(Some(binding));
+        }
+        if self.get_workspace(workspace_id).await?.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(WorkspaceBinding {
+            workspace_id,
+            installation_id: self.installation_id.clone(),
+            local_locator: None,
+            state: WorkspaceBindingState::Unbound,
+            capabilities: serde_json::json!({}),
+            secret_ref: None,
+            last_verified_at: None,
+            error_code: Some("binding_missing".to_owned()),
+            error_message: Some("workspace binding has no local locator".to_owned()),
+        }))
+    }
+
+    /// Returns one installation-specific binding.
+    pub async fn get_workspace_binding(
+        &self,
+        workspace_id: Uuid,
+        installation_id: &str,
+    ) -> Result<Option<WorkspaceBinding>, StoreError> {
+        let row = query(
+            "SELECT workspace_id, installation_id, local_locator, state, capabilities_json, \
+                    secret_ref, last_verified_at, error_code, error_message \
+             FROM workspace_bindings WHERE workspace_id = ? AND installation_id = ?",
+        )
+        .bind(workspace_id)
+        .bind(installation_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(workspace_binding_from_row).transpose()
+    }
+
+    /// Lists all binding hints without treating a foreign installation as current.
+    pub async fn list_workspace_bindings(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<WorkspaceBinding>, StoreError> {
+        let rows = query(
+            "SELECT workspace_id, installation_id, local_locator, state, capabilities_json, \
+                    secret_ref, last_verified_at, error_code, error_message \
+             FROM workspace_bindings WHERE workspace_id = ? ORDER BY installation_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(workspace_binding_from_row).collect()
     }
 
     /// Updates an agent's delivery status.
@@ -865,6 +2010,24 @@ impl Store {
         self.get_agent(agent_id).await
     }
 
+    /// Updates an agent identity lifecycle status.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the update or follow-up query fails.
+    pub async fn set_agent_lifecycle_status(
+        &self,
+        agent_id: Uuid,
+        lifecycle_status: AgentLifecycleStatus,
+    ) -> Result<Option<Agent>, StoreError> {
+        query("UPDATE agents SET lifecycle_status = ? WHERE id = ?")
+            .bind(lifecycle_status.as_str())
+            .bind(agent_id)
+            .execute(&self.pool)
+            .await?;
+        self.get_agent(agent_id).await
+    }
+
     /// Returns one agent by identifier.
     ///
     /// # Errors
@@ -872,7 +2035,8 @@ impl Store {
     /// Returns [`StoreError`] when the query or persisted enum decoding fails.
     pub async fn get_agent(&self, agent_id: Uuid) -> Result<Option<Agent>, StoreError> {
         let row = query(
-            "SELECT id, channel_id, name, runtime, model, status, created_at \
+            "SELECT id, channel_id, name, description, instructions, runtime, model, status, lifecycle_status, \
+             created_by_agent_id, created_by_channel_id, created_at \
              FROM agents WHERE id = ?",
         )
         .bind(agent_id)
@@ -884,16 +2048,45 @@ impl Store {
             .transpose()
     }
 
+    /// Returns the compatibility/default channel for an agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when the query fails.
+    pub async fn default_channel_for_agent(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<Uuid>, StoreError> {
+        let channel_id: Option<Uuid> = query_scalar(
+            "SELECT COALESCE( \
+                (SELECT channel_id FROM agents WHERE id = ?), \
+                (SELECT channel_id FROM channel_agents WHERE agent_id = ? ORDER BY joined_at, channel_id LIMIT 1) \
+             )",
+        )
+        .bind(agent_id)
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        Ok(channel_id)
+    }
+
     /// Deletes one agent and all dependent local state.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] when the delete fails.
     pub async fn delete_agent(&self, agent_id: Uuid) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        query("DELETE FROM subject_workspaces WHERE subject_type = 'agent' AND subject_id = ?")
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await?;
         query("DELETE FROM agents WHERE id = ?")
             .bind(agent_id)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1007,7 +2200,13 @@ impl Store {
         .await?;
         let message: Message = message_row_from_sqlite(row)?.try_into()?;
         let agent_ids: Vec<Uuid> = query_scalar(
-            "SELECT id FROM agents WHERE channel_id = ? AND status = ? ORDER BY created_at",
+            "SELECT agents.id FROM agents \
+             INNER JOIN channel_agents ON channel_agents.agent_id = agents.id \
+             WHERE channel_agents.channel_id = ? \
+               AND agents.status = ? \
+               AND agents.lifecycle_status = 'active' \
+               AND channel_agents.delivery_policy = 'subscribed' \
+             ORDER BY channel_agents.joined_at, agents.id",
         )
         .bind(channel_id)
         .bind(AgentStatus::Running.as_str())
@@ -1106,8 +2305,8 @@ impl Store {
         agent_id: Uuid,
         limit: i64,
     ) -> Result<Vec<Message>, StoreError> {
-        let agent = match self.get_agent(agent_id).await? {
-            Some(agent) => agent,
+        let channel_id = match self.default_channel_for_agent(agent_id).await? {
+            Some(channel_id) => channel_id,
             None => return Ok(Vec::new()),
         };
         let mut transaction = self.pool.begin().await?;
@@ -1125,7 +2324,7 @@ impl Store {
                AND (agent_id IS NULL OR agent_id != ?) \
              ORDER BY seq LIMIT ?",
         )
-        .bind(agent.channel_id)
+        .bind(channel_id)
         .bind(cursor)
         .bind(agent_id)
         .bind(limit.clamp(1, 200))
@@ -2379,12 +3578,38 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             "runtime_history",
             include_str!("../migrations/0005_runtime_history.sql"),
         ),
-        (6, "wiki", include_str!("../migrations/0006_wiki.sql")),
+        // Version 6 preserves compatibility with databases created before Wiki
+        // moved out of the core product. No core API or Rust module exposes it.
+        (
+            6,
+            "legacy_wiki_storage",
+            include_str!("../migrations/0006_wiki.sql"),
+        ),
         (7, "skills", include_str!("../migrations/0007_skills.sql")),
         (
             8,
             "bridge_security",
             include_str!("../migrations/0008_bridge_security.sql"),
+        ),
+        (
+            9,
+            "agent_channel_ontology",
+            include_str!("../migrations/0009_agent_channel_ontology.sql"),
+        ),
+        (
+            10,
+            "subject_profiles_and_operations",
+            include_str!("../migrations/0010_subject_profiles_and_operations.sql"),
+        ),
+        (
+            11,
+            "memory_documents",
+            include_str!("../migrations/0011_memory_documents.sql"),
+        ),
+        (
+            12,
+            "portable_workspace_foundation",
+            include_str!("../migrations/0012_portable_workspace_foundation.sql"),
         ),
     ] {
         let already_applied: bool =
@@ -2414,10 +3639,38 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
     Ok(())
 }
 
+async fn ensure_installation_id(pool: &SqlitePool) -> Result<String, sqlx_core::Error> {
+    if let Some(installation_id) =
+        query_scalar("SELECT installation_id FROM cocli_installation LIMIT 1")
+            .fetch_optional(pool)
+            .await?
+    {
+        return Ok(installation_id);
+    }
+
+    let installation_id = Uuid::new_v4().to_string();
+    query(
+        "INSERT INTO cocli_installation (singleton, installation_id, created_at) \
+         VALUES (1, ?, ?)",
+    )
+    .bind(&installation_id)
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+    Ok(installation_id)
+}
+
 fn channel_from_row(row: SqliteRow) -> Result<Channel, StoreError> {
     Ok(Channel {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        goal: row.try_get("goal")?,
+        kind: row.try_get("kind")?,
+        is_system: row.try_get("is_system")?,
+        direct_agent_id: row.try_get("direct_agent_id")?,
+        created_by_agent_id: row.try_get("created_by_agent_id")?,
+        created_by_channel_id: row.try_get("created_by_channel_id")?,
         created_at: row.try_get("created_at")?,
     })
 }
@@ -2427,11 +3680,131 @@ fn agent_row_from_sqlite(row: SqliteRow) -> Result<AgentRow, StoreError> {
         id: row.try_get("id")?,
         channel_id: row.try_get("channel_id")?,
         name: row.try_get("name")?,
+        description: row.try_get("description")?,
+        instructions: row.try_get("instructions")?,
         runtime: row.try_get("runtime")?,
         model: row.try_get("model")?,
         status: row.try_get("status")?,
+        lifecycle_status: row.try_get("lifecycle_status")?,
+        created_by_agent_id: row.try_get("created_by_agent_id")?,
+        created_by_channel_id: row.try_get("created_by_channel_id")?,
         created_at: row.try_get("created_at")?,
     })
+}
+
+fn channel_agent_from_row(row: SqliteRow) -> Result<ChannelAgent, StoreError> {
+    Ok(ChannelAgent {
+        channel_id: row.try_get("channel_id")?,
+        agent_id: row.try_get("agent_id")?,
+        role: row.try_get("role")?,
+        delivery_policy: row.try_get("delivery_policy")?,
+        joined_at: row.try_get("joined_at")?,
+        created_by_agent_id: row.try_get("created_by_agent_id")?,
+        created_by_channel_id: row.try_get("created_by_channel_id")?,
+    })
+}
+
+fn agent_operation_from_row(row: SqliteRow) -> Result<AgentOperation, StoreError> {
+    Ok(AgentOperation {
+        id: row.try_get("id")?,
+        caller_agent_id: row.try_get("caller_agent_id")?,
+        action: row.try_get("action")?,
+        idempotency_key: row.try_get("idempotency_key")?,
+        request_fingerprint: row.try_get("request_fingerprint")?,
+        result_type: row.try_get("result_type")?,
+        result_id: row.try_get("result_id")?,
+        source_channel_id: row.try_get("source_channel_id")?,
+        source_session_id: row.try_get("source_session_id")?,
+        created_at: row.try_get("created_at")?,
+    })
+}
+
+fn workspace_from_row(row: SqliteRow) -> Result<Workspace, StoreError> {
+    let metadata_json: String = row.try_get("metadata_json")?;
+    let provider_key: String = row.try_get("provider_key")?;
+    Ok(Workspace {
+        id: row.try_get("id")?,
+        provider_key: WorkspaceProviderKey::new(provider_key)?,
+        descriptor_version: row.try_get("descriptor_version")?,
+        display_name: row.try_get("display_name")?,
+        portable_locator: row.try_get("portable_locator")?,
+        metadata: serde_json::from_str(&metadata_json)?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        owner_type: row.try_get("owner_type")?,
+        owner_id: row.try_get("owner_id")?,
+        kind: row.try_get("kind")?,
+        locator: row.try_get("locator")?,
+    })
+}
+
+fn subject_workspace_from_row(row: SqliteRow) -> Result<SubjectWorkspace, StoreError> {
+    let subject_type: String = row.try_get("subject_type")?;
+    Ok(SubjectWorkspace {
+        workspace_id: row.try_get("workspace_id")?,
+        subject_type: SubjectType::parse(&subject_type)?,
+        subject_id: row.try_get("subject_id")?,
+        role: row.try_get("role")?,
+        attached_at: row.try_get("attached_at")?,
+    })
+}
+
+fn workspace_binding_from_row(row: SqliteRow) -> Result<WorkspaceBinding, StoreError> {
+    let state: String = row.try_get("state")?;
+    let capabilities_json: String = row.try_get("capabilities_json")?;
+    Ok(WorkspaceBinding {
+        workspace_id: row.try_get("workspace_id")?,
+        installation_id: row.try_get("installation_id")?,
+        local_locator: row.try_get("local_locator")?,
+        state: WorkspaceBindingState::parse(&state)?,
+        capabilities: serde_json::from_str(&capabilities_json)?,
+        secret_ref: row.try_get("secret_ref")?,
+        last_verified_at: row.try_get("last_verified_at")?,
+        error_code: row.try_get("error_code")?,
+        error_message: row.try_get("error_message")?,
+    })
+}
+
+fn delivery_policy_for_status(status: AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Running => "subscribed",
+        AgentStatus::Stopped => "muted",
+    }
+}
+
+struct MembershipInsert<'a> {
+    channel_id: Uuid,
+    agent_id: Uuid,
+    role: Option<&'a str>,
+    delivery_policy: &'a str,
+    joined_at: DateTime<Utc>,
+    created_by_agent_id: Option<Uuid>,
+    created_by_channel_id: Option<Uuid>,
+}
+
+async fn insert_channel_agent_membership(
+    transaction: &mut Transaction<'_, Sqlite>,
+    membership: MembershipInsert<'_>,
+) -> Result<(), sqlx_core::Error> {
+    query(
+        "INSERT INTO channel_agents \
+         (channel_id, agent_id, role, delivery_policy, joined_at, \
+          created_by_agent_id, created_by_channel_id) \
+         VALUES (?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(channel_id, agent_id) DO UPDATE SET \
+           role = COALESCE(excluded.role, channel_agents.role), \
+           delivery_policy = excluded.delivery_policy",
+    )
+    .bind(membership.channel_id)
+    .bind(membership.agent_id)
+    .bind(membership.role)
+    .bind(membership.delivery_policy)
+    .bind(membership.joined_at)
+    .bind(membership.created_by_agent_id)
+    .bind(membership.created_by_channel_id)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 fn message_row_from_sqlite(row: SqliteRow) -> Result<MessageRow, StoreError> {

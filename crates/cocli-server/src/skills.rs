@@ -560,9 +560,14 @@ mod tests {
             id: Uuid::new_v4(),
             channel_id: Uuid::new_v4(),
             name: "builder".to_owned(),
+            description: None,
+            instructions: None,
             runtime: runtime.to_owned(),
             model: None,
             status: AgentStatus::Stopped,
+            lifecycle_status: cocli_store::AgentLifecycleStatus::Active,
+            created_by_agent_id: None,
+            created_by_channel_id: None,
             created_at: Utc::now(),
         }
     }
