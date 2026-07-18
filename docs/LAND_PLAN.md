@@ -1,15 +1,15 @@
-# Land plan: cocli local from cocli-cloud daemon-rs
+# Historical landing plan
 
-Canonical long-form lives in Omni KB:
+The original plan for selectively porting the local Runtime layer from cocli
+cloud has been completed and superseded.
 
-- `hub/cocli-local`
-- `cocli-local/land-plan-from-daemon-rs`
-- `cocli-local/agent-starter-prompt`
+Use these active sources instead:
 
-See also `docs/AGENT_STARTER.md` for the copy-paste agent prompt.
+- [`DESIGN.md`](../DESIGN.md) — canonical product and interaction contract
+- [`ROADMAP.md`](../ROADMAP.md) — current delivery milestones and completion criteria
+- [`docs/runtime-ownership.md`](runtime-ownership.md) — local/cloud Runtime ownership
+- [`docs/LANDING.md`](LANDING.md) — current implementation record
 
-## One-liner
-
-Port production-proven runtime pieces from `~/code/cocli-cloud/daemon-rs`
-into `~/code/cocli` (OSS, SQLite, single-user), without multi-tenant cloud
-server code, until `cargo run --bin cocli` can do channel + claude reply e2e.
+Do not use a Project, repository, directory, or worktree as a prerequisite for
+new cocli features. New product work should begin from persistent Agents and
+Channels; domain-specific resources attach through Workspace providers.

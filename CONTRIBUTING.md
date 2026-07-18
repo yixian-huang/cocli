@@ -6,7 +6,8 @@ Thanks for your interest! Here's how to get up and running.
 
 - Rust 1.78+ (`rustup install 1.78`)
 - Node 20+ (for frontend dev)
-- claude CLI installed (for end-to-end testing; not needed for unit tests)
+- One supported Agent CLI for real Runtime end-to-end testing; not needed for
+  unit tests or the fake-runtime local loop
 - SQLite 3.38+ (sqlx bundles its own; only needed if you run sqlx-cli locally)
 
 ## Quick start
@@ -16,15 +17,20 @@ Thanks for your interest! Here's how to get up and running.
     cargo build --workspace
     cargo test --workspace
 
-The runtime stack is being assembled milestone-by-milestone — see
-ROADMAP.md. As of M0, `cargo run --bin cocli` only prints a version
-string. The full server bootstraps in M0.0.1.
+Build the web client, then start the loopback-only local server:
+
+    cd web && npm run build && cd ..
+    cargo run --bin cocli -- --fake-runtime
+
+Open `http://127.0.0.1:8090`. Omit `--fake-runtime` to discover installed
+first-party Runtime CLIs.
 
 ## Tests
 
     cargo test --workspace                 # Rust unit tests
     cd web && npm test                     # Vitest
-    # tests/e2e/ end-to-end suites land in later milestones
+    npm run lint
+    npm run build
 
 ## Coding style
 
@@ -43,8 +49,8 @@ A GitHub Action checks that every commit in a PR carries the
 
 ## Pull requests
 
-- Keep PRs focused. One milestone non-goal at a time.
-- Reference the relevant spec section in the PR description.
+- Keep PRs focused and preserve the product model in `DESIGN.md`.
+- Reference the relevant `DESIGN.md` or `ROADMAP.md` section in the PR description.
 - For changes touching > 1 crate, new public API surface, or schema
   migrations: open an RFC issue first (label `rfc:proposed`).
 
@@ -67,10 +73,16 @@ Before requesting review for runtime changes, run:
     cargo fmt --all -- --check
     scripts/check-runtime-release.sh
 
-## Plugin authors
+## Product boundaries
 
-See `docs/plugin-protocol.md` (lands in M0.0.4). Adapters live in their
-own repos or under `plugins/` if you want them shipped first-party.
+- Agent and Channel are persistent first-class subjects.
+- Runtime, Session, Turn, and CLI process are implementation/diagnostic layers.
+- Workspace is optional and domain-neutral; Git is one possible provider.
+- Base Agent behavior must not assume software development.
+- Wiki is reserved for a future plugin and must not be reintroduced into core
+  navigation or Agent tools without an approved extension contract.
+
+Plugin authoring documentation will land with the stable extension contract.
 
 ## Reporting bugs / requesting features
 
