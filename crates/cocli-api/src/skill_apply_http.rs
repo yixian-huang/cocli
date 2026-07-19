@@ -6,23 +6,28 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_store::{
-    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, SkillGovernanceApplyAction,
+    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, NewSkillGovernanceManagedArtifact,
+    NewSkillGovernanceMaterialization, SkillGovernanceApplyAction,
     SkillGovernanceApplyActionStatus, SkillGovernanceApplyRun, SkillGovernanceApplyRunStatus,
-    SkillGovernancePlan, SkillGovernancePlanStatus, SkillGovernanceRecoveryStatus,
-    SkillGovernanceScope as StoreGovernanceScope,
+    SkillGovernanceInstallationMode, SkillGovernanceMaterializationOwnership,
+    SkillGovernanceMaterializationRootKind, SkillGovernancePlan, SkillGovernancePlanStatus,
+    SkillGovernanceRecoveryStatus, SkillGovernanceScope as StoreGovernanceScope,
+    SkillGovernanceVerifyStatus, SkillLockSnapshot,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 use crate::skill_apply::{
-    activate_atomic_mutation, backup_atomic_mutation, fingerprint_path, is_safe_removal_candidate,
-    load_local_artifact, load_vendored_artifact, prepare_atomic_mutation, rollback_atomic_mutation,
+    activate_atomic_file_mutation, activate_atomic_mutation, backup_atomic_file_mutation,
+    backup_atomic_mutation, fingerprint_path, is_safe_removal_candidate, load_local_artifact,
+    load_vendored_artifact, prepare_atomic_file_mutation, prepare_atomic_mutation,
+    prepare_managed_artifact_mutation, rollback_atomic_mutation, stage_atomic_file_mutation,
     stage_atomic_mutation, ArtifactBundle, MutationMode, MutationReceipt, PreparedMutation,
 };
 use crate::skill_governance::{
-    canonical_hash, DryRunPlanPreview, EffectiveDesiredSkill, GovernanceScope, InstallationMode,
-    PlanAction, PlanActionKind, PlanRisk, RiskPolicy,
+    canonical_hash, sha256_hex, DryRunPlanPreview, EffectiveDesiredSkill, GovernanceScope,
+    InstallationMode, PlanAction, PlanActionKind, PlanRisk, RiskPolicy,
 };
 use crate::skill_governance_http::{
     generate_lock_preview, load_effective_desired, normalized_scope_id, parse_plan_preview,
@@ -96,6 +101,16 @@ struct ActionDecision {
 struct PreparedActionMutation {
     mutation: PreparedMutation,
     artifact: Option<ArtifactBundle>,
+    managed_mutation: Option<PreparedMutation>,
+    managed_artifact_key: Option<String>,
+    source_provenance: Option<String>,
+    manifest_digest: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedApplyScope {
+    agent: Option<cocli_store::Agent>,
+    scope_root: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -595,18 +610,79 @@ async fn apply_preflight(state: &AppState, plan_id: Uuid) -> Result<ApplyPreflig
         stale_reasons.push("approval_expired".to_owned());
     }
     let effective = load_effective_desired(state, &request.desired_target()).await?;
-    let decisions = expected
+    let mut decisions = expected
         .content
         .actions
         .iter()
         .cloned()
         .map(|action| action_decision(&action, &effective.skills, context.scope))
         .collect::<Vec<_>>();
-    let high_risk = expected
-        .content
-        .actions
-        .iter()
-        .any(|action| action.risk == PlanRisk::High || action.approval_required);
+    let resolved_scope = resolve_apply_scope(state, &context).await?;
+    if context.scope == GovernanceScope::Workspace
+        && expected
+            .content
+            .actions
+            .iter()
+            .any(|action| action.action == PlanActionKind::LockfileUpdate)
+    {
+        let workspace_id = context.workspace_id.as_deref().unwrap_or(&context.scope_id);
+        let root = resolved_scope
+            .scope_root
+            .as_ref()
+            .ok_or_else(|| ApiError::conflict("Workspace root is unavailable"))?;
+        let target = root.join(".cocli/skills.lock.json");
+        let actual = tokio::task::spawn_blocking(move || fingerprint_path(&target))
+            .await
+            .map_err(|_| ApiError::conflict("Workspace lockfile CAS task failed"))?
+            .map_err(ApiError::conflict)?;
+        let record = state
+            .store
+            .get_skill_governance_workspace_lockfile(workspace_id, ".cocli/skills.lock.json")
+            .await?;
+        if record.as_ref().map_or(actual != "missing", |record| {
+            record.expected_disk_fingerprint != actual
+        }) {
+            stale_reasons.push("workspace_lockfile_changed".to_owned());
+        }
+    }
+    if context.scope != GovernanceScope::Agent {
+        for decision in &mut decisions {
+            if !decision.supported || decision.action.action == PlanActionKind::LockfileUpdate {
+                continue;
+            }
+            match state
+                .runtime
+                .governance_scope_capabilities(
+                    &decision.action.runtime,
+                    context.scope.as_str(),
+                    resolved_scope.scope_root.as_deref(),
+                )
+                .await
+            {
+                Ok(capabilities) if capabilities.iter().any(|root| root.supported) => {}
+                Ok(capabilities) => {
+                    decision.supported = false;
+                    decision.reason = capabilities
+                        .into_iter()
+                        .filter_map(|root| root.blocked_reason)
+                        .next()
+                        .unwrap_or_else(|| {
+                            "Runtime exposes no supported canonical root".to_owned()
+                        });
+                }
+                Err(error) => {
+                    decision.supported = false;
+                    decision.reason = format!("Runtime scope capability unavailable: {error}");
+                }
+            }
+        }
+    }
+    let high_risk = context.scope != GovernanceScope::Agent
+        || expected
+            .content
+            .actions
+            .iter()
+            .any(|action| action.risk == PlanRisk::High || action.approval_required);
     let confirmation_nonce = canonical_hash(&(
         "skill-governance-apply",
         plan.id,
@@ -719,9 +795,6 @@ fn action_decision(
     {
         return blocked("action is blocked by unknown or unsupported evidence");
     }
-    if scope != GovernanceScope::Agent {
-        return blocked("automatic Phase 3B writes are limited to canonical Agent workspace roots");
-    }
     if matches!(
         action.action,
         PlanActionKind::Enable | PlanActionKind::Disable
@@ -732,7 +805,12 @@ fn action_decision(
         return ActionDecision {
             action: action.clone(),
             supported: true,
-            reason: "immutable Store lock snapshot is already available".to_owned(),
+            reason: if scope == GovernanceScope::Workspace {
+                "workspace lockfile uses approved CAS, backup, fsync, and atomic rename"
+            } else {
+                "machine and Agent lock state remains an immutable Store snapshot"
+            }
+            .to_owned(),
         };
     }
     if action.action == PlanActionKind::Remove {
@@ -753,7 +831,7 @@ fn action_decision(
         return blocked("desired artifact could not be resolved for this action");
     };
     if desired.desired.source.credential_ref.is_some() {
-        return blocked("private source credentials are opaque and manual in Phase 3B");
+        return blocked("private source credentials are opaque and manual");
     }
     if !matches!(
         desired.desired.risk_policy,
@@ -776,7 +854,7 @@ fn action_decision(
         desired.desired.installation_mode,
         InstallationMode::Copy | InstallationMode::Symlink
     ) {
-        return blocked("installation mode has no native-safe Phase 3B mutation contract");
+        return blocked("installation mode has no native-safe mutation contract");
     }
     let kind = desired.desired.source.kind.to_ascii_lowercase();
     if !matches!(kind.as_str(), "local" | "cocli" | "library" | "vendored") {
@@ -816,7 +894,12 @@ async fn execute_apply(
             None,
         )
         .await?;
-    let target_agent = require_target_agent(state, &preflight.context).await?;
+    let target_scope = resolve_apply_scope(state, &preflight.context).await?;
+    let lock_snapshot = state
+        .store
+        .get_skill_lock_snapshot(preflight.lock_snapshot_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("governance lock snapshot not found"))?;
     let effective = load_effective_desired(
         state,
         &DesiredTarget {
@@ -870,7 +953,9 @@ async fn execute_apply(
             action_row,
             &decision.action,
             &effective.skills,
-            target_agent.as_ref(),
+            &preflight.context,
+            &target_scope,
+            &lock_snapshot,
             &preflight.preview.content.lockfile_hash,
             run.lock_id,
             lease_nonce,
@@ -878,7 +963,7 @@ async fn execute_apply(
         .await;
         match action_result {
             Ok(Some(receipt)) => {
-                effects.push(effect_from_receipt(&receipt));
+                effects.extend(effects_from_receipt(&receipt));
                 receipts.push(receipt);
             }
             Ok(None) => {
@@ -998,26 +1083,63 @@ async fn prepare_action_mutation(
     action_id: Uuid,
     action: &PlanAction,
     desired: &[EffectiveDesiredSkill],
-    agent: Option<&cocli_store::Agent>,
+    context: &StoredApplyContext,
+    resolved_scope: &ResolvedApplyScope,
 ) -> Result<PreparedActionMutation, String> {
-    let agent = agent.ok_or_else(|| "automatic apply requires an Agent target".to_owned())?;
-    if !agent.runtime.eq_ignore_ascii_case(&action.runtime) {
-        return Err("plan Runtime does not match the target Agent Runtime".to_owned());
+    let target = if context.scope == GovernanceScope::Agent {
+        let agent = resolved_scope
+            .agent
+            .as_ref()
+            .ok_or_else(|| "automatic Agent apply requires an Agent target".to_owned())?;
+        if !agent.runtime.eq_ignore_ascii_case(&action.runtime) {
+            return Err("plan Runtime does not match the target Agent Runtime".to_owned());
+        }
+        state
+            .runtime
+            .governance_skill_target(agent, &action.target)
+            .await
+    } else {
+        state
+            .runtime
+            .governance_skill_target_in_scope(
+                &action.runtime,
+                context.scope.as_str(),
+                resolved_scope.scope_root.as_deref(),
+                &action.target,
+            )
+            .await
     }
-    let target = state
-        .runtime
-        .governance_skill_target(agent, &action.target)
+    .map_err(|error| format!("Runtime target resolution failed: {error}"))?;
+    let scope_id = normalized_scope_id(context.scope, &context.scope_id)
+        .map_err(|_| "normalize materialization scope".to_owned())?;
+    let target_key = target.entry_path.to_string_lossy().into_owned();
+    let existing_materialization = state
+        .store
+        .get_skill_governance_materialization_for_target(
+            context.scope.into(),
+            &scope_id,
+            &target_key,
+        )
         .await
-        .map_err(|error| format!("Runtime target resolution failed: {error}"))?;
+        .map_err(|_| "load governed materialization ownership".to_owned())?;
     let (mode, artifact) = if action.action == PlanActionKind::Remove {
         let removal_target = target.entry_path.clone();
-        let safe = tokio::task::spawn_blocking(move || is_safe_removal_candidate(&removal_target))
-            .await
-            .map_err(|_| "governed Skill removal preflight task failed".to_owned())??;
+        let current_fingerprint = fingerprint_path(&removal_target)?;
+        let receipt_owned = existing_materialization.as_ref().is_some_and(|record| {
+            matches!(
+                record.ownership,
+                SkillGovernanceMaterializationOwnership::Managed
+                    | SkillGovernanceMaterializationOwnership::Adopted
+            ) && record.expected_fingerprint == current_fingerprint
+        });
+        let legacy_agent_owned = context.scope == GovernanceScope::Agent
+            && tokio::task::spawn_blocking(move || is_safe_removal_candidate(&removal_target))
+                .await
+                .map_err(|_| "governed Skill removal preflight task failed".to_owned())??;
+        let safe = receipt_owned || legacy_agent_owned;
         if !safe {
             return Err(
-                "automatic removal is limited to cocli-managed entries or symbolic links"
-                    .to_owned(),
+                "automatic removal is limited to hash-matched managed/adopted entries".to_owned(),
             );
         }
         (MutationMode::Remove, None)
@@ -1046,21 +1168,72 @@ async fn prepare_action_mutation(
                 return Err("installation mode is not automatically supported".to_owned())
             }
         };
-        (mode, Some(artifact))
+        (mode, Some((artifact, desired.source_provenance.clone())))
+    };
+    let (artifact, source_provenance) = artifact
+        .map(|(artifact, provenance)| (Some(artifact), Some(provenance)))
+        .unwrap_or((None, None));
+    let managed_root = if artifact.is_some() {
+        Some(
+            state
+                .runtime
+                .governance_managed_artifact_root()
+                .await
+                .map_err(|error| format!("managed artifact root resolution failed: {error}"))?,
+        )
+    } else {
+        None
     };
     let artifact_for_prepare = artifact.clone();
-    let mutation = tokio::task::spawn_blocking(move || {
-        prepare_atomic_mutation(
-            &target,
+    let target_for_prepare = target.clone();
+    let managed = tokio::task::spawn_blocking(move || {
+        let (managed_mutation, stored_artifact, managed_key) =
+            match (managed_root.as_deref(), artifact_for_prepare.as_ref()) {
+                (Some(root), Some(artifact)) => {
+                    let (mutation, stored, key) =
+                        prepare_managed_artifact_mutation(root, artifact, run_id, action_id)?;
+                    (mutation, Some(stored), Some(key))
+                }
+                _ => (None, None, None),
+            };
+        let materialization_artifact = stored_artifact.or(artifact_for_prepare);
+        let mutation = prepare_atomic_mutation(
+            &target_for_prepare,
             mode,
-            artifact_for_prepare.as_ref(),
+            materialization_artifact.as_ref(),
             run_id,
             action_id,
-        )
+        )?;
+        Ok::<_, String>((
+            mutation,
+            materialization_artifact,
+            managed_mutation,
+            managed_key,
+        ))
     })
     .await
     .map_err(|_| "governed Skill preparation task failed".to_owned())??;
-    Ok(PreparedActionMutation { mutation, artifact })
+    let (mut mutation, artifact, managed_mutation, managed_artifact_key) = managed;
+    if let Some(artifact) = artifact.as_ref() {
+        mutation.receipt_mut().managed_artifact_ref = managed_artifact_key
+            .as_ref()
+            .map(|key| format!("managed:{key}"));
+        mutation.receipt_mut().managed_artifact_fingerprint = Some(artifact.content_digest.clone());
+    }
+    mutation.receipt_mut().governance_state_before = existing_materialization
+        .as_ref()
+        .and_then(|record| serde_json::to_value(record).ok());
+    let manifest_digest = artifact
+        .as_ref()
+        .map(|artifact| artifact.manifest_digest.clone());
+    Ok(PreparedActionMutation {
+        mutation,
+        artifact,
+        managed_mutation,
+        managed_artifact_key,
+        source_provenance,
+        manifest_digest,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1070,13 +1243,17 @@ async fn execute_journaled_action(
     mut action_row: SkillGovernanceApplyAction,
     action: &PlanAction,
     desired: &[EffectiveDesiredSkill],
-    agent: Option<&cocli_store::Agent>,
+    context: &StoredApplyContext,
+    resolved_scope: &ResolvedApplyScope,
+    lock_snapshot: &SkillLockSnapshot,
     lock_hash: &str,
     lock_id: Option<Uuid>,
     lease_nonce: &str,
 ) -> Result<Option<MutationReceipt>, String> {
     renew_apply_lease(state, lock_id, lease_nonce).await?;
-    if action.action == PlanActionKind::LockfileUpdate {
+    if action.action == PlanActionKind::LockfileUpdate
+        && context.scope != GovernanceScope::Workspace
+    {
         action_row = state
             .store
             .transition_skill_governance_apply_action(
@@ -1108,14 +1285,37 @@ async fn execute_journaled_action(
         return Ok(None);
     }
 
-    let prepared =
-        match prepare_action_mutation(state, run_id, action_row.id, action, desired, agent).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                fail_journal_action(state, action_row, None, &error).await;
-                return Err(error);
-            }
-        };
+    if action.action == PlanActionKind::LockfileUpdate {
+        return execute_workspace_lockfile_action(
+            state,
+            run_id,
+            action_row,
+            context,
+            resolved_scope,
+            lock_snapshot,
+            lock_id,
+            lease_nonce,
+        )
+        .await;
+    }
+
+    let prepared = match prepare_action_mutation(
+        state,
+        run_id,
+        action_row.id,
+        action,
+        desired,
+        context,
+        resolved_scope,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            fail_journal_action(state, action_row, None, &error).await;
+            return Err(error);
+        }
+    };
     let receipt = prepared.mutation.receipt().clone();
     action_row = transition_action_receipt(
         state,
@@ -1127,6 +1327,16 @@ async fn execute_journaled_action(
     )
     .await
     .map_err(|_| "persist prepared mutation receipt".to_owned())?;
+
+    if let Some(managed_mutation) = prepared.managed_mutation.clone() {
+        renew_apply_lease(state, lock_id, lease_nonce).await?;
+        let mutation = managed_mutation.clone();
+        backup_atomic_mutation(&mutation)?;
+        let mutation = managed_mutation.clone();
+        let artifact = prepared.artifact.clone();
+        stage_atomic_mutation(&mutation, artifact.as_ref())?;
+        activate_atomic_mutation(&managed_mutation)?;
+    }
 
     renew_apply_lease(state, lock_id, lease_nonce).await?;
     let mutation = prepared.mutation.clone();
@@ -1175,7 +1385,7 @@ async fn execute_journaled_action(
     }
 
     renew_apply_lease(state, lock_id, lease_nonce).await?;
-    let mutation = prepared.mutation;
+    let mutation = prepared.mutation.clone();
     if let Err(error) = tokio::task::spawn_blocking(move || activate_atomic_mutation(&mutation))
         .await
         .map_err(|_| "governed Skill activation task failed".to_owned())?
@@ -1193,6 +1403,317 @@ async fn execute_journaled_action(
     )
     .await
     .map_err(|_| "persist written journal boundary".to_owned())?;
+    if action.action == PlanActionKind::Remove {
+        remove_materialization_receipt(state, context, &receipt).await?;
+    } else {
+        persist_managed_materialization(state, context, action, &prepared, &receipt).await?;
+    }
+    Ok(Some(receipt))
+}
+
+async fn remove_materialization_receipt(
+    state: &AppState,
+    context: &StoredApplyContext,
+    receipt: &MutationReceipt,
+) -> Result<(), String> {
+    let Some(previous) = receipt.governance_state_before.clone().and_then(|value| {
+        serde_json::from_value::<cocli_store::SkillGovernanceMaterialization>(value).ok()
+    }) else {
+        return Ok(());
+    };
+    let input = NewSkillGovernanceMaterialization {
+        artifact_id: previous.artifact_id,
+        scope: context.scope.into(),
+        scope_id: previous.scope_id,
+        target_path: receipt.target.clone(),
+        target_runtime: previous.target_runtime,
+        root_kind: previous.root_kind,
+        installation_mode: previous.installation_mode,
+        ownership: previous.ownership,
+        content_digest: previous.content_digest,
+        expected_destination: previous.expected_destination,
+        expected_fingerprint: previous.expected_fingerprint,
+        verify_status: SkillGovernanceVerifyStatus::Missing,
+        receipt: serde_json::to_value(receipt)
+            .map_err(|_| "encode removed materialization receipt".to_owned())?,
+    };
+    state
+        .store
+        .upsert_skill_governance_materialization(input, Some(previous.version))
+        .await
+        .map_err(|_| "mark removed materialization receipt".to_owned())?;
+    Ok(())
+}
+
+async fn persist_managed_materialization(
+    state: &AppState,
+    context: &StoredApplyContext,
+    action: &PlanAction,
+    prepared: &PreparedActionMutation,
+    receipt: &MutationReceipt,
+) -> Result<(), String> {
+    let Some(artifact) = prepared.artifact.as_ref() else {
+        return Ok(());
+    };
+    let artifact_key = canonical_hash(&(
+        prepared.source_provenance.as_deref().unwrap_or("managed"),
+        &artifact.content_digest,
+        &artifact.manifest_digest,
+    ))
+    .map_err(|_| "compute managed artifact identity".to_owned())?;
+    let manifest_digest = prepared
+        .manifest_digest
+        .clone()
+        .unwrap_or_else(|| artifact.manifest_digest.clone());
+    let path_hash = prepared
+        .source_provenance
+        .as_deref()
+        .and_then(local_source_path_hash);
+    let known = state
+        .store
+        .list_skill_governance_managed_artifacts()
+        .await
+        .map_err(|_| "load managed artifact identities".to_owned())?
+        .into_iter()
+        .find(|candidate| {
+            candidate.content_digest == artifact.content_digest
+                && candidate.manifest_digest == manifest_digest
+                && path_hash.as_ref().is_some_and(|expected| {
+                    candidate
+                        .source_provenance
+                        .get("pathHash")
+                        .and_then(Value::as_str)
+                        == Some(expected.as_str())
+                })
+        });
+    let stored = if let Some(known) = known {
+        known
+    } else {
+        state
+            .store
+            .create_skill_governance_managed_artifact(NewSkillGovernanceManagedArtifact {
+                artifact_key,
+                artifact_kind: "skill".to_owned(),
+                source_provenance: json!({
+                    "kind": "local",
+                    "pathHash": path_hash,
+                    "fingerprint": canonical_hash(&prepared.source_provenance)
+                        .unwrap_or_else(|_| "unknown".to_owned())
+                }),
+                content_digest: artifact.content_digest.clone(),
+                manifest_digest,
+                schema_version: 1,
+                revision: artifact.content_digest.clone(),
+                store_relative_path: prepared.managed_artifact_key.clone().unwrap_or_default(),
+                artifact: json!({
+                    "contentDigest": artifact.content_digest,
+                    "manifestDigest": artifact.manifest_digest,
+                }),
+                metadata: json!({"immutable": true, "executesScripts": false}),
+            })
+            .await
+            .map_err(|_| "persist managed artifact metadata".to_owned())?
+    };
+    let scope_id = normalized_scope_id(context.scope, &context.scope_id)
+        .map_err(|_| "normalize materialization scope".to_owned())?;
+    let target_path = receipt.target.clone();
+    let ownership = SkillGovernanceMaterializationOwnership::Managed;
+    let installation_mode = match receipt.installation_mode.as_str() {
+        "symlink" => SkillGovernanceInstallationMode::Symlink,
+        _ => SkillGovernanceInstallationMode::Copy,
+    };
+    let root_kind = match context.scope {
+        GovernanceScope::Machine => SkillGovernanceMaterializationRootKind::Machine,
+        GovernanceScope::Workspace => SkillGovernanceMaterializationRootKind::Workspace,
+        GovernanceScope::Agent => SkillGovernanceMaterializationRootKind::Agent,
+    };
+    let input = NewSkillGovernanceMaterialization {
+        artifact_id: stored.id,
+        scope: context.scope.into(),
+        scope_id,
+        target_path: target_path.clone(),
+        target_runtime: action.runtime.clone(),
+        root_kind,
+        installation_mode,
+        ownership,
+        content_digest: artifact.content_digest.clone(),
+        expected_destination: format!(
+            "{}:{}:{}",
+            action.runtime,
+            context.scope.as_str(),
+            action.target
+        ),
+        expected_fingerprint: receipt.after_fingerprint.clone(),
+        verify_status: SkillGovernanceVerifyStatus::Verified,
+        receipt: serde_json::to_value(receipt)
+            .map_err(|_| "encode materialization receipt".to_owned())?,
+    };
+    if let Some(existing) = state
+        .store
+        .get_skill_governance_materialization_for_target(
+            context.scope.into(),
+            &input.scope_id,
+            &target_path,
+        )
+        .await
+        .map_err(|_| "load existing materialization".to_owned())?
+    {
+        state
+            .store
+            .upsert_skill_governance_materialization(input, Some(existing.version))
+            .await
+            .map_err(|_| "update managed materialization receipt".to_owned())?;
+    } else {
+        state
+            .store
+            .create_skill_governance_materialization(input)
+            .await
+            .map_err(|_| "persist managed materialization receipt".to_owned())?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_workspace_lockfile_action(
+    state: &AppState,
+    run_id: Uuid,
+    mut action_row: SkillGovernanceApplyAction,
+    context: &StoredApplyContext,
+    resolved_scope: &ResolvedApplyScope,
+    lock_snapshot: &SkillLockSnapshot,
+    lock_id: Option<Uuid>,
+    lease_nonce: &str,
+) -> Result<Option<MutationReceipt>, String> {
+    let workspace_id = context.workspace_id.as_deref().unwrap_or(&context.scope_id);
+    let scope_root = resolved_scope
+        .scope_root
+        .as_ref()
+        .ok_or_else(|| "workspace lockfile requires a resolved Workspace root".to_owned())?;
+    let relative_path = ".cocli/skills.lock.json";
+    let target = scope_root.join(relative_path);
+    let serialized = lock_snapshot
+        .snapshot
+        .get("serialized")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "lock snapshot has no stable serialized workspace document".to_owned())?;
+    if serialized.contains("credentialRef") || serialized.contains("/Users/") {
+        return Err("workspace lockfile contains private or absolute source data".to_owned());
+    }
+    let existing = state
+        .store
+        .get_skill_governance_workspace_lockfile(workspace_id, relative_path)
+        .await
+        .map_err(|_| "load workspace lockfile receipt".to_owned())?;
+    let restore_document = existing.as_ref().map(|record| record.document.clone());
+    let restore_lock_hash = existing.as_ref().map(|record| record.lock_hash.clone());
+    let existing_version = existing.as_ref().map(|record| record.version);
+    let actual = fingerprint_path(&target)?;
+    let expected_before = if let Some(existing) = &existing {
+        if existing.expected_disk_fingerprint != actual {
+            return Err("workspace lockfile changed after planning CAS".to_owned());
+        }
+        existing.expected_disk_fingerprint.clone()
+    } else if actual == "missing" {
+        "missing".to_owned()
+    } else {
+        return Err("unmanaged workspace lockfile requires adoption before overwrite".to_owned());
+    };
+    let mut prepared = prepare_atomic_file_mutation(
+        scope_root,
+        &target,
+        &expected_before,
+        serialized.as_bytes(),
+        run_id,
+        action_row.id,
+    )?;
+    prepared.receipt_mut().governance_state_before = existing
+        .as_ref()
+        .and_then(|record| serde_json::to_value(record).ok());
+    let receipt = prepared.receipt().clone();
+    action_row = transition_action_receipt(
+        state,
+        action_row,
+        SkillGovernanceApplyActionStatus::Locked,
+        &receipt,
+        None,
+        "locked",
+    )
+    .await
+    .map_err(|_| "persist workspace lockfile prepared receipt".to_owned())?;
+
+    renew_apply_lease(state, lock_id, lease_nonce).await?;
+    let mutation = prepared.clone();
+    tokio::task::spawn_blocking(move || backup_atomic_file_mutation(&mutation))
+        .await
+        .map_err(|_| "workspace lockfile backup task failed".to_owned())??;
+    if receipt.backup_ref.is_some() {
+        action_row = transition_action_receipt(
+            state,
+            action_row,
+            SkillGovernanceApplyActionStatus::BackedUp,
+            &receipt,
+            None,
+            "backed_up",
+        )
+        .await
+        .map_err(|_| "persist workspace lockfile backup boundary".to_owned())?;
+    }
+
+    renew_apply_lease(state, lock_id, lease_nonce).await?;
+    let mutation = prepared.clone();
+    tokio::task::spawn_blocking(move || stage_atomic_file_mutation(&mutation))
+        .await
+        .map_err(|_| "workspace lockfile staging task failed".to_owned())??;
+    action_row = transition_action_receipt(
+        state,
+        action_row,
+        SkillGovernanceApplyActionStatus::Staged,
+        &receipt,
+        None,
+        "staged",
+    )
+    .await
+    .map_err(|_| "persist workspace lockfile staging boundary".to_owned())?;
+
+    renew_apply_lease(state, lock_id, lease_nonce).await?;
+    tokio::task::spawn_blocking(move || activate_atomic_file_mutation(&prepared))
+        .await
+        .map_err(|_| "workspace lockfile activation task failed".to_owned())??;
+    transition_action_receipt(
+        state,
+        action_row,
+        SkillGovernanceApplyActionStatus::LockfileWritten,
+        &receipt,
+        Some(&receipt.after_fingerprint),
+        "lockfile_written",
+    )
+    .await
+    .map_err(|_| "persist workspace lockfile write boundary".to_owned())?;
+
+    state
+        .store
+        .upsert_skill_governance_workspace_lockfile(
+            workspace_id,
+            relative_path,
+            &lock_snapshot.lock_hash,
+            &receipt.after_fingerprint,
+            &receipt.after_fingerprint,
+            lock_snapshot.snapshot.clone(),
+            receipt.backup_ref.as_deref(),
+            (receipt.before_fingerprint != "missing")
+                .then_some(receipt.before_fingerprint.as_str()),
+            serde_json::to_value(&receipt)
+                .map_err(|_| "encode workspace lockfile receipt".to_owned())?,
+            json!({
+                "restorable": restore_document.is_some() && receipt.backup_ref.is_some(),
+                "restoreDocument": restore_document,
+                "restoreLockHash": restore_lock_hash,
+                "casProtected": true
+            }),
+            existing_version,
+        )
+        .await
+        .map_err(|_| "persist workspace lockfile lifecycle record".to_owned())?;
     Ok(Some(receipt))
 }
 
@@ -1268,25 +1789,62 @@ async fn resolve_artifact(
     }
 }
 
-async fn require_target_agent(
+async fn resolve_apply_scope(
     state: &AppState,
     context: &StoredApplyContext,
-) -> Result<Option<cocli_store::Agent>, ApiError> {
-    if context.scope != GovernanceScope::Agent {
-        return Ok(None);
+) -> Result<ResolvedApplyScope, ApiError> {
+    match context.scope {
+        GovernanceScope::Machine => Ok(ResolvedApplyScope {
+            agent: None,
+            scope_root: None,
+        }),
+        GovernanceScope::Agent => {
+            let id = context
+                .agent_id
+                .as_deref()
+                .unwrap_or(&context.scope_id)
+                .parse::<Uuid>()
+                .map_err(|_| ApiError::bad_request("governance Agent scope id is invalid"))?;
+            let agent = state
+                .store
+                .get_agent(id)
+                .await?
+                .ok_or_else(|| ApiError::not_found("governance target Agent not found"))?;
+            Ok(ResolvedApplyScope {
+                agent: Some(agent),
+                scope_root: None,
+            })
+        }
+        GovernanceScope::Workspace => {
+            let workspace_id = context
+                .workspace_id
+                .as_deref()
+                .unwrap_or(&context.scope_id)
+                .parse::<Uuid>()
+                .map_err(|_| ApiError::bad_request("governance Workspace scope id is invalid"))?;
+            let locator = state
+                .store
+                .resolve_workspace(workspace_id)
+                .await?
+                .ok_or_else(|| {
+                    ApiError::conflict("Workspace has no ready local directory binding")
+                })?;
+            let root = PathBuf::from(locator);
+            let canonical = tokio::task::spawn_blocking(move || root.canonicalize())
+                .await
+                .map_err(|_| ApiError::conflict("Workspace binding resolution task failed"))?
+                .map_err(|_| ApiError::conflict("Workspace binding cannot be canonicalized"))?;
+            if !canonical.is_dir() {
+                return Err(ApiError::conflict(
+                    "Workspace binding does not resolve to a directory",
+                ));
+            }
+            Ok(ResolvedApplyScope {
+                agent: None,
+                scope_root: Some(canonical),
+            })
+        }
     }
-    let id = context
-        .agent_id
-        .as_deref()
-        .unwrap_or(&context.scope_id)
-        .parse::<Uuid>()
-        .map_err(|_| ApiError::bad_request("governance Agent scope id is invalid"))?;
-    state
-        .store
-        .get_agent(id)
-        .await?
-        .ok_or_else(|| ApiError::not_found("governance target Agent not found"))
-        .map(Some)
 }
 
 async fn transition_action_receipt(
@@ -1435,6 +1993,10 @@ async fn compensate_journaled_actions(
     lease_nonce: Option<&str>,
 ) -> Vec<String> {
     let mut errors = Vec::new();
+    let run = match state.store.get_skill_governance_apply_run(run_id).await {
+        Ok(Some(run)) => run,
+        _ => return vec!["load apply run for rollback".to_owned()],
+    };
     let mut actions = match state
         .store
         .list_skill_governance_apply_actions(run_id)
@@ -1477,10 +2039,22 @@ async fn compensate_journaled_actions(
                 continue;
             }
         };
-        let receipt = receipt.clone();
-        let result = tokio::task::spawn_blocking(move || rollback_atomic_mutation(&receipt)).await;
+        let rollback_receipt = receipt.clone();
+        let result =
+            tokio::task::spawn_blocking(move || rollback_atomic_mutation(&rollback_receipt)).await;
         let (status, error) = match result {
-            Ok(Ok(())) => (SkillGovernanceApplyActionStatus::RolledBack, None),
+            Ok(Ok(())) => {
+                match reconcile_governance_state_after_rollback(state, &run, &receipt).await {
+                    Ok(()) => (SkillGovernanceApplyActionStatus::RolledBack, None),
+                    Err(error) => {
+                        errors.push(error.clone());
+                        (
+                            SkillGovernanceApplyActionStatus::RecoveryRequired,
+                            Some(error),
+                        )
+                    }
+                }
+            }
             Ok(Err(error)) => {
                 errors.push(error.clone());
                 (
@@ -1521,6 +2095,94 @@ async fn compensate_journaled_actions(
         }
     }
     errors
+}
+
+async fn reconcile_governance_state_after_rollback(
+    state: &AppState,
+    run: &SkillGovernanceApplyRun,
+    receipt: &MutationReceipt,
+) -> Result<(), String> {
+    if receipt.installation_mode == "lockfile" {
+        let relative_path = ".cocli/skills.lock.json";
+        let current = state
+            .store
+            .get_skill_governance_workspace_lockfile(&run.scope_id, relative_path)
+            .await
+            .map_err(|_| "load workspace lockfile rollback state".to_owned())?;
+        if let Some(previous) = receipt.governance_state_before.clone().and_then(|value| {
+            serde_json::from_value::<cocli_store::SkillGovernanceWorkspaceLockfile>(value).ok()
+        }) {
+            state
+                .store
+                .upsert_skill_governance_workspace_lockfile(
+                    &run.scope_id,
+                    relative_path,
+                    &previous.lock_hash,
+                    &previous.expected_disk_fingerprint,
+                    &previous.expected_disk_hash,
+                    previous.document,
+                    previous.last_backup_path.as_deref(),
+                    previous.last_backup_hash.as_deref(),
+                    previous.last_receipt,
+                    previous.restore_metadata,
+                    current.map(|record| record.version),
+                )
+                .await
+                .map_err(|_| "restore workspace lockfile rollback state".to_owned())?;
+        } else if let Some(current) = current {
+            state
+                .store
+                .delete_skill_governance_workspace_lockfile(
+                    &run.scope_id,
+                    relative_path,
+                    current.version,
+                )
+                .await
+                .map_err(|_| "delete new workspace lockfile rollback state".to_owned())?;
+        }
+        return Ok(());
+    }
+
+    let current = state
+        .store
+        .get_skill_governance_materialization_for_target(run.scope, &run.scope_id, &receipt.target)
+        .await
+        .map_err(|_| "load materialization rollback state".to_owned())?;
+    if let Some(previous) = receipt.governance_state_before.clone().and_then(|value| {
+        serde_json::from_value::<cocli_store::SkillGovernanceMaterialization>(value).ok()
+    }) {
+        let input = NewSkillGovernanceMaterialization {
+            artifact_id: previous.artifact_id,
+            scope: previous.scope,
+            scope_id: previous.scope_id,
+            target_path: previous.target_path,
+            target_runtime: previous.target_runtime,
+            root_kind: previous.root_kind,
+            installation_mode: previous.installation_mode,
+            ownership: previous.ownership,
+            content_digest: previous.content_digest,
+            expected_destination: previous.expected_destination,
+            expected_fingerprint: previous.expected_fingerprint,
+            verify_status: SkillGovernanceVerifyStatus::Verified,
+            receipt: previous.receipt,
+        };
+        state
+            .store
+            .upsert_skill_governance_materialization(input, current.map(|record| record.version))
+            .await
+            .map_err(|_| "restore materialization rollback state".to_owned())?;
+    } else if let Some(current) = current {
+        state
+            .store
+            .delete_skill_governance_materialization_if_safe(
+                current.id,
+                current.version,
+                Some(&current.expected_fingerprint),
+            )
+            .await
+            .map_err(|_| "delete new materialization rollback state".to_owned())?;
+    }
+    Ok(())
 }
 
 async fn renew_apply_lease(
@@ -1567,6 +2229,8 @@ async fn invalidate_run_snapshot(state: &AppState, run: &SkillGovernanceApplyRun
         if let Ok(agent_id) = run.scope_id.parse::<Uuid>() {
             state.skill_snapshots.invalidate_agent(agent_id).await;
         }
+    } else {
+        state.skill_snapshots.invalidate_all().await;
     }
 }
 
@@ -1719,7 +2383,12 @@ async fn run_view(state: &AppState, run: SkillGovernanceApplyRun) -> Result<RunV
         dry_run: false,
         applied,
         high_risk,
-        recovery_required: run.recovery_status != SkillGovernanceRecoveryStatus::NotRequired,
+        recovery_required: matches!(
+            run.recovery_status,
+            SkillGovernanceRecoveryStatus::Pending
+                | SkillGovernanceRecoveryStatus::InProgress
+                | SkillGovernanceRecoveryStatus::Failed
+        ),
         recovery_reasons,
         lock_snapshot_id: run.lock_id,
         backup_id: run.backup_path,
@@ -1831,12 +2500,24 @@ fn preflight_effects(decisions: &[ActionDecision], lock_id: Uuid) -> Vec<RunEffe
     effects
 }
 
-fn effect_from_receipt(receipt: &MutationReceipt) -> RunEffect {
-    RunEffect {
+fn effects_from_receipt(receipt: &MutationReceipt) -> Vec<RunEffect> {
+    let mut effects = Vec::new();
+    if receipt.managed_artifact_ref.is_some() {
+        effects.push(RunEffect {
+            kind: "artifact_stored".to_owned(),
+            status: "succeeded".to_owned(),
+            label: "Immutable artifact stored by cocli".to_owned(),
+            detail: receipt.managed_artifact_fingerprint.clone(),
+            created_id: receipt.managed_artifact_ref.clone(),
+        });
+    }
+    effects.push(RunEffect {
         kind: if receipt.installation_mode == "remove" {
             "quarantine"
+        } else if receipt.installation_mode == "lockfile" {
+            "lockfile"
         } else {
-            "backup"
+            "materialized_on_disk"
         }
         .to_owned(),
         status: "succeeded".to_owned(),
@@ -1852,7 +2533,24 @@ fn effect_from_receipt(receipt: &MutationReceipt) -> RunEffect {
             .quarantine_ref
             .clone()
             .or_else(|| receipt.backup_ref.clone()),
+    });
+    if !matches!(receipt.installation_mode.as_str(), "remove" | "lockfile") {
+        effects.push(RunEffect {
+            kind: "runtime_discovered".to_owned(),
+            status: "pending".to_owned(),
+            label: "Runtime discovery requires fresh evidence".to_owned(),
+            detail: Some("filesystem materialization is not Session activation".to_owned()),
+            created_id: None,
+        });
+        effects.push(RunEffect {
+            kind: "session_effective".to_owned(),
+            status: "skipped".to_owned(),
+            label: "Session-effective remains unknown".to_owned(),
+            detail: Some("new_session_required; active Sessions are not restarted".to_owned()),
+            created_id: None,
+        });
     }
+    effects
 }
 
 fn apply_confirmation_nonce(
@@ -1896,6 +2594,11 @@ fn validate_idempotency_key(key: &str) -> Result<(), ApiError> {
 
 fn normalize_name(value: &str) -> String {
     value.trim().to_ascii_lowercase().replace(' ', "-")
+}
+
+fn local_source_path_hash(provenance: &str) -> Option<String> {
+    let path = provenance.strip_prefix("local:")?.rsplit_once('#')?.0;
+    Some(format!("sha256:{}", sha256_hex(path.as_bytes())))
 }
 
 #[cfg(test)]

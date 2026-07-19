@@ -526,38 +526,33 @@ pub(crate) fn build_lockfile_preview(
     observation_hash: &str,
     observed_at: DateTime<Utc>,
 ) -> Result<SkillLockfilePreview, String> {
-    let mut entries: Vec<_> =
-        effective
-            .skills
-            .iter()
-            .map(|skill| SkillLockEntry {
-                logical_identity: normalize_logical_identity(&skill.desired.logical_identity),
-                identity_fingerprint: skill.identity_fingerprint.clone(),
-                source_provenance: skill.source_provenance.clone(),
-                resolved_revision: skill.desired.resolved_revision.clone(),
-                version: skill.desired.version.clone(),
-                content_digest: skill.desired.content_digest.clone(),
-                manifest_digest: skill.desired.manifest_digest.clone(),
-                target_runtime: skill.desired.target_runtime.to_ascii_lowercase(),
-                scope: skill.desired.install_scope,
-                installation_mode: skill.desired.installation_mode,
-                enabled: skill.desired.enabled,
-                update_policy: skill.desired.update_policy,
-                allowed_sources: skill.desired.allowed_sources.clone(),
-                risk_policy: skill.desired.risk_policy,
-                expected_destination: skill.desired.expected_destination.clone().unwrap_or_else(
-                    || {
-                        format!(
-                            "{}:{}:{}",
-                            skill.desired.target_runtime.to_ascii_lowercase(),
-                            skill.desired.install_scope.as_str(),
-                            normalize_logical_identity(&skill.desired.logical_identity)
-                        )
-                    },
-                ),
-                expected_fingerprint: skill.identity_fingerprint.clone(),
-            })
-            .collect();
+    let mut entries: Vec<_> = effective
+        .skills
+        .iter()
+        .map(|skill| SkillLockEntry {
+            logical_identity: normalize_logical_identity(&skill.desired.logical_identity),
+            identity_fingerprint: skill.identity_fingerprint.clone(),
+            source_provenance: lockfile_source_provenance(&skill.source_provenance),
+            resolved_revision: skill.desired.resolved_revision.clone(),
+            version: skill.desired.version.clone(),
+            content_digest: skill.desired.content_digest.clone(),
+            manifest_digest: skill.desired.manifest_digest.clone(),
+            target_runtime: skill.desired.target_runtime.to_ascii_lowercase(),
+            scope: skill.desired.install_scope,
+            installation_mode: skill.desired.installation_mode,
+            enabled: skill.desired.enabled,
+            update_policy: skill.desired.update_policy,
+            allowed_sources: skill.desired.allowed_sources.clone(),
+            risk_policy: skill.desired.risk_policy,
+            expected_destination: format!(
+                "{}:{}:{}",
+                skill.desired.target_runtime.to_ascii_lowercase(),
+                skill.desired.install_scope.as_str(),
+                normalize_logical_identity(&skill.desired.logical_identity)
+            ),
+            expected_fingerprint: skill.identity_fingerprint.clone(),
+        })
+        .collect();
     entries.sort_by(|left, right| {
         (
             left.target_runtime.as_str(),
@@ -739,8 +734,8 @@ pub(crate) fn compare_drift(
         }
         if actual
             .source_provenance
-            .as_deref()
-            .is_some_and(|source| source != expected.source_provenance)
+            .as_ref()
+            .is_some_and(|source| lockfile_source_provenance(source) != expected.source_provenance)
         {
             push_drift(
                 &mut drift,
@@ -780,7 +775,11 @@ pub(crate) fn compare_drift(
             let entry = SkillLockEntry {
                 logical_identity: logical_identity.clone(),
                 identity_fingerprint: actual.fingerprint.clone(),
-                source_provenance: actual.source_provenance.clone().unwrap_or_default(),
+                source_provenance: actual
+                    .source_provenance
+                    .as_deref()
+                    .map(lockfile_source_provenance)
+                    .unwrap_or_default(),
                 resolved_revision: None,
                 version: None,
                 content_digest: String::new(),
@@ -1010,6 +1009,11 @@ fn normalize_source(source: &DesiredSkillSource) -> Result<String, String> {
         .transpose()?
         .unwrap_or_default();
     Ok(format!("{kind}:{location}#{subpath}"))
+}
+
+fn lockfile_source_provenance(provenance: &str) -> String {
+    let kind = provenance.split(':').next().unwrap_or("source");
+    format!("{kind}:sha256:{}", sha256_hex(provenance.as_bytes()))
 }
 
 fn normalize_local_path(path: &Path) -> PathBuf {

@@ -11,15 +11,19 @@ use axum::http::{Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
     governance_artifact_digests, reconcile_skill_state, router, router_with_delivery_config,
-    DeliveryConfig, GovernanceSkillTarget, RuntimeError, RuntimeInfo, RuntimeService, RuntimeSkill,
-    RuntimeSkillCompatibility, RuntimeSkillEvidence, RuntimeSkillFileContent,
-    RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection, RuntimeSkillSearchPath,
+    DeliveryConfig, GovernanceScopeCapability, GovernanceSkillTarget, RuntimeError, RuntimeInfo,
+    RuntimeService, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence,
+    RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection,
+    RuntimeSkillSearchPath,
 };
 use cocli_store::{
     Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillGovernanceApplyAction,
-    NewSkillGovernanceApplyRun, NewSkillLibrary, SkillGovernanceApplyActionStatus,
-    SkillGovernanceApplyRunStatus, SkillGovernanceRecoveryStatus, SkillGovernanceScope,
-    SkillLibraryFile, Store,
+    NewSkillGovernanceApplyRun, NewSkillGovernanceManagedArtifact,
+    NewSkillGovernanceMaterialization, NewSkillLibrary, SkillGovernanceApplyActionStatus,
+    SkillGovernanceApplyRunStatus, SkillGovernanceInstallationMode,
+    SkillGovernanceMaterializationOwnership, SkillGovernanceMaterializationRootKind,
+    SkillGovernanceRecoveryStatus, SkillGovernanceScope, SkillGovernanceVerifyStatus,
+    SkillLibraryFile, Store, WorkspaceProviderKey,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -217,6 +221,68 @@ impl RuntimeService for GovernanceApplyRuntime {
         skill_name: &str,
     ) -> Result<GovernanceSkillTarget, RuntimeError> {
         Ok(self.target(agent, skill_name))
+    }
+
+    async fn governance_scope_capabilities(
+        &self,
+        runtime: &str,
+        scope: &str,
+        scope_root: Option<&std::path::Path>,
+    ) -> Result<Vec<GovernanceScopeCapability>, RuntimeError> {
+        let root = match scope {
+            "machine" => self.workspace_root.join("../machine-home/.fake/skills"),
+            "workspace" => scope_root
+                .ok_or_else(|| RuntimeError::Unsupported("workspace root missing".to_owned()))?
+                .join(".fake/skills"),
+            _ => {
+                return Err(RuntimeError::Unsupported(
+                    "unsupported test scope".to_owned(),
+                ))
+            }
+        };
+        Ok(vec![GovernanceScopeCapability {
+            runtime: runtime.to_owned(),
+            scope: scope.to_owned(),
+            root_kind: "runtime_specific".to_owned(),
+            path: root.to_string_lossy().into_owned(),
+            status: "missing".to_owned(),
+            exists: root.exists(),
+            writable: true,
+            atomic_rename: true,
+            supported: true,
+            evidence: "isolated_test_driver".to_owned(),
+            blocked_reason: None,
+        }])
+    }
+
+    async fn governance_skill_target_in_scope(
+        &self,
+        _runtime: &str,
+        scope: &str,
+        scope_root: Option<&std::path::Path>,
+        skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        let scope_root = match scope {
+            "machine" => self.workspace_root.join("../machine-home"),
+            "workspace" => scope_root
+                .ok_or_else(|| RuntimeError::Unsupported("workspace root missing".to_owned()))?
+                .to_path_buf(),
+            _ => {
+                return Err(RuntimeError::Unsupported(
+                    "unsupported test scope".to_owned(),
+                ))
+            }
+        };
+        let search_root = scope_root.join(".fake/skills");
+        Ok(GovernanceSkillTarget {
+            entry_path: search_root.join(skill_name),
+            search_root,
+            scope_root,
+        })
+    }
+
+    async fn governance_managed_artifact_root(&self) -> Result<PathBuf, RuntimeError> {
+        Ok(self.workspace_root.join("../managed-skills/v1/artifacts"))
     }
 }
 
@@ -1605,6 +1671,28 @@ async fn approved_governance_apply_is_idempotent_verified_and_cas_rollback_safe(
         .expect("agent");
     let app = router(store.clone(), runtime);
 
+    let (_, managed_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": source}),
+    )
+    .await;
+    let (managed_status, managed) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": source,
+            "expectedPreviewHash": managed_preview["previewHash"],
+            "idempotencyKey": managed_preview["idempotencyKey"],
+            "confirmationNonce": managed_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(managed_status, StatusCode::OK, "{managed}");
+
     let (profile_status, profile) = json_request(
         app.clone(),
         "POST",
@@ -1722,6 +1810,14 @@ async fn approved_governance_apply_is_idempotent_verified_and_cas_rollback_safe(
     assert_eq!(applied["run"]["status"], "succeeded");
     let run_id = applied["run"]["id"].as_str().expect("run id");
     assert!(installed.exists());
+    assert_eq!(
+        store
+            .list_skill_governance_managed_artifacts()
+            .await
+            .expect("deduplicated managed artifacts")
+            .len(),
+        1
+    );
 
     let (retry_status, retried) = json_request(
         app.clone(),
@@ -1826,6 +1922,1050 @@ async fn approved_governance_apply_is_idempotent_verified_and_cas_rollback_safe(
             "missing journal boundary {expected}"
         );
     }
+}
+
+#[tokio::test]
+async fn governance_scope_capabilities_reports_missing_workspace_binding_without_creating_roots() {
+    let temp = tempdir().expect("temp directory");
+    let runtime_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: runtime_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, runtime);
+
+    let (status, response) = json_request(
+        app,
+        "GET",
+        "/api/skills/governance/scopes?runtime=fake&scope=workspace",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(response["capabilities"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(response["diagnostics"].as_array().is_some_and(|items| items
+        .iter()
+        .any(|diagnostic| diagnostic["errorType"] == "unsupported")));
+    assert!(!runtime_root.exists());
+}
+
+#[tokio::test]
+async fn workspace_lockfile_restore_rejects_user_edit_before_writing() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    std::fs::create_dir_all(workspace_root.join(".cocli")).expect("workspace lock directory");
+    let lockfile = workspace_root.join(".cocli/skills.lock.json");
+    std::fs::write(&lockfile, "{\"managed\":true}\n").expect("initial lockfile");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "lockfile workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+    let (inspect_status, inspected) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(inspect_status, StatusCode::OK, "{inspected}");
+    let stored = store
+        .upsert_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+            "sha256:stored-lock",
+            inspected["diskFingerprint"]
+                .as_str()
+                .expect("disk fingerprint"),
+            inspected["diskHash"].as_str().expect("disk hash"),
+            json!({"managed": true}),
+            None,
+            None,
+            json!({"createdVia": "test"}),
+            json!({"restoreDocument": {"managed": true}}),
+            None,
+        )
+        .await
+        .expect("stored lockfile");
+    std::fs::write(&lockfile, "user edit\n").expect("user edit");
+    let (_, edited) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore/preview",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": edited["diskHash"]
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+
+    let (restore_status, restore) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": edited["diskHash"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(restore_status, StatusCode::CONFLICT, "{restore}");
+    assert_eq!(
+        std::fs::read_to_string(lockfile).expect("lockfile remains user edited"),
+        "user edit\n"
+    );
+}
+
+#[tokio::test]
+async fn workspace_lockfile_restore_is_atomic_versioned_and_reversible() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    std::fs::create_dir_all(workspace_root.join(".cocli")).expect("workspace lock directory");
+    let lockfile = workspace_root.join(".cocli/skills.lock.json");
+    std::fs::write(&lockfile, "{\n  \"generation\": 2\n}\n").expect("current lockfile");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "restorable lockfile workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+    let (_, inspected) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    let stored = store
+        .upsert_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+            "logical-v2",
+            inspected["diskFingerprint"]
+                .as_str()
+                .expect("disk fingerprint"),
+            inspected["diskHash"].as_str().expect("disk hash"),
+            json!({"generation": 2}),
+            None,
+            None,
+            json!({"createdVia": "test"}),
+            json!({
+                "restoreDocument": {"generation": 1},
+                "restoreLockHash": "logical-v1"
+            }),
+            None,
+        )
+        .await
+        .expect("stored lockfile");
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore/preview",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": inspected["diskHash"]
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    let (restore_status, restored) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": inspected["diskHash"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(restore_status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        std::fs::read_to_string(&lockfile).expect("restored lockfile"),
+        "{\n  \"generation\": 1\n}\n"
+    );
+    let record = store
+        .get_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+        )
+        .await
+        .expect("lockfile lookup")
+        .expect("restored record");
+    assert_eq!(record.version, stored.version + 1);
+    assert_eq!(record.lock_hash, "logical-v1");
+    assert_eq!(record.document, json!({"generation": 1}));
+    assert_eq!(
+        record.restore_metadata["restoreDocument"],
+        json!({"generation": 2})
+    );
+    assert_eq!(record.restore_metadata["restoreLockHash"], "logical-v2");
+    assert!(record
+        .last_backup_path
+        .as_deref()
+        .is_some_and(|path| std::path::Path::new(path).exists()));
+    let (_, after) = json_request(
+        app,
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(record.expected_disk_hash, after["diskHash"]);
+    assert_eq!(record.expected_disk_fingerprint, after["diskFingerprint"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn adoption_preview_blocks_symlink_escape_targets() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    let search_root = workspace_root.join(".fake/skills");
+    let external = temp.path().join("external/reviewer");
+    std::fs::create_dir_all(&search_root).expect("search root");
+    std::fs::create_dir_all(&external).expect("external skill");
+    std::fs::write(
+        external.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: outside target\n---\n",
+    )
+    .expect("external manifest");
+    symlink(&external, search_root.join("reviewer")).expect("escaped target symlink");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "adoption workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store, runtime);
+
+    let (status, preview) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/adoption/preview",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["blocked"], true);
+    assert!(preview["hazards"]
+        .as_array()
+        .is_some_and(|hazards| hazards.iter().any(|hazard| hazard == "symlink_escape")));
+}
+
+#[tokio::test]
+async fn adoption_commit_rejects_target_changes_after_preview() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    let skill_root = workspace_root.join(".fake/skills/reviewer");
+    std::fs::create_dir_all(&skill_root).expect("existing skill root");
+    std::fs::write(skill_root.join("SKILL.md"), "# Before\n").expect("existing manifest");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "adoption CAS workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+
+    let (_, artifact_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": skill_root}),
+    )
+    .await;
+    let (artifact_status, artifact) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": skill_root,
+            "expectedPreviewHash": artifact_preview["previewHash"],
+            "idempotencyKey": artifact_preview["idempotencyKey"],
+            "confirmationNonce": artifact_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(artifact_status, StatusCode::OK, "{artifact}");
+    let (_, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/adoption/preview",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy"
+        }),
+    )
+    .await;
+    std::fs::write(skill_root.join("SKILL.md"), "# After\n").expect("mutated target");
+
+    let (commit_status, commit) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/adoption/commit",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy",
+            "expectedFingerprint": preview["targetFingerprint"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit}");
+    assert!(store
+        .list_skill_governance_materializations(
+            SkillGovernanceScope::Workspace,
+            &workspace.id.to_string(),
+        )
+        .await
+        .expect("materializations")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn import_copy_adoption_is_journaled_audited_and_rollback_safe() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    let skill_root = workspace_root.join(".fake/skills/reviewer");
+    std::fs::create_dir_all(&skill_root).expect("existing skill root");
+    let original = "---\nname: reviewer\ndescription: adoption fixture\n---\n";
+    std::fs::write(skill_root.join("SKILL.md"), original).expect("existing skill manifest");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "adoption workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+
+    let (artifact_preview_status, artifact_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": skill_root}),
+    )
+    .await;
+    assert_eq!(
+        artifact_preview_status,
+        StatusCode::OK,
+        "{artifact_preview}"
+    );
+    assert_eq!(artifact_preview["blocked"], false, "{artifact_preview}");
+    let (artifact_status, artifact) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": skill_root,
+            "expectedPreviewHash": artifact_preview["previewHash"],
+            "idempotencyKey": artifact_preview["idempotencyKey"],
+            "confirmationNonce": artifact_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(artifact_status, StatusCode::OK, "{artifact}");
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/adoption/preview",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy"
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["blocked"], false, "{preview}");
+    let (commit_status, adopted) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/adoption/commit",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy",
+            "expectedFingerprint": preview["targetFingerprint"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{adopted}");
+    assert_eq!(adopted["ownership"], "adopted");
+    assert!(skill_root.join(".cocli-managed").is_file());
+    let materialization_id = adopted["id"]
+        .as_str()
+        .expect("materialization id")
+        .parse()
+        .expect("materialization uuid");
+    assert_eq!(
+        store
+            .list_skill_governance_adoption_audit(materialization_id)
+            .await
+            .expect("adoption audit")
+            .len(),
+        1
+    );
+    let runs = store
+        .list_skill_governance_apply_runs(
+            SkillGovernanceScope::Workspace,
+            &workspace.id.to_string(),
+        )
+        .await
+        .expect("adoption runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].status,
+        cocli_store::SkillGovernanceApplyRunStatus::Succeeded
+    );
+    let actions = store
+        .list_skill_governance_apply_actions(runs[0].id)
+        .await
+        .expect("adoption actions");
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[0].status,
+        cocli_store::SkillGovernanceApplyActionStatus::Verified
+    );
+    let backup = PathBuf::from(actions[0].backup_path.as_deref().expect("adoption backup"));
+    assert!(backup.join("SKILL.md").is_file());
+    assert!(!backup.join(".cocli-managed").exists());
+
+    let (_, rollback_preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/skills/governance/runs/{}/rollback/preview",
+            runs[0].id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(rollback_preview["rollbackRequired"], true);
+    let (rollback_status, rollback) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/runs/{}/rollback", runs[0].id),
+        json!({
+            "idempotencyKey": rollback_preview["idempotencyKey"],
+            "confirmationNonce": rollback_preview["confirmationNonce"],
+            "confirmRollback": true
+        }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK, "{rollback}");
+    assert_eq!(rollback["rolledBack"], true, "{rollback}");
+    assert_eq!(rollback["recoveryRequired"], false, "{rollback}");
+    assert_eq!(
+        std::fs::read_to_string(skill_root.join("SKILL.md")).expect("restored skill"),
+        original
+    );
+    assert!(!skill_root.join(".cocli-managed").exists());
+    assert!(store
+        .get_skill_governance_materialization(materialization_id)
+        .await
+        .expect("materialization lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn managed_artifact_commit_rejects_source_changes_after_preview() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(source.join("SKILL.md"), "# Before\n").expect("source manifest");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), runtime);
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": source}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    std::fs::write(source.join("SKILL.md"), "# After\n").expect("mutated source manifest");
+
+    let (commit_status, commit) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": source,
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit}");
+    assert!(store
+        .list_skill_governance_managed_artifacts()
+        .await
+        .expect("artifacts")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn gc_commit_rejects_managed_store_content_drift() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(source.join("SKILL.md"), "# GC fixture\n").expect("source manifest");
+    let runtime_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: runtime_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), runtime);
+
+    let (_, artifact_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": source}),
+    )
+    .await;
+    let (artifact_status, artifact) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": source,
+            "expectedPreviewHash": artifact_preview["previewHash"],
+            "idempotencyKey": artifact_preview["idempotencyKey"],
+            "confirmationNonce": artifact_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(artifact_status, StatusCode::OK, "{artifact}");
+    let relative = artifact["storeRelativePath"]
+        .as_str()
+        .expect("store relative path");
+    let stored_manifest = runtime_root
+        .join("../managed-skills/v1/artifacts")
+        .join(relative)
+        .join("SKILL.md");
+    std::fs::write(&stored_manifest, "# Corrupted after preview\n")
+        .expect("corrupt managed artifact");
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/gc/preview",
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert!(preview["candidates"]
+        .as_array()
+        .is_some_and(|candidates| candidates
+            .iter()
+            .any(|candidate| candidate["entityId"] == artifact["id"])));
+    let (commit_status, commit) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/gc/commit",
+        json!({
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit}");
+    assert!(stored_manifest.exists(), "drifted bytes are not deleted");
+    assert_eq!(
+        store
+            .list_skill_governance_managed_artifacts()
+            .await
+            .expect("artifacts")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn gc_preview_excludes_foreign_materializations() {
+    let store = Store::in_memory().await.expect("store should open");
+    let artifact = store
+        .create_skill_governance_managed_artifact(NewSkillGovernanceManagedArtifact {
+            artifact_key: "foreign-gc-artifact".to_owned(),
+            artifact_kind: "adopted_skill".to_owned(),
+            source_provenance: json!({"kind": "test"}),
+            content_digest: "sha256:foreigncontent".to_owned(),
+            manifest_digest: "sha256:foreignmanifest".to_owned(),
+            schema_version: 1,
+            revision: "sha256:foreigncontent".to_owned(),
+            store_relative_path: "record-only/foreign/reviewer".to_owned(),
+            artifact: json!({"adoptionMode": "keep_foreign"}),
+            metadata: json!({}),
+        })
+        .await
+        .expect("artifact");
+    let materialization = store
+        .create_skill_governance_materialization(NewSkillGovernanceMaterialization {
+            artifact_id: artifact.id,
+            scope: SkillGovernanceScope::Workspace,
+            scope_id: "workspace-foreign".to_owned(),
+            target_path: "/tmp/foreign/reviewer".to_owned(),
+            target_runtime: "fake".to_owned(),
+            root_kind: SkillGovernanceMaterializationRootKind::Workspace,
+            installation_mode: SkillGovernanceInstallationMode::InPlace,
+            ownership: SkillGovernanceMaterializationOwnership::Foreign,
+            content_digest: "sha256:foreigncontent".to_owned(),
+            expected_destination: "/tmp/foreign/reviewer".to_owned(),
+            expected_fingerprint: "foreign-fingerprint".to_owned(),
+            verify_status: SkillGovernanceVerifyStatus::Verified,
+            receipt: json!({"mode": "keep_foreign"}),
+        })
+        .await
+        .expect("foreign materialization");
+    let app = router(
+        store,
+        Arc::new(GovernanceApplyRuntime {
+            workspace_root: tempdir()
+                .expect("runtime temp")
+                .path()
+                .join("runtime-workspaces"),
+        }),
+    );
+
+    let (status, preview) =
+        json_request(app, "POST", "/api/skills/governance/gc/preview", json!({})).await;
+
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(!preview["candidates"]
+        .as_array()
+        .is_some_and(|candidates| candidates
+            .iter()
+            .any(|candidate| candidate["entityType"] == "materialization"
+                && candidate["entityId"] == materialization.id.to_string())));
+}
+
+#[tokio::test]
+async fn workspace_governance_apply_materializes_managed_artifact_and_real_lockfile() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: workspace fixture\n---\n",
+    )
+    .expect("source manifest");
+    let digests = governance_artifact_digests(&source).expect("artifact digests");
+    let workspace_root = temp.path().join("project");
+    std::fs::create_dir_all(&workspace_root).expect("workspace root");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "governed workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+
+    let (profile_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        json!({
+            "schemaVersion": 1,
+            "name": "workspace-managed-local",
+            "skills": [{
+                "logicalIdentity": "reviewer",
+                "source": {"kind": "local", "location": source.to_string_lossy()},
+                "contentDigest": digests.content_digest,
+                "manifestDigest": digests.manifest_digest,
+                "targetRuntime": "fake",
+                "installScope": "workspace",
+                "installationMode": "copy",
+                "enabled": true,
+                "updatePolicy": "pinned",
+                "allowedSources": ["local"],
+                "riskPolicy": "trusted"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(profile_status, StatusCode::CREATED, "{profile}");
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({"profileId": profile_id, "scope": "workspace", "scopeId": workspace.id}),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED, "{binding}");
+    let request = json!({
+        "scope": "workspace",
+        "scopeId": workspace.id,
+        "workspaceId": workspace.id,
+        "force": true
+    });
+    let (plan_status, plan) =
+        json_request(app.clone(), "POST", "/api/skills/governance/plans", request).await;
+    assert_eq!(plan_status, StatusCode::CREATED, "{plan}");
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "{approved}");
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["highRisk"], true);
+    let installed = workspace_root.join(".fake/skills/reviewer/SKILL.md");
+    let lockfile = workspace_root.join(".cocli/skills.lock.json");
+    assert!(!installed.exists());
+    assert!(!lockfile.exists());
+    let (apply_status, applied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        json!({
+            "expectedVersion": approved["plan"]["version"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"],
+            "confirmHighRisk": true
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["applied"], true, "{applied}");
+    assert!(installed.exists());
+    assert!(lockfile.exists());
+    let lock_bytes = std::fs::read_to_string(&lockfile).expect("lockfile");
+    assert!(!lock_bytes.contains(source.to_string_lossy().as_ref()));
+    assert!(!lock_bytes.contains("credentialRef"));
+    assert_eq!(
+        store
+            .list_skill_governance_managed_artifacts()
+            .await
+            .expect("artifacts")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_skill_governance_materializations(
+                SkillGovernanceScope::Workspace,
+                &workspace.id.to_string(),
+            )
+            .await
+            .expect("materializations")
+            .len(),
+        1
+    );
+    let lock_record = store
+        .get_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+        )
+        .await
+        .expect("lock record")
+        .expect("persisted lock record");
+    assert_eq!(
+        lock_record.lock_hash,
+        plan["preview"]["content"]["lockfileHash"]
+    );
+
+    std::fs::write(&lockfile, "user edit after apply\n").expect("user lock edit");
+    let run_id = applied["run"]["id"].as_str().expect("run id");
+    let (_, rollback_preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback/preview"),
+        json!({}),
+    )
+    .await;
+    let (rollback_status, rollback) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback"),
+        json!({
+            "idempotencyKey": rollback_preview["idempotencyKey"],
+            "confirmationNonce": rollback_preview["confirmationNonce"],
+            "confirmRollback": true
+        }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK, "{rollback}");
+    assert_eq!(rollback["recoveryRequired"], true);
+    assert_eq!(
+        std::fs::read_to_string(lockfile).expect("preserved user lock edit"),
+        "user edit after apply\n"
+    );
+}
+
+#[tokio::test]
+async fn machine_governance_apply_uses_runtime_derived_user_root_without_an_agent() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: machine fixture\n---\n",
+    )
+    .expect("source manifest");
+    let digests = governance_artifact_digests(&source).expect("artifact digests");
+    let runtime_workspace_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: runtime_workspace_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), runtime);
+    let (_, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        json!({
+            "schemaVersion": 1,
+            "name": "machine-managed-local",
+            "skills": [{
+                "logicalIdentity": "reviewer",
+                "source": {"kind": "local", "location": source.to_string_lossy()},
+                "contentDigest": digests.content_digest,
+                "manifestDigest": digests.manifest_digest,
+                "targetRuntime": "fake",
+                "installScope": "machine",
+                "installationMode": "copy",
+                "enabled": true,
+                "updatePolicy": "pinned",
+                "allowedSources": ["local"],
+                "riskPolicy": "trusted"
+            }]
+        }),
+    )
+    .await;
+    let (_, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({"profileId": profile["id"], "scope": "machine", "scopeId": "machine"}),
+    )
+    .await;
+    let (_, plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        json!({"scope": "machine", "scopeId": "machine", "force": true}),
+    )
+    .await;
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (_, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    let (_, preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview["highRisk"], true);
+    let (apply_status, applied) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        json!({
+            "expectedVersion": approved["plan"]["version"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"],
+            "confirmHighRisk": true
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["applied"], true, "{applied}");
+    let installed = runtime_workspace_root.join("../machine-home/.fake/skills/reviewer/SKILL.md");
+    assert!(installed.exists());
+    assert_eq!(
+        store
+            .list_skill_governance_materializations(SkillGovernanceScope::Machine, "machine")
+            .await
+            .expect("machine materializations")
+            .len(),
+        1
+    );
+    assert!(store
+        .get_skill_governance_workspace_lockfile("machine", ".cocli/skills.lock.json")
+        .await
+        .expect("machine lock lookup")
+        .is_none());
 }
 
 #[tokio::test]

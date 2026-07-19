@@ -7,15 +7,16 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use cocli_api::{
-    RuntimeError, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence,
-    RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection,
-    RuntimeSkillIssue, RuntimeSkillSearchPath,
+    GovernanceScopeCapability, RuntimeError, RuntimeSkill, RuntimeSkillCompatibility,
+    RuntimeSkillEvidence, RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding,
+    RuntimeSkillInspection, RuntimeSkillIssue, RuntimeSkillSearchPath,
 };
 use cocli_driver_core::types::{
     NativeSkill, NativeSkillProbe, SkillCompatibility, SkillDiscoveryEvidence,
 };
 use cocli_runtime_pool::RuntimeRegistry;
 use cocli_store::{Agent, SkillLibraryFile};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::runtime::LocalRuntimeConfig;
@@ -265,6 +266,292 @@ pub(crate) fn governance_target(
         search_root,
         entry_path,
     })
+}
+
+pub(crate) fn governance_scope_capabilities(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    runtime: &str,
+    scope: &str,
+    resolved_scope_root: Option<&Path>,
+) -> Result<Vec<GovernanceScopeCapability>, RuntimeError> {
+    let (scope_root, paths) = match scope {
+        "machine" => {
+            let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+                RuntimeError::Unsupported("HOME is unavailable for machine Skill roots".to_owned())
+            })?;
+            let workspace_probe = config.workspace_root.clone();
+            let paths = skill_paths(registry, runtime, &workspace_probe)
+                .into_iter()
+                .filter(|path| !path.starts_with(&workspace_probe))
+                .collect::<Vec<_>>();
+            (home, paths)
+        }
+        "workspace" => {
+            let root = resolved_scope_root.ok_or_else(|| {
+                RuntimeError::Unsupported(
+                    "Workspace scope requires a resolved durable binding".to_owned(),
+                )
+            })?;
+            if !root.is_absolute() {
+                return Err(RuntimeError::Unsupported(
+                    "Workspace binding is not an absolute path".to_owned(),
+                ));
+            }
+            let paths = skill_paths(registry, runtime, root)
+                .into_iter()
+                .filter(|path| path.starts_with(root))
+                .collect::<Vec<_>>();
+            (root.to_path_buf(), paths)
+        }
+        _ => {
+            return Err(RuntimeError::Unsupported(format!(
+                "unsupported governed Skill scope: {scope}"
+            )))
+        }
+    };
+    Ok(governance_scope_capabilities_for_paths(
+        runtime,
+        scope,
+        &scope_root,
+        &paths,
+    ))
+}
+
+pub(crate) fn governance_target_in_scope(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    runtime: &str,
+    scope: &str,
+    resolved_scope_root: Option<&Path>,
+    skill_name: &str,
+) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+    validate_skill_name(skill_name)?;
+    if compatibility(registry, runtime) == RuntimeSkillCompatibility::Unsupported {
+        return Err(RuntimeError::Unsupported(format!(
+            "{runtime} does not support skills"
+        )));
+    }
+    let mut capabilities =
+        governance_scope_capabilities(registry, config, runtime, scope, resolved_scope_root)?;
+    capabilities.sort_by_key(|capability| capability.root_kind == "shared");
+    let capability = capabilities
+        .into_iter()
+        .find(|capability| capability.supported)
+        .ok_or_else(|| {
+            RuntimeError::Unsupported(format!(
+                "{runtime} exposes no automatically writable {scope} Skill root"
+            ))
+        })?;
+    let search_root = PathBuf::from(capability.path);
+    let scope_root = match scope {
+        "machine" => std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            RuntimeError::Unsupported("HOME is unavailable for machine Skill roots".to_owned())
+        })?,
+        "workspace" => resolved_scope_root
+            .ok_or_else(|| {
+                RuntimeError::Unsupported(
+                    "Workspace scope requires a resolved durable binding".to_owned(),
+                )
+            })?
+            .to_path_buf(),
+        _ => unreachable!("scope was checked by governance_scope_capabilities"),
+    };
+    let entry_path = safe_child_path(&search_root, skill_name)?;
+    Ok(cocli_api::GovernanceSkillTarget {
+        scope_root,
+        search_root,
+        entry_path,
+    })
+}
+
+fn governance_scope_capabilities_for_paths(
+    runtime: &str,
+    scope: &str,
+    scope_root: &Path,
+    paths: &[PathBuf],
+) -> Vec<GovernanceScopeCapability> {
+    let canonical_scope = fs::canonicalize(scope_root).ok();
+    let mut seen = HashSet::new();
+    let mut capabilities = Vec::new();
+    for path in paths {
+        let canonical = fs::canonicalize(path).ok();
+        let lexical_key = normalized_path_alias_key(&lexical_normalize(path));
+        let canonical_key = canonical
+            .as_ref()
+            .map(|resolved| normalized_path_alias_key(resolved));
+        if seen.contains(&lexical_key)
+            || canonical_key.as_ref().is_some_and(|key| seen.contains(key))
+        {
+            continue;
+        }
+        seen.insert(lexical_key);
+        if let Some(key) = canonical_key {
+            seen.insert(key);
+        }
+        let exists = fs::symlink_metadata(path).is_ok();
+        let exact_symlink =
+            fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        let reserved = path
+            .components()
+            .next_back()
+            .is_some_and(|component| component.as_os_str() == OsStr::new(".system"));
+        let legacy_commands = path
+            .components()
+            .next_back()
+            .is_some_and(|component| component.as_os_str() == OsStr::new("commands"));
+        let within_scope = canonical.as_ref().map_or_else(
+            || path.starts_with(scope_root),
+            |resolved| {
+                canonical_scope
+                    .as_ref()
+                    .is_some_and(|root| resolved.starts_with(root))
+            },
+        );
+        let component_symlink = !exact_symlink && contains_symlink_component(scope_root, path);
+        let writable = nearest_existing_directory(path)
+            .as_deref()
+            .is_some_and(directory_is_writable);
+        let same_device = nearest_existing_directory(path)
+            .as_deref()
+            .is_some_and(|existing| directories_share_device(scope_root, existing));
+        let (status, supported, blocked_reason) = if reserved {
+            (
+                "reserved",
+                false,
+                Some("runtime_managed_system_root".to_owned()),
+            )
+        } else if legacy_commands {
+            ("blocked", false, Some("legacy_commands_root".to_owned()))
+        } else if exact_symlink {
+            (
+                "blocked",
+                false,
+                Some("whole_root_symlink_takeover".to_owned()),
+            )
+        } else if component_symlink {
+            ("blocked", false, Some("symlink_escape".to_owned()))
+        } else if !within_scope {
+            ("blocked", false, Some("root_outside_scope".to_owned()))
+        } else if !writable {
+            ("read_only", false, Some("root_not_writable".to_owned()))
+        } else if !same_device {
+            (
+                "blocked",
+                false,
+                Some("cross_filesystem_atomic_rename".to_owned()),
+            )
+        } else if exists {
+            ("supported", true, None)
+        } else {
+            ("missing", true, None)
+        };
+        capabilities.push(GovernanceScopeCapability {
+            runtime: runtime.to_owned(),
+            scope: scope.to_owned(),
+            root_kind: if is_shared_skill_root(path) {
+                "shared"
+            } else {
+                "runtime_specific"
+            }
+            .to_owned(),
+            path: path.to_string_lossy().into_owned(),
+            status: status.to_owned(),
+            exists,
+            writable,
+            atomic_rename: supported,
+            supported,
+            evidence: "runtime_driver_search_path".to_owned(),
+            blocked_reason,
+        });
+    }
+    capabilities
+}
+
+fn normalized_path_alias_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn is_shared_skill_root(path: &Path) -> bool {
+    path.ends_with(Path::new(".agents/skills"))
+}
+
+fn nearest_existing_directory(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.is_dir() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+fn contains_symlink_component(scope_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(scope_root) else {
+        return false;
+    };
+    let mut current = scope_root.to_path_buf();
+    if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return true;
+    }
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn directory_is_writable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.permissions().mode() & 0o222 != 0)
+}
+
+#[cfg(unix)]
+fn directories_share_device(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let left = nearest_existing_directory(left)
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.dev());
+    let right = nearest_existing_directory(right)
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.dev());
+    left.is_some() && left == right
+}
+
+#[cfg(not(unix))]
+fn directory_is_writable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+}
+
+#[cfg(not(unix))]
+fn directories_share_device(_left: &Path, _right: &Path) -> bool {
+    true
 }
 
 pub(crate) async fn uninstall(
@@ -1753,5 +2040,152 @@ mod tests {
         assert_eq!(grouped.len(), 1);
         assert_eq!(grouped[0].related_paths.len(), 2);
         assert_eq!(grouped[0].related_codes.len(), 2);
+    }
+
+    #[test]
+    fn governance_scope_capabilities_classify_runtime_shared_and_reserved_roots() {
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let paths = vec![
+            workspace.join(".codex/skills"),
+            workspace.join(".agents/skills"),
+            workspace.join(".codex/skills/.system"),
+        ];
+
+        let capabilities =
+            governance_scope_capabilities_for_paths("codex", "workspace", &workspace, &paths);
+
+        assert_eq!(capabilities.len(), 3);
+        assert_eq!(capabilities[0].root_kind, "runtime_specific");
+        assert!(capabilities[0].supported);
+        assert_eq!(capabilities[1].root_kind, "shared");
+        assert!(capabilities[1].supported);
+        assert_eq!(capabilities[2].status, "reserved");
+        assert!(!capabilities[2].supported);
+        assert_eq!(
+            capabilities[2].blocked_reason.as_deref(),
+            Some("runtime_managed_system_root")
+        );
+        assert!(!workspace.exists(), "capability inspection is read-only");
+    }
+
+    #[test]
+    fn governance_scope_capabilities_reject_unsupported_scope() {
+        let temp = tempdir().expect("temp directory");
+        let registry = Arc::new(RuntimeRegistry::new());
+        let config = test_config(temp.path());
+        let error = governance_scope_capabilities(
+            &registry,
+            &config,
+            "codex",
+            "channel",
+            Some(temp.path()),
+        )
+        .expect_err("unsupported scope should fail");
+
+        assert!(
+            matches!(error, RuntimeError::Unsupported(message) if message.contains("unsupported governed Skill scope"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governance_scope_capabilities_report_read_only_roots_without_creating_targets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let root = workspace.join(".fake/skills");
+        fs::create_dir_all(&root).expect("skill root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555))
+            .expect("read-only root permissions");
+
+        let capabilities =
+            governance_scope_capabilities_for_paths("fake", "workspace", &workspace, &[root]);
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].status, "read_only");
+        assert!(!capabilities[0].supported);
+        assert_eq!(
+            capabilities[0].blocked_reason.as_deref(),
+            Some("root_not_writable")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governance_scope_capabilities_deduplicate_aliases_and_block_root_takeover() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside/skills");
+        fs::create_dir_all(&outside).expect("outside root");
+        fs::create_dir_all(&workspace).expect("workspace root");
+        symlink(&outside, workspace.join("linked-skills")).expect("root alias");
+        let paths = vec![
+            workspace.join("linked-skills"),
+            workspace.join("linked-skills/../linked-skills"),
+        ];
+
+        let capabilities =
+            governance_scope_capabilities_for_paths("fake", "workspace", &workspace, &paths);
+
+        assert_eq!(capabilities.len(), 1, "canonical aliases are deduplicated");
+        assert_eq!(capabilities[0].status, "blocked");
+        assert!(!capabilities[0].supported);
+        assert_eq!(
+            capabilities[0].blocked_reason.as_deref(),
+            Some("whole_root_symlink_takeover")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governance_scope_capabilities_block_component_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace root");
+        fs::create_dir_all(&outside).expect("outside root");
+        symlink(&outside, workspace.join("linked")).expect("component symlink");
+
+        let capabilities = governance_scope_capabilities_for_paths(
+            "fake",
+            "workspace",
+            &workspace,
+            &[workspace.join("linked/skills")],
+        );
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].status, "blocked");
+        assert!(!capabilities[0].supported);
+        assert_eq!(
+            capabilities[0].blocked_reason.as_deref(),
+            Some("symlink_escape")
+        );
+    }
+
+    #[test]
+    fn governance_scope_capabilities_deduplicate_unicode_and_case_aliases() {
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let composed = workspace.join("Caf\u{e9}/Skills");
+        let decomposed = workspace.join("Cafe\u{301}/skills");
+
+        let capabilities = governance_scope_capabilities_for_paths(
+            "fake",
+            "workspace",
+            &workspace,
+            &[composed, decomposed],
+        );
+
+        assert_eq!(
+            capabilities.len(),
+            1,
+            "Unicode/case aliases are deduplicated"
+        );
     }
 }

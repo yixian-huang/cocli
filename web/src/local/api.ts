@@ -271,6 +271,10 @@ export interface MachineSkillDoctor {
 
 export type SkillGovernanceScope = 'machine' | 'workspace' | 'agent'
 export type SkillGovernanceInstallMode = 'copy' | 'symlink' | 'native' | 'manual'
+export type SkillGovernanceMaterializationMode = 'copy' | 'symlink' | 'in_place'
+export type SkillGovernanceMaterializationOwnership = 'managed' | 'adopted' | 'foreign' | 'unmanaged'
+export type SkillGovernanceMaterializationRootKind = 'machine' | 'workspace' | 'agent'
+export type SkillGovernanceVerifyStatus = 'unknown' | 'verified' | 'drifted' | 'missing'
 export type SkillGovernanceUpdatePolicy = 'pinned' | 'manual' | 'track_revision'
 export type SkillGovernanceRiskPolicy = 'trusted' | 'allowlisted' | 'approval_required' | 'blocked'
 export type SkillGovernancePlanStatus = 'draft' | 'approved' | 'rejected' | 'stale'
@@ -666,6 +670,203 @@ export interface SkillGovernanceRollbackResponse {
   run: SkillGovernanceRun
   rolledBack: boolean
   recoveryRequired: boolean
+}
+
+export interface SkillGovernanceScopeCapability {
+  runtime: string
+  scope: SkillGovernanceScope
+  rootKind: string
+  path: string
+  status: string
+  exists: boolean
+  writable: boolean
+  atomicRename: boolean
+  supported: boolean
+  evidence: string
+  blockedReason?: string | null
+}
+
+export interface SkillGovernanceDiagnostic {
+  subject: string
+  phase: string
+  errorType: string
+  message: string
+  observedAt: string
+}
+
+export interface SkillGovernanceScopeCapabilitiesResponse {
+  observedAt: string
+  capabilities: SkillGovernanceScopeCapability[]
+  diagnostics: SkillGovernanceDiagnostic[]
+}
+
+export interface SkillGovernanceManagedArtifact {
+  id: string
+  artifactKey: string
+  artifactKind: string
+  sourceProvenance: Record<string, unknown>
+  contentDigest: string
+  manifestDigest: string
+  schemaVersion: number
+  revision: string
+  storeRelativePath: string
+  artifact: Record<string, unknown>
+  metadata: Record<string, unknown>
+  version: number
+  createdAt: string
+  referenced?: boolean
+}
+
+export interface SkillGovernanceManagedArtifactPreviewRequest {
+  sourceKind: 'local' | 'library'
+  localPath?: string
+  libraryId?: string
+  expectedContentDigest?: string
+  expectedManifestDigest?: string
+}
+
+export interface SkillGovernanceManagedArtifactPreview {
+  sourceKind: string
+  source: Record<string, unknown>
+  artifactKey: string
+  contentDigest: string
+  manifestDigest: string
+  revision: string
+  storeRelativePath: string
+  previewHash: string
+  idempotencyKey?: string
+  confirmationNonce?: string
+  hazards: string[]
+  blocked: boolean
+}
+
+export interface SkillGovernanceManagedArtifactCommitRequest extends SkillGovernanceManagedArtifactPreviewRequest {
+  expectedPreviewHash: string
+  confirmationNonce: string
+  idempotencyKey: string
+}
+
+export interface SkillGovernanceMaterialization {
+  id: string
+  artifactId: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  targetPath: string
+  targetRuntime: string
+  rootKind: SkillGovernanceMaterializationRootKind
+  installationMode: SkillGovernanceMaterializationMode
+  ownership: SkillGovernanceMaterializationOwnership
+  contentDigest: string
+  expectedDestination: string
+  expectedFingerprint: string
+  verifyStatus: SkillGovernanceVerifyStatus
+  receipt: Record<string, unknown>
+  version: number
+  adoptedAt?: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillGovernanceAdoptionRequest {
+  runtime: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  skillName: string
+  mode?: 'record_only' | 'import_copy' | 'keep_foreign'
+  expectedFingerprint?: string
+  expectedVersion?: number
+}
+
+export interface SkillGovernanceAdoptionPreview {
+  runtime: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  skillName: string
+  targetPath: string
+  targetFingerprint: string
+  contentDigest?: string | null
+  manifestDigest?: string | null
+  existingOwnership?: SkillGovernanceMaterializationOwnership | null
+  hazards: string[]
+  blocked: boolean
+  previewHash: string
+  idempotencyKey?: string
+  confirmationNonce?: string
+}
+
+export interface SkillGovernanceAdoptionCommitRequest extends SkillGovernanceAdoptionRequest {
+  expectedPreviewHash: string
+  confirmationNonce: string
+  idempotencyKey: string
+}
+
+export interface SkillGovernanceWorkspaceLockfileRecord {
+  id: string
+  workspaceId: string
+  lockfilePath: string
+  lockHash: string
+  expectedDiskFingerprint: string
+  expectedDiskHash: string
+  document: Record<string, unknown>
+  lastBackupPath?: string | null
+  lastBackupHash?: string | null
+  lastReceipt: Record<string, unknown>
+  restoreMetadata: Record<string, unknown>
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillGovernanceWorkspaceLockfileInspect {
+  workspaceId: string
+  lockfilePath: string
+  diskHash: string
+  diskFingerprint: string
+  stored?: SkillGovernanceWorkspaceLockfileRecord | null
+  exists: boolean
+}
+
+export interface SkillGovernanceLockfileRestoreRequest {
+  workspaceId: string
+  lockfilePath?: string
+  expectedVersion: number
+  expectedDiskHash: string
+}
+
+export interface SkillGovernanceLockfileRestorePreview {
+  workspaceId: string
+  lockfilePath: string
+  beforeHash: string
+  afterHash: string
+  bytes: number
+  previewHash: string
+  idempotencyKey?: string
+  confirmationNonce?: string
+}
+
+export interface SkillGovernanceLockfileRestoreCommitRequest extends SkillGovernanceLockfileRestoreRequest {
+  expectedPreviewHash: string
+  confirmationNonce: string
+  idempotencyKey: string
+}
+
+export interface SkillGovernanceGcCandidate {
+  entityType: 'managed_artifact' | 'materialization' | string
+  entityId: string
+  reason: string
+}
+
+export interface SkillGovernanceGcPreviewResponse {
+  candidates: SkillGovernanceGcCandidate[]
+  previewHash: string
+  idempotencyKey?: string
+  confirmationNonce?: string
+}
+
+export interface SkillGovernanceGcCommitRequest {
+  expectedPreviewHash: string
+  confirmationNonce: string
+  idempotencyKey: string
 }
 
 export interface SkillFileEntry {
@@ -1102,6 +1303,82 @@ export const localApi = {
         body: JSON.stringify(input),
       },
     ),
+  getGovernanceScopeCapabilities: (input?: {
+    runtime?: string
+    scope?: SkillGovernanceScope
+    workspaceId?: string
+    agentId?: string
+  }) => {
+    const params = new URLSearchParams()
+    if (input?.runtime) params.set('runtime', input.runtime)
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.workspaceId) params.set('workspaceId', input.workspaceId)
+    if (input?.agentId) params.set('agentId', input.agentId)
+    const query = params.toString()
+    return request<SkillGovernanceScopeCapabilitiesResponse>(
+      `/api/skills/governance/scopes${query ? `?${query}` : ''}`,
+    )
+  },
+  listGovernanceManagedArtifacts: () =>
+    request<SkillGovernanceManagedArtifact[]>('/api/skills/governance/managed/artifacts'),
+  previewGovernanceManagedArtifact: (input: SkillGovernanceManagedArtifactPreviewRequest) =>
+    request<SkillGovernanceManagedArtifactPreview>('/api/skills/governance/managed/artifacts/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  commitGovernanceManagedArtifact: (input: SkillGovernanceManagedArtifactCommitRequest) =>
+    request<SkillGovernanceManagedArtifact>('/api/skills/governance/managed/artifacts/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listGovernanceMaterializations: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernanceMaterialization[]>(
+      `/api/skills/governance/materializations?${params}`,
+    )
+  },
+  previewGovernanceAdoption: (input: SkillGovernanceAdoptionRequest) =>
+    request<SkillGovernanceAdoptionPreview>('/api/skills/governance/adoption/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  commitGovernanceAdoption: (input: SkillGovernanceAdoptionCommitRequest) =>
+    request<SkillGovernanceMaterialization>('/api/skills/governance/adoption/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  inspectGovernanceWorkspaceLockfile: (workspaceId: string, lockfilePath?: string) => {
+    const params = new URLSearchParams({ workspaceId })
+    if (lockfilePath) params.set('lockfilePath', lockfilePath)
+    return request<SkillGovernanceWorkspaceLockfileInspect>(
+      `/api/skills/governance/workspace-lockfile?${params}`,
+    )
+  },
+  previewGovernanceLockfileRestore: (input: SkillGovernanceLockfileRestoreRequest) =>
+    request<SkillGovernanceLockfileRestorePreview>(
+      '/api/skills/governance/workspace-lockfile/restore/preview',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  restoreGovernanceLockfile: (input: SkillGovernanceLockfileRestoreCommitRequest) =>
+    request<SkillGovernanceLockfileRestorePreview>(
+      '/api/skills/governance/workspace-lockfile/restore',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  previewGovernanceGc: () =>
+    request<SkillGovernanceGcPreviewResponse>('/api/skills/governance/gc/preview', {
+      method: 'POST',
+    }),
+  commitGovernanceGc: (input: SkillGovernanceGcCommitRequest) =>
+    request<SkillGovernanceGcPreviewResponse>('/api/skills/governance/gc/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
   listTasks: (channelId: string, status?: TaskStatus) =>
     request<Task[]>(
       `/api/channels/${channelId}/tasks${status ? `?status=${encodeURIComponent(status)}` : ''}`,

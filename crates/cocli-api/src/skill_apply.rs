@@ -58,6 +58,12 @@ pub(crate) struct MutationReceipt {
     pub backup_manifest_ref: String,
     pub staging_ref: Option<String>,
     pub installation_mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_artifact_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed_artifact_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub governance_state_before: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug)]
@@ -67,9 +73,30 @@ pub(crate) struct PreparedMutation {
     receipt: MutationReceipt,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PreparedFileMutation {
+    target: PathBuf,
+    bytes: Vec<u8>,
+    receipt: MutationReceipt,
+}
+
+impl PreparedFileMutation {
+    pub(crate) fn receipt(&self) -> &MutationReceipt {
+        &self.receipt
+    }
+
+    pub(crate) fn receipt_mut(&mut self) -> &mut MutationReceipt {
+        &mut self.receipt
+    }
+}
+
 impl PreparedMutation {
     pub(crate) fn receipt(&self) -> &MutationReceipt {
         &self.receipt
+    }
+
+    pub(crate) fn receipt_mut(&mut self) -> &mut MutationReceipt {
+        &mut self.receipt
     }
 }
 
@@ -258,6 +285,9 @@ pub(crate) fn prepare_atomic_mutation(
                 MutationMode::Remove => "remove",
             }
             .to_owned(),
+            managed_artifact_ref: None,
+            managed_artifact_fingerprint: None,
+            governance_state_before: None,
         },
     })
 }
@@ -321,13 +351,164 @@ pub(crate) fn activate_atomic_mutation(prepared: &PreparedMutation) -> Result<()
     Ok(())
 }
 
+pub(crate) fn prepare_atomic_file_mutation(
+    scope_root: &Path,
+    target: &Path,
+    expected_before: &str,
+    bytes: &[u8],
+    run_id: Uuid,
+    action_id: Uuid,
+) -> Result<PreparedFileMutation, String> {
+    if !target.starts_with(scope_root) || target.file_name().is_none() {
+        return Err("governed file target is outside its canonical scope".to_owned());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| "governed file target has no parent".to_owned())?;
+    create_dir_all_no_symlink(scope_root, parent)?;
+    let before_fingerprint = fingerprint_path(target)?;
+    if before_fingerprint != expected_before {
+        return Err("governed file changed before preparation CAS".to_owned());
+    }
+    let control_dir = scope_root
+        .join(".cocli/governance/runs")
+        .join(run_id.to_string())
+        .join(action_id.to_string());
+    create_dir_all_no_symlink(scope_root, &control_dir)?;
+    let backup_path = control_dir.join("backup-file");
+    let manifest_path = control_dir.join("backup-manifest.json");
+    write_json_sync(&manifest_path, &inspect_backup(target)?)?;
+    let filename = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "governed file target name is invalid".to_owned())?;
+    let staging_path = parent.join(format!(".{filename}.staging.{action_id}"));
+    Ok(PreparedFileMutation {
+        target: target.to_path_buf(),
+        bytes: bytes.to_vec(),
+        receipt: MutationReceipt {
+            target: target.to_string_lossy().into_owned(),
+            before_fingerprint: before_fingerprint.clone(),
+            after_fingerprint: digest_bytes(bytes),
+            backup_ref: (before_fingerprint != "missing")
+                .then(|| backup_path.to_string_lossy().into_owned()),
+            quarantine_ref: None,
+            backup_manifest_ref: manifest_path.to_string_lossy().into_owned(),
+            staging_ref: Some(staging_path.to_string_lossy().into_owned()),
+            installation_mode: "lockfile".to_owned(),
+            managed_artifact_ref: None,
+            managed_artifact_fingerprint: None,
+            governance_state_before: None,
+        },
+    })
+}
+
+pub(crate) fn prepare_managed_artifact_mutation(
+    managed_root: &Path,
+    artifact: &ArtifactBundle,
+    run_id: Uuid,
+    action_id: Uuid,
+) -> Result<(Option<PreparedMutation>, ArtifactBundle, String), String> {
+    let digest_name = artifact
+        .content_digest
+        .strip_prefix("sha256:")
+        .ok_or_else(|| "managed artifact digest is invalid".to_owned())?;
+    validate_name(digest_name)?;
+    let stored_path = managed_root.join(digest_name);
+    let current = fingerprint_path(&stored_path)?;
+    if current != "missing" && current != artifact.content_digest {
+        return Err("managed artifact store entry failed immutable digest CAS".to_owned());
+    }
+    let mut stored = artifact.clone();
+    stored.canonical_source = Some(stored_path.clone());
+    if current == artifact.content_digest {
+        return Ok((None, stored, digest_name.to_owned()));
+    }
+    let scope_root = managed_root
+        .parent()
+        .ok_or_else(|| "managed artifact root has no cocli-owned parent".to_owned())?
+        .to_path_buf();
+    let target = GovernanceSkillTarget {
+        scope_root,
+        search_root: managed_root.to_path_buf(),
+        entry_path: stored_path,
+    };
+    let mutation = prepare_atomic_mutation(
+        &target,
+        MutationMode::Copy,
+        Some(artifact),
+        run_id,
+        action_id,
+    )?;
+    Ok((Some(mutation), stored, digest_name.to_owned()))
+}
+
+pub(crate) fn backup_atomic_file_mutation(prepared: &PreparedFileMutation) -> Result<(), String> {
+    let current = fingerprint_path(&prepared.target)?;
+    if current != prepared.receipt.before_fingerprint {
+        return Err("governed file changed before backup CAS".to_owned());
+    }
+    if let Some(backup_ref) = &prepared.receipt.backup_ref {
+        let backup_path = Path::new(backup_ref);
+        if fs::symlink_metadata(backup_path).is_ok() {
+            return Err("governed file backup path already exists".to_owned());
+        }
+        fs::rename(&prepared.target, backup_path)
+            .map_err(|error| safe_io_error("move governed file to backup", &error))?;
+        if fingerprint_path(backup_path)? != prepared.receipt.before_fingerprint {
+            let _ = fs::rename(backup_path, &prepared.target);
+            return Err("governed file changed during backup CAS".to_owned());
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn stage_atomic_file_mutation(prepared: &PreparedFileMutation) -> Result<(), String> {
+    let staging = prepared
+        .receipt
+        .staging_ref
+        .as_deref()
+        .ok_or_else(|| "governed file staging path is unavailable".to_owned())?;
+    if fs::symlink_metadata(staging).is_ok() {
+        return Err("governed file staging path already exists".to_owned());
+    }
+    let mut file = File::create(staging)
+        .map_err(|error| safe_io_error("create governed file staging", &error))?;
+    file.write_all(&prepared.bytes)
+        .map_err(|error| safe_io_error("write governed file staging", &error))?;
+    file.sync_all()
+        .map_err(|error| safe_io_error("sync governed file staging", &error))
+}
+
+pub(crate) fn activate_atomic_file_mutation(prepared: &PreparedFileMutation) -> Result<(), String> {
+    let staging = prepared
+        .receipt
+        .staging_ref
+        .as_deref()
+        .ok_or_else(|| "governed file staging path is unavailable".to_owned())?;
+    fs::rename(staging, &prepared.target)
+        .map_err(|error| safe_io_error("atomically activate governed file", &error))?;
+    sync_directory(
+        prepared
+            .target
+            .parent()
+            .ok_or_else(|| "governed file target has no parent".to_owned())?,
+    )?;
+    if fingerprint_path(&prepared.target)? != prepared.receipt.after_fingerprint {
+        return Err("governed file failed post-write fingerprint verification".to_owned());
+    }
+    Ok(())
+}
+
 pub(crate) fn rollback_atomic_mutation(receipt: &MutationReceipt) -> Result<(), String> {
     let target = PathBuf::from(&receipt.target);
     if let Some(staging_ref) = &receipt.staging_ref {
         remove_any(Path::new(staging_ref))?;
     }
     let current = fingerprint_path(&target)?;
-    if current == receipt.before_fingerprint {
+    if current == receipt.before_fingerprint
+        && (receipt.before_fingerprint != receipt.after_fingerprint || receipt.backup_ref.is_none())
+    {
         return Ok(());
     }
     let interrupted_after_backup = current == "missing"
@@ -396,7 +577,12 @@ pub(crate) fn fingerprint_path(path: &Path) -> Result<String, String> {
     if metadata.is_dir() {
         return Ok(load_local_artifact(path)?.content_digest);
     }
-    Err("governed Skill target has an unsupported file type".to_owned())
+    if metadata.is_file() {
+        let bytes = fs::read(path)
+            .map_err(|error| safe_io_error("read governed file fingerprint", &error))?;
+        return Ok(digest_bytes(&bytes));
+    }
+    Err("governed target has an unsupported file type".to_owned())
 }
 
 pub(crate) fn is_safe_removal_candidate(path: &Path) -> Result<bool, String> {
@@ -449,7 +635,18 @@ fn inspect_backup(path: &Path) -> Result<BackupManifest, String> {
                 Some(artifact.manifest_digest),
             )
         }
-        Some(_) => return Err("governed Skill target has an unsupported file type".to_owned()),
+        Some(metadata) if metadata.is_file() => {
+            let bytes = fs::read(path)
+                .map_err(|error| safe_io_error("read governed file backup", &error))?;
+            (
+                "file".to_owned(),
+                Some(file_mode(&metadata)),
+                None,
+                Some(digest_bytes(&bytes)),
+                None,
+            )
+        }
+        Some(_) => return Err("governed target has an unsupported file type".to_owned()),
     };
     Ok(BackupManifest {
         schema_version: 1,
@@ -1043,5 +1240,36 @@ mod tests {
         assert!(fingerprint_path(&first)
             .expect_err("circular link must not fingerprint")
             .contains("resolve governed Skill symlink"));
+    }
+
+    #[test]
+    fn workspace_lockfile_write_restore_is_atomic_stable_and_cas_safe() {
+        let temp = tempdir().expect("temp");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("workspace");
+        let lockfile = workspace.join(".cocli/skills.lock.json");
+        let first_bytes = b"{\n  \"schemaVersion\": 1,\n  \"entries\": []\n}\n";
+        let prepared = prepare_atomic_file_mutation(
+            &workspace,
+            &lockfile,
+            "missing",
+            first_bytes,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        )
+        .expect("prepare lockfile");
+        backup_atomic_file_mutation(&prepared).expect("backup lockfile");
+        stage_atomic_file_mutation(&prepared).expect("stage lockfile");
+        activate_atomic_file_mutation(&prepared).expect("activate lockfile");
+        assert_eq!(fs::read(&lockfile).expect("lockfile bytes"), first_bytes);
+
+        fs::write(&lockfile, b"user edit\n").expect("user edit");
+        assert!(rollback_atomic_mutation(prepared.receipt())
+            .expect_err("rollback must preserve later user edits")
+            .contains("changed after apply"));
+
+        fs::write(&lockfile, first_bytes).expect("restore applied bytes");
+        rollback_atomic_mutation(prepared.receipt()).expect("restore missing lockfile");
+        assert!(!lockfile.exists());
     }
 }

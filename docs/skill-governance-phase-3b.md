@@ -31,24 +31,26 @@ diagnostics so the UI can show why an approval no longer applies.
 
 ## Automatic support matrix
 
-Phase 3B intentionally supports only the safe local subset:
+The current safe local writer, extended by Phase 3C, supports:
 
 | Action/source | Automatic behavior |
 |---|---|
-| `install` / `update` with `installationMode: copy` | Supported for Agent scope when the source is trusted local, cocli-managed, library, or vendored; content and manifest digests must match desired state. |
-| `install` / `update` with `installationMode: symlink` | Supported for Agent scope and trusted local sources; the symlink target is canonicalized and its content fingerprint is verified. Vendored artifacts cannot be symlinked. |
-| `remove` | Supported only when the existing target is missing, a symlink, or a cocli-managed directory containing the governance marker. Removal moves the entry into quarantine/backup; it is not deleted irreversibly. |
-| `lockfile_update` | Supported as a Store-only journaled lock snapshot. No workspace lockfile is written in this first write path. |
+| `install` / `update` with `installationMode: copy` | Supported for machine, Workspace, and Agent scopes when the Runtime driver exposes a supported canonical root and the local/cocli/library/vendored artifact matches its content and manifest digests. The immutable managed store and materialization receipt are recorded. |
+| `install` / `update` with `installationMode: symlink` | Supported for the same canonical scopes and eligible local/cocli/library/vendored artifacts after they are placed in the immutable managed store. Both store source and target are canonicalized; only the per-Skill entry is linked. |
+| `remove` | Supported only for hash-matched `managed`/`adopted` materializations; legacy Agent-owned entries retain the compatibility check. Removal moves the entry into same-filesystem quarantine/backup. |
+| `lockfile_update` | Workspace scope writes `.cocli/skills.lock.json` using CAS, backup, fsync, atomic rename, journal, and rollback. Machine and Agent scopes retain immutable Store snapshots. |
 | `enable` / `disable` | Blocked; there is no Runtime-neutral native-safe write contract. |
 | `native` / `manual` install mode | Blocked/manual. |
-| `machine` or `workspace` scope | Blocked/manual for automatic writes. |
+| `machine` / `workspace` scope | Supported only when current Runtime capability evidence reports an in-scope, writable, same-filesystem canonical root. These scopes are always high-risk and require preview-bound confirmation. |
 | Git, HTTP(S), Registry, Marketplace, private, credentialed, or script-backed sources | Blocked/manual. |
 | Unknown or unsupported evidence | Blocked/manual. |
 
-The target directory never comes from user input. The Runtime driver resolves a
-canonical `scopeRoot`, `searchRoot`, and target entry path for the Agent. Apply
-then verifies that the search root is inside the scope root and that the target
-is a direct child with a safe Skill name.
+The target directory never comes from an arbitrary apply request. The Runtime
+driver resolves a canonical `scopeRoot`, `searchRoot`, and direct per-Skill
+entry for machine, Workspace, or Agent scope. Workspace scope additionally
+requires a durable local Workspace binding. Apply rechecks root capability and
+rejects reserved, escaped, read-only, whole-root-symlink, and cross-filesystem
+targets.
 
 ## Trusted artifact boundary
 
@@ -84,10 +86,10 @@ staging, activation, and each compensating rollback action. Expired locks can
 be taken over and audited.
 
 For each filesystem action, apply records and uses a run/action control
-directory under the Agent scope:
+directory under the resolved scope:
 
 ```text
-<agent-scope>/.cocli/governance/runs/<run-id>/<action-id>/
+<scope-root>/.cocli/governance/runs/<run-id>/<action-id>/
 ```
 
 The control directory stores the backup entry and backup manifest. Backup
@@ -148,8 +150,8 @@ a force-fresh inventory/doctor observation. Verification compares:
 - fresh inventory availability.
 
 A successful verify means the Skill is installed or configured on disk for the
-resolved Agent Runtime search root. It does not mean a running Runtime Session
-loaded the Skill. Without a session-bound native contract, run evidence keeps
+resolved Runtime search root. It does not mean a running Runtime Session loaded
+the Skill. Without a session-bound native contract, run evidence keeps
 `sessionEffective` as `unknown` and marks `newSessionRequired` for applied
 changes. cocli does not restart, stop, or reload active Codex, Cursor, Grok,
 Claude, or other Runtime Sessions during Phase 3B apply.
@@ -210,12 +212,20 @@ flows. Governance adds apply and recovery views that show:
 The UI shows summaries, IDs, fingerprints, and provenance. It does not display
 source file bodies or private credential material.
 
+## Phase 3C handoff
+
+Phase 3C extends the Phase 3B local write foundation with canonical
+machine/user, workspace/project, and Agent scope records, immutable managed
+artifacts, per-target materializations, real Workspace lockfile writes and
+restores, three-mode adoption, reference-gated GC, and their HTTP/UI surfaces.
+See
+[docs/skill-governance-phase-3c.md](skill-governance-phase-3c.md).
+
 ## Safety limits and remaining work
 
-Phase 3B still blocks or defers these areas:
+The current governed writer still blocks or defers these areas:
 
-- machine, workspace, user-global, or arbitrary target path writes;
-- real workspace lockfile writes;
+- arbitrary targets and Runtime roots that do not pass capability checks;
 - Runtime reload/restart;
 - Session-effective proof;
 - Cursor native session probing;
@@ -224,6 +234,6 @@ Phase 3B still blocks or defers these areas:
 - any Skill script, hook, postinstall, package binary, or third-party executable;
 - automatic repair when evidence is unknown or unsupported.
 
-The next governance milestone can build on the current contracts for broader
-source policy, real workspace lockfile files, Runtime reload adapters, and
+Later governance milestones can build on these contracts for remote and private
+source policy, Registry/Marketplace integration, Runtime reload adapters, and
 session-bound verification where a Runtime exposes a stable native contract.

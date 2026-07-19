@@ -84,12 +84,13 @@ session-resume features.
 
 ## Desktop Skill governance
 
-Skill governance is available as a supporting Agent/Runtime diagnostic surface.
+Skill governance is available as an Agent/Runtime governance surface.
 The desktop Skills workspace keeps the existing local library and per-Agent
-install/uninstall flow, and adds read-only Runtime inventory, doctor details,
-versioned desired-state profiles, lockfile previews, drift classification, and
-dry-run governance plans. It also supports a first governed apply path for
-approved, hash-matched, local or cocli-vendored Agent-scope Skill artifacts.
+install/uninstall flow, and adds Runtime inventory, doctor details, versioned
+desired-state profiles, lockfile previews, drift classification, deterministic
+plans, approved apply/recovery, canonical scope inspection, managed artifacts,
+materializations, adoption, workspace lockfile restore, and reference-gated
+garbage collection.
 
 The inventory API exposes machine-level endpoints at
 `/api/runtimes/skills/{inventory,doctor}` and Agent-level endpoints at
@@ -107,27 +108,43 @@ and falls back to filesystem inventory.
 
 Governance persists profiles, profile bindings, immutable lock snapshots,
 dry-run plans, approval audit rows, apply runs, action journals, scoped locks,
-backup references, quarantine references, and recovery state in SQLite. Mutable
-profile, binding, and plan decisions use optimistic `expectedVersion` checks.
-Apply requires a non-stale approved plan, matching observation/desired/lock
-hashes, an idempotency key, and a current confirmation nonce for high-risk
-actions.
+backup references, quarantine references, canonical managed artifacts,
+per-target materializations, workspace lockfile records, GC references, and
+recovery state in SQLite. Mutable profile, binding, and plan decisions use
+optimistic `expectedVersion` checks. Apply requires a non-stale approved plan,
+matching observation/desired/lock hashes, an idempotency key, and a current
+confirmation nonce for high-risk actions.
 
-The Phase 3B apply path is intentionally narrow. It can automatically copy
-digest-verified local, cocli-managed, or vendored artifacts into
-Runtime-derived Agent workspace Skill roots, symlink digest-verified local
-artifacts, and remove only cocli-managed entries or symlinks by moving them into
-quarantine. It does not accept arbitrary target paths, write user-global Skill
-directories, execute Skill scripts, clone repositories, resolve private
-credentials, download from a Registry or Marketplace, restart Runtime Sessions,
-or claim Session activation.
+The governed apply path is intentionally local-only. For machine/user,
+workspace/project, and Agent scopes, it can automatically copy or symlink
+digest-verified local, cocli-managed, library, or vendored artifacts into a
+Runtime-derived supported root. It records immutable artifacts and per-Skill
+materializations, writes `.cocli/skills.lock.json` for Workspace plans through
+CAS, backup, fsync, atomic rename, journal, and rollback boundaries, and removes
+only hash-matched managed/adopted entries through quarantine. Machine and
+Workspace writes are high risk and require the current preview-bound
+confirmation nonce. It does not accept arbitrary target paths, execute Skill
+scripts, clone repositories, resolve private credentials, download from a
+Registry or Marketplace, restart Runtime Sessions, or claim Session activation.
 Filesystem/runtime verification reports installed or configured-on-disk state;
 `sessionEffective` remains `unknown` without session-bound native evidence.
+The Phase 3C scope contract distinguishes machine/user, workspace/project, and
+Agent targets; records runtime-specific and shared Skill roots; stores
+immutable cocli-owned artifacts separately from Runtime search paths; and tracks
+each per-Skill materialization as `managed`, `adopted`, `unmanaged`, or
+`foreign`. Adoption supports audited record-only ownership, import-copy into the
+managed store, or an explicit keep-foreign record. Preview hashes and
+idempotency-bound confirmation nonces protect every managed-store, adoption,
+restore, and GC commit. Whole-root symlink takeover is blocked, while GC uses
+fresh references, optimistic versions, fingerprints, and quarantine for managed
+artifact bytes.
 
 See [docs/skill-governance-phase-3a.md](docs/skill-governance-phase-3a.md)
-for desired-state and dry-run planning, and
+for desired-state and dry-run planning,
 [docs/skill-governance-phase-3b.md](docs/skill-governance-phase-3b.md) for
-approved apply, verification, rollback, and recovery semantics.
+approved apply, verification, rollback, and recovery semantics, and
+[docs/skill-governance-phase-3c.md](docs/skill-governance-phase-3c.md) for
+canonical scope, materialization, lockfile, adoption, and GC contracts.
 
 ## Repository layout
 

@@ -58,17 +58,40 @@ cross-platform release evidence.
   treated as Session-effective proof.
 - **Phase 3B — governed apply and verification (complete for the safe local
   subset):** apply only approved, non-stale plans whose observation, desired,
-  and lock hashes still match. The first automatic writer supports
-  Agent-scoped, Runtime-target-derived Skill entries for digest-verified local
-  or cocli-vendored copy actions and digest-verified local symlink actions,
-  Store-only lock snapshot journaling,
+  and lock hashes still match. The first automatic writer established
+  Runtime-target-derived Skill entries for digest-verified local or
+  cocli-vendored copy/symlink actions,
   cocli-managed or symlink removal through quarantine, scoped leases, backup
   manifests, staging plus atomic rename, force-refresh verification, CAS-safe
   rollback, idempotent retries, and recovery-required state. Remote downloads,
   private credentials, Git clone, Registry/Marketplace sources, installation
-  scripts, machine/workspace/global writes, Runtime reload, real workspace
-  lockfile writes, and Session-effective adapters remain blocked/manual until
-  stable source and Runtime contracts exist.
+  scripts, Runtime reload, and Session-effective adapters remain blocked/manual
+  until stable source and Runtime contracts exist. Phase 3C extends this writer
+  to canonical machine, Workspace, and Agent scopes and real Workspace
+  lockfiles.
+- **Phase 3C — canonical scopes, materialization, lockfile, and GC contracts
+  (complete for the safe local governance loop):** define machine/user,
+  workspace/project, and Agent scope semantics; expose Runtime capability
+  evidence for runtime-specific and shared Skill roots; block reserved roots,
+  legacy command roots, whole-root symlink takeover, symlink escape, read-only
+  roots, cross-filesystem atomic-rename hazards, and out-of-scope roots; persist
+  immutable managed artifacts, per-Skill materializations, ownership state (`managed`, `adopted`,
+  `unmanaged`, `foreign`), adoption audit, workspace lockfile records with CAS
+  and restore metadata, and GC protection references. Versioned HTTP APIs and
+  the Skills workspace expose Scopes, Managed Store, Materializations,
+  three-mode Adoption, Workspace Lockfile, and GC. Approved apply supports
+  capability-approved machine, Workspace, and Agent targets, uses the managed
+  store for per-Skill copy/symlink materialization, and performs real Workspace
+  lockfile writes with journaled backup and rollback. GC is preview/nonce/CAS
+  protected and quarantines managed artifact bytes before deletion. This phase
+  does not add remote source support, install-script execution, arbitrary target
+  paths, Runtime reload, or Session-effective proof.
+- **Phase 3D — remote sources and Runtime/session integration (planned):** add
+  explicit Registry/Marketplace and private-source credential policy without
+  executing untrusted installation scripts; add Runtime reload adapters and
+  session-bound verification only where a Runtime publishes a stable native
+  contract. Filesystem or discovery evidence continues to require a new Session
+  and must not be promoted to Session-effective proof.
 
 This track remains subordinate to cocli's persistent Agent and Channel model;
 it is Runtime governance for multi-Agent desktop work, not a standalone Skill

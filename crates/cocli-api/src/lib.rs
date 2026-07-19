@@ -31,6 +31,7 @@ mod skill_governance;
 mod skill_governance_http;
 mod skill_http;
 mod skill_import;
+mod skill_managed_http;
 
 /// Deterministic content and manifest digests used by trusted local Skill
 /// profiles. This helper is read-only and never executes artifact content.
@@ -319,6 +320,28 @@ pub struct GovernanceSkillTarget {
     pub scope_root: PathBuf,
     pub search_root: PathBuf,
     pub entry_path: PathBuf,
+}
+
+/// Read-only capability evidence for one Runtime-derived Skill root.
+///
+/// API callers never provide `path` back as an automatic mutation target. The
+/// Runtime service resolves the target again from the canonical scope before
+/// every governed write.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceScopeCapability {
+    pub runtime: String,
+    pub scope: String,
+    pub root_kind: String,
+    pub path: String,
+    pub status: String,
+    pub exists: bool,
+    pub writable: bool,
+    pub atomic_rename: bool,
+    pub supported: bool,
+    pub evidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 
 /// Filesystem/native-probe report returned by the runtime boundary.
@@ -864,6 +887,42 @@ pub trait RuntimeService: Send + Sync {
         ))
     }
 
+    /// Reports canonical Runtime Skill roots for a machine/user or resolved
+    /// Workspace scope without creating any directory.
+    async fn governance_scope_capabilities(
+        &self,
+        _runtime: &str,
+        _scope: &str,
+        _scope_root: Option<&FsPath>,
+    ) -> Result<Vec<GovernanceScopeCapability>, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed machine/workspace Skill root contract".to_owned(),
+        ))
+    }
+
+    /// Resolves one canonical machine/user or Workspace Skill target. The
+    /// optional root is supplied only after cocli resolves a durable Workspace
+    /// binding; arbitrary HTTP paths are never forwarded here.
+    async fn governance_skill_target_in_scope(
+        &self,
+        _runtime: &str,
+        _scope: &str,
+        _scope_root: Option<&FsPath>,
+        _skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed machine/workspace Skill target".to_owned(),
+        ))
+    }
+
+    /// Returns the cocli-owned immutable artifact root. This is not a Runtime
+    /// Skill search path and never confers ownership over a whole Runtime root.
+    async fn governance_managed_artifact_root(&self) -> Result<PathBuf, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime service has no managed Skill artifact store".to_owned(),
+        ))
+    }
+
     /// Atomically installs or refreshes one library skill in the agent workspace.
     async fn install_skill(
         &self,
@@ -1345,6 +1404,7 @@ fn router_with_delivery_config_and_live_events(
     Router::new()
         .merge(skill_apply_http::router())
         .merge(skill_governance_http::router())
+        .merge(skill_managed_http::router())
         .merge(skill_http::router())
         .merge(bridge_router)
         .route("/healthz", get(health))

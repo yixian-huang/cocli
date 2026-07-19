@@ -20,10 +20,23 @@ import type {
   SkillGovernanceApplyConfirmation,
   SkillGovernanceApplyPreviewResponse,
   SkillGovernanceApplyResponse,
+  SkillGovernanceAdoptionCommitRequest,
+  SkillGovernanceAdoptionPreview,
+  SkillGovernanceAdoptionRequest,
   SkillGovernanceBinding,
   SkillGovernanceEffectiveDesired,
+  SkillGovernanceGcCommitRequest,
+  SkillGovernanceGcPreviewResponse,
+  SkillGovernanceLockfileRestoreCommitRequest,
+  SkillGovernanceLockfileRestorePreview,
+  SkillGovernanceLockfileRestoreRequest,
   SkillGovernanceLockPreviewResponse,
   SkillGovernanceLockSnapshot,
+  SkillGovernanceManagedArtifact,
+  SkillGovernanceManagedArtifactCommitRequest,
+  SkillGovernanceManagedArtifactPreview,
+  SkillGovernanceManagedArtifactPreviewRequest,
+  SkillGovernanceMaterialization,
   SkillGovernanceObservation,
   SkillGovernancePlan,
   SkillGovernancePlanDecisionResponse,
@@ -36,7 +49,9 @@ import type {
   SkillGovernanceRollbackResponse,
   SkillGovernanceRun,
   SkillGovernanceScope,
+  SkillGovernanceScopeCapabilitiesResponse,
   SkillGovernanceVerifyResponse,
+  SkillGovernanceWorkspaceLockfileInspect,
   SkillFileEntry,
   SkillLibraryEntry,
   SkillLibraryFileMeta,
@@ -772,6 +787,82 @@ export const skillGovernance = {
         body: JSON.stringify(input),
       },
     ),
+  scopeCapabilities: (input?: {
+    runtime?: string
+    scope?: SkillGovernanceScope
+    workspaceId?: string
+    agentId?: string
+  }) => {
+    const params = new URLSearchParams()
+    if (input?.runtime) params.set('runtime', input.runtime)
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.workspaceId) params.set('workspaceId', input.workspaceId)
+    if (input?.agentId) params.set('agentId', input.agentId)
+    const query = params.toString()
+    return request<SkillGovernanceScopeCapabilitiesResponse>(
+      `/api/skills/governance/scopes${query ? `?${query}` : ''}`,
+    )
+  },
+  listManagedArtifacts: () =>
+    request<SkillGovernanceManagedArtifact[]>('/api/skills/governance/managed/artifacts'),
+  previewManagedArtifact: (input: SkillGovernanceManagedArtifactPreviewRequest) =>
+    request<SkillGovernanceManagedArtifactPreview>('/api/skills/governance/managed/artifacts/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  commitManagedArtifact: (input: SkillGovernanceManagedArtifactCommitRequest) =>
+    request<SkillGovernanceManagedArtifact>('/api/skills/governance/managed/artifacts/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listMaterializations: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernanceMaterialization[]>(
+      `/api/skills/governance/materializations?${params}`,
+    )
+  },
+  previewAdoption: (input: SkillGovernanceAdoptionRequest) =>
+    request<SkillGovernanceAdoptionPreview>('/api/skills/governance/adoption/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  commitAdoption: (input: SkillGovernanceAdoptionCommitRequest) =>
+    request<SkillGovernanceMaterialization>('/api/skills/governance/adoption/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  inspectWorkspaceLockfile: (workspaceId: string, lockfilePath?: string) => {
+    const params = new URLSearchParams({ workspaceId })
+    if (lockfilePath) params.set('lockfilePath', lockfilePath)
+    return request<SkillGovernanceWorkspaceLockfileInspect>(
+      `/api/skills/governance/workspace-lockfile?${params}`,
+    )
+  },
+  previewLockfileRestore: (input: SkillGovernanceLockfileRestoreRequest) =>
+    request<SkillGovernanceLockfileRestorePreview>(
+      '/api/skills/governance/workspace-lockfile/restore/preview',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  restoreLockfile: (input: SkillGovernanceLockfileRestoreCommitRequest) =>
+    request<SkillGovernanceLockfileRestorePreview>(
+      '/api/skills/governance/workspace-lockfile/restore',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  previewGc: () =>
+    request<SkillGovernanceGcPreviewResponse>('/api/skills/governance/gc/preview', {
+      method: 'POST',
+    }),
+  commitGc: (input: SkillGovernanceGcCommitRequest) =>
+    request<SkillGovernanceGcPreviewResponse>('/api/skills/governance/gc/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
 }
 
 // Unified Memory (L1/L2 read API — Tasks 6.1/6.2)

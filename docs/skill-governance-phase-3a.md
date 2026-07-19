@@ -100,11 +100,11 @@ Observed Skills, diagnostics, lock entries, drift rows, and plan actions are
 sorted before hashing or serialization. This keeps equivalent governance input
 stable across repeated previews.
 
-Workspace-scoped previews are candidates for a future reviewable workspace
-lockfile. Machine- and Agent-scoped desired state remains cocli-owned SQLite
-state and is never represented as an implicit workspace file. The API reports
-this boundary as `workspace_candidate` or `store_only`; Phase 3A writes neither
-form to a filesystem.
+Workspace-scoped previews are candidates for the reviewable Workspace lockfile
+implemented by the later approved-apply path. Machine- and Agent-scoped desired
+state remains cocli-owned SQLite state and is never represented as an implicit
+workspace file. The API reports this boundary as `workspace_candidate` or
+`store_only`; Phase 3A itself writes neither form to a filesystem.
 
 ## Drift and plans
 
@@ -194,12 +194,15 @@ plans only. Plan approval changes plan status and audit rows, not Skill files.
 
 ## Phase 3B handoff
 
-Phase 3B adds the first governed write path for approved plans. It remains
-narrow: automatic apply is limited to digest-verified local or cocli-vendored
-Agent-scope artifacts, Runtime-derived targets, scoped leases, backup,
-quarantine, atomic mutation, force-refresh verification, and CAS-safe rollback.
+Phase 3B adds the first governed write path for approved plans: Runtime-derived
+targets, scoped leases, backup, quarantine, atomic mutation, force-refresh
+verification, and CAS-safe rollback. Phase 3C completes the safe local loop for
+canonical machine/user, workspace/project, and Agent scopes, managed artifacts,
+materializations, real Workspace lockfile writes/restores, audited adoption,
+reference-gated GC, and the corresponding HTTP/UI surfaces.
 
-Remote sources, private credentials, installation scripts, global writes,
-workspace lockfile files, Runtime reload, and Session-effective proof remain
-blocked/manual until stable source and Runtime contracts exist. See
-[docs/skill-governance-phase-3b.md](skill-governance-phase-3b.md).
+Remote sources, private credentials, installation scripts, Runtime reload, and
+Session-effective proof remain blocked/manual until stable source and Runtime
+contracts exist. See
+[docs/skill-governance-phase-3b.md](skill-governance-phase-3b.md) and
+[docs/skill-governance-phase-3c.md](skill-governance-phase-3c.md).

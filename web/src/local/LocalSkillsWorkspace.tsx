@@ -20,18 +20,26 @@ import {
   type AgentSkill,
   type MachineSkillDoctor,
   type RuntimeSkillCompatibility,
+  type SkillGovernanceAdoptionPreview,
   type SkillGovernanceApplyPreviewResponse,
   type SkillGovernanceApplyResponse,
   type SkillGovernanceBinding,
   type SkillGovernanceEffectiveDesired,
+  type SkillGovernanceGcPreviewResponse,
+  type SkillGovernanceLockfileRestorePreview,
   type SkillGovernanceLockPreviewResponse,
+  type SkillGovernanceManagedArtifact,
+  type SkillGovernanceManagedArtifactPreview,
+  type SkillGovernanceMaterialization,
   type SkillGovernanceObservation,
   type SkillGovernancePlanPreviewResponse,
   type SkillGovernanceProfile,
   type SkillGovernanceRollbackPreviewResponse,
   type SkillGovernanceRun,
   type SkillGovernanceScope,
+  type SkillGovernanceScopeCapabilitiesResponse,
   type SkillGovernanceVerifyResponse,
+  type SkillGovernanceWorkspaceLockfileInspect,
   type SkillFileEntry,
   type SkillLibraryEntry,
 } from './api'
@@ -65,7 +73,18 @@ function compatibilityLabel(
   }
 }
 
-type GovernanceTab = 'profiles' | 'lock' | 'plan' | 'apply' | 'evidence'
+type GovernanceTab =
+  | 'profiles'
+  | 'scopes'
+  | 'managed'
+  | 'materializations'
+  | 'adoption'
+  | 'workspace-lockfile'
+  | 'gc'
+  | 'lock'
+  | 'plan'
+  | 'apply'
+  | 'evidence'
 
 function shortHash(value: string | undefined): string {
   return value ? value.slice(0, 12) : 'unknown'
@@ -123,6 +142,32 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const [rollbackIdempotencyKey, setRollbackIdempotencyKey] = useState('')
   const [rollbackNonce, setRollbackNonce] = useState('')
   const [rollbackConfirmed, setRollbackConfirmed] = useState(false)
+  const [scopeCapabilities, setScopeCapabilities] = useState<SkillGovernanceScopeCapabilitiesResponse | null>(null)
+  const [managedArtifacts, setManagedArtifacts] = useState<SkillGovernanceManagedArtifact[]>([])
+  const [materializations, setMaterializations] = useState<SkillGovernanceMaterialization[]>([])
+  const [managedSourceKind, setManagedSourceKind] = useState<'local' | 'library'>('library')
+  const [managedLocalPath, setManagedLocalPath] = useState('')
+  const [managedPreview, setManagedPreview] = useState<SkillGovernanceManagedArtifactPreview | null>(null)
+  const [managedIdempotencyKey, setManagedIdempotencyKey] = useState('managed-artifact-key')
+  const [managedNonce, setManagedNonce] = useState('')
+  const [managedConfirmed, setManagedConfirmed] = useState(false)
+  const [adoptionRuntime, setAdoptionRuntime] = useState('')
+  const [adoptionSkillName, setAdoptionSkillName] = useState('')
+  const [adoptionMode, setAdoptionMode] = useState<'record_only' | 'import_copy' | 'keep_foreign'>('record_only')
+  const [adoptionPreview, setAdoptionPreview] = useState<SkillGovernanceAdoptionPreview | null>(null)
+  const [adoptionIdempotencyKey, setAdoptionIdempotencyKey] = useState('adoption-key')
+  const [adoptionNonce, setAdoptionNonce] = useState('')
+  const [adoptionConfirmed, setAdoptionConfirmed] = useState(false)
+  const [workspaceLockfilePath, setWorkspaceLockfilePath] = useState('.cocli/skills.lock.json')
+  const [workspaceLockfile, setWorkspaceLockfile] = useState<SkillGovernanceWorkspaceLockfileInspect | null>(null)
+  const [lockfileRestorePreview, setLockfileRestorePreview] = useState<SkillGovernanceLockfileRestorePreview | null>(null)
+  const [lockfileRestoreIdempotencyKey, setLockfileRestoreIdempotencyKey] = useState('lockfile-restore-key')
+  const [lockfileRestoreNonce, setLockfileRestoreNonce] = useState('')
+  const [lockfileRestoreConfirmed, setLockfileRestoreConfirmed] = useState(false)
+  const [gcPreview, setGcPreview] = useState<SkillGovernanceGcPreviewResponse | null>(null)
+  const [gcIdempotencyKey, setGcIdempotencyKey] = useState('gc-key')
+  const [gcNonce, setGcNonce] = useState('')
+  const [gcConfirmed, setGcConfirmed] = useState(false)
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
@@ -171,8 +216,12 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     governanceEvidence?.skills.forEach((skill) => runtimes.add(skill.runtime))
     lockPreview?.drift.forEach((drift) => runtimes.add(drift.runtime))
     planPreview?.preview.content.actions.forEach((item) => runtimes.add(item.runtime))
+    scopeCapabilities?.capabilities.forEach((capability) => runtimes.add(capability.runtime))
+    materializations.forEach((materialization) => runtimes.add(materialization.targetRuntime))
+    agents.forEach((agent) => runtimes.add(agent.runtime))
+    Object.keys(compatibility).forEach((runtime) => runtimes.add(runtime))
     return [...runtimes].sort()
-  }, [governanceEvidence, lockPreview, planPreview])
+  }, [agents, compatibility, governanceEvidence, lockPreview, materializations, planPreview, scopeCapabilities])
   const visibleDrift = useMemo(() => (
     (lockPreview?.drift ?? []).filter((drift) => (
       (driftFilter === 'all' || drift.kind === driftFilter)
@@ -200,6 +249,8 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     ?? governanceRuns[0]
     ?? null
   const latestEffects = rollbackPreview?.effects ?? currentRun?.effects ?? applyPreview?.effects ?? []
+  const managedScopeId = governanceRequest.scopeId || (bindingScope === 'machine' ? 'machine' : '')
+  const selectedManagedRuntime = adoptionRuntime || governanceRuntimeOptions[0] || selectedAgent?.runtime || ''
   const applyRequiresNonce = applyPreview?.nonceRequired || applyPreview?.highRisk || false
   const applyReady = Boolean(
     applyPreview
@@ -264,6 +315,25 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     setBindingProfileId((current) => (
       profiles.some((profile) => profile.id === current) ? current : profiles[0]?.id ?? ''
     ))
+  }, [bindingScope, bindingScopeId, governanceAgentId, governanceWorkspaceId, selectedAgentId])
+
+  const refreshManagedGovernance = useCallback(async () => {
+    const scopeId = bindingScope === 'machine' ? 'machine' : bindingScopeId.trim()
+    const [capabilities, artifacts] = await Promise.all([
+      localApi.getGovernanceScopeCapabilities({
+        scope: bindingScope,
+        workspaceId: governanceWorkspaceId.trim() || undefined,
+        agentId: governanceAgentId.trim() || selectedAgentId || undefined,
+      }),
+      localApi.listGovernanceManagedArtifacts(),
+    ])
+    setScopeCapabilities(capabilities)
+    setManagedArtifacts(artifacts)
+    if (scopeId) {
+      setMaterializations(await localApi.listGovernanceMaterializations(bindingScope, scopeId))
+    } else {
+      setMaterializations([])
+    }
   }, [bindingScope, bindingScopeId, governanceAgentId, governanceWorkspaceId, selectedAgentId])
 
   useEffect(() => {
@@ -350,6 +420,19 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       cancelled = true
     }
   }, [refreshGovernance, t])
+
+  useEffect(() => {
+    let cancelled = false
+    refreshManagedGovernance()
+      .catch((nextError: unknown) => {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : t('skillsLoadError'))
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [refreshManagedGovernance, t])
 
   const runAction = useCallback(async (key: string, task: () => Promise<void>) => {
     setAction(key)
@@ -585,6 +668,143 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     })
   }
 
+  function previewManagedArtifact(event: FormEvent) {
+    event.preventDefault()
+    void runAction('governance:managed-preview', async () => {
+      const preview = await localApi.previewGovernanceManagedArtifact({
+        sourceKind: managedSourceKind,
+        localPath: managedSourceKind === 'local' ? managedLocalPath.trim() : undefined,
+        libraryId: managedSourceKind === 'library' ? selectedLibraryId || undefined : undefined,
+      })
+      setManagedPreview(preview)
+      setManagedIdempotencyKey(preview.idempotencyKey ?? '')
+      setManagedNonce(preview.confirmationNonce ?? '')
+      setManagedConfirmed(false)
+      setGovernanceTab('managed')
+    })
+  }
+
+  function commitManagedArtifact() {
+    if (!managedPreview) return
+    void runAction('governance:managed-commit', async () => {
+      await localApi.commitGovernanceManagedArtifact({
+        sourceKind: managedSourceKind,
+        localPath: managedSourceKind === 'local' ? managedLocalPath.trim() : undefined,
+        libraryId: managedSourceKind === 'library' ? selectedLibraryId || undefined : undefined,
+        expectedPreviewHash: managedPreview.previewHash,
+        idempotencyKey: managedIdempotencyKey.trim(),
+        confirmationNonce: managedNonce.trim(),
+      })
+      setManagedPreview(null)
+      await refreshManagedGovernance()
+    })
+  }
+
+  function previewAdoption(event: FormEvent) {
+    event.preventDefault()
+    if (!selectedManagedRuntime || !managedScopeId || !adoptionSkillName.trim()) return
+    void runAction('governance:adoption-preview', async () => {
+      const preview = await localApi.previewGovernanceAdoption({
+        runtime: selectedManagedRuntime,
+        scope: bindingScope,
+        scopeId: managedScopeId,
+        skillName: adoptionSkillName.trim(),
+        mode: adoptionMode,
+      })
+      setAdoptionPreview(preview)
+      setAdoptionIdempotencyKey(preview.idempotencyKey ?? '')
+      setAdoptionNonce(preview.confirmationNonce ?? '')
+      setAdoptionConfirmed(false)
+      setGovernanceTab('adoption')
+    })
+  }
+
+  function commitAdoption() {
+    if (!adoptionPreview) return
+    void runAction('governance:adoption-commit', async () => {
+      await localApi.commitGovernanceAdoption({
+        runtime: adoptionPreview.runtime,
+        scope: bindingScope,
+        scopeId: adoptionPreview.scopeId,
+        skillName: adoptionPreview.skillName,
+        mode: adoptionMode,
+        expectedFingerprint: adoptionPreview.targetFingerprint,
+        expectedPreviewHash: adoptionPreview.previewHash,
+        idempotencyKey: adoptionIdempotencyKey.trim(),
+        confirmationNonce: adoptionNonce.trim(),
+      })
+      await refreshManagedGovernance()
+    })
+  }
+
+  function inspectWorkspaceLockfile() {
+    if (!governanceWorkspaceId.trim()) return
+    void runAction('governance:lockfile-inspect', async () => {
+      setWorkspaceLockfile(await localApi.inspectGovernanceWorkspaceLockfile(
+        governanceWorkspaceId.trim(),
+        workspaceLockfilePath.trim() || undefined,
+      ))
+      setGovernanceTab('workspace-lockfile')
+    })
+  }
+
+  function previewLockfileRestore() {
+    const stored = workspaceLockfile?.stored
+    if (!workspaceLockfile || !stored) return
+    void runAction('governance:lockfile-restore-preview', async () => {
+      const preview = await localApi.previewGovernanceLockfileRestore({
+        workspaceId: workspaceLockfile.workspaceId,
+        lockfilePath: workspaceLockfile.lockfilePath,
+        expectedVersion: stored.version,
+        expectedDiskHash: workspaceLockfile.diskHash,
+      })
+      setLockfileRestorePreview(preview)
+      setLockfileRestoreIdempotencyKey(preview.idempotencyKey ?? '')
+      setLockfileRestoreNonce(preview.confirmationNonce ?? '')
+      setLockfileRestoreConfirmed(false)
+    })
+  }
+
+  function restoreWorkspaceLockfile() {
+    const stored = workspaceLockfile?.stored
+    if (!workspaceLockfile || !stored || !lockfileRestorePreview) return
+    void runAction('governance:lockfile-restore', async () => {
+      await localApi.restoreGovernanceLockfile({
+        workspaceId: workspaceLockfile.workspaceId,
+        lockfilePath: workspaceLockfile.lockfilePath,
+        expectedVersion: stored.version,
+        expectedDiskHash: workspaceLockfile.diskHash,
+        expectedPreviewHash: lockfileRestorePreview.previewHash,
+        idempotencyKey: lockfileRestoreIdempotencyKey.trim(),
+        confirmationNonce: lockfileRestoreNonce.trim(),
+      })
+      inspectWorkspaceLockfile()
+    })
+  }
+
+  function previewGc() {
+    void runAction('governance:gc-preview', async () => {
+      const preview = await localApi.previewGovernanceGc()
+      setGcPreview(preview)
+      setGcIdempotencyKey(preview.idempotencyKey ?? '')
+      setGcNonce(preview.confirmationNonce ?? '')
+      setGcConfirmed(false)
+      setGovernanceTab('gc')
+    })
+  }
+
+  function commitGc() {
+    if (!gcPreview) return
+    void runAction('governance:gc-commit', async () => {
+      setGcPreview(await localApi.commitGovernanceGc({
+        expectedPreviewHash: gcPreview.previewHash,
+        idempotencyKey: gcIdempotencyKey.trim(),
+        confirmationNonce: gcNonce.trim(),
+      }))
+      await refreshManagedGovernance()
+    })
+  }
+
   const selectedCompatibility = selectedAgent
     ? compatibility[selectedAgent.runtime]
     : undefined
@@ -704,6 +924,12 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
         <div className="governance-tabs" role="tablist" aria-label={t('skillsGovernanceTitle')}>
           {([
             ['profiles', t('skillsGovernanceProfiles')],
+            ['scopes', t('skillsGovernanceScopes')],
+            ['managed', t('skillsGovernanceManagedStore')],
+            ['materializations', t('skillsGovernanceMaterializations')],
+            ['adoption', t('skillsGovernanceAdoption')],
+            ['workspace-lockfile', t('skillsGovernanceWorkspaceLockfile')],
+            ['gc', t('skillsGovernanceGc')],
             ['lock', t('skillsGovernanceLockDrift')],
             ['plan', t('skillsGovernancePlanPreview')],
             ['apply', t('skillsGovernanceApplyRecovery')],
@@ -884,6 +1110,340 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
             >
               {t('skillsGovernanceRefreshEvidence')}
             </button>
+          </div>
+        )}
+
+        {governanceTab === 'scopes' && (
+          <div className="governance-list">
+            <h3>{t('skillsGovernanceScopes')} · {shortHash(scopeCapabilities?.observedAt)}</h3>
+            <button
+              type="button"
+              onClick={() => void runAction('governance:scopes', refreshManagedGovernance)}
+              disabled={action === 'governance:scopes'}
+            >
+              {t('skillsGovernanceRefreshManaged')}
+            </button>
+            {scopeCapabilities?.diagnostics.map((diagnostic) => (
+              <article key={`${diagnostic.subject}:${diagnostic.phase}:${diagnostic.errorType}`} className="warning">
+                <strong>{diagnostic.errorType} · {diagnostic.subject}</strong>
+                <span>{diagnostic.phase} · {diagnostic.observedAt}</span>
+                <p>{diagnostic.message}</p>
+              </article>
+            ))}
+            {(!scopeCapabilities || scopeCapabilities.capabilities.length === 0) && <p>{t('skillsGovernanceNoScopeCapabilities')}</p>}
+            {scopeCapabilities?.capabilities.map((capability) => (
+              <article key={`${capability.runtime}:${capability.scope}:${capability.rootKind}:${capability.path}`}>
+                <strong>{capability.runtime} · {capability.scope} · {capability.rootKind}</strong>
+                <span>
+                  {capability.supported ? t('skillsGovernanceSupported') : t('skillsGovernanceBlocked')}
+                  {' · '}
+                  {capability.writable ? t('skillsGovernanceWritable') : t('skillsGovernanceReadOnly')}
+                  {' · '}
+                  {capability.atomicRename ? t('skillsGovernanceAtomicRename') : t('skillsGovernanceNoAtomicRename')}
+                </span>
+                <p>{capability.evidence}</p>
+                {capability.blockedReason && <p>{capability.blockedReason}</p>}
+                <code>{capability.path}</code>
+              </article>
+            ))}
+          </div>
+        )}
+
+        {governanceTab === 'managed' && (
+          <div className="governance-grid">
+            <form className="governance-form" onSubmit={previewManagedArtifact}>
+              <label htmlFor="managed-source-kind">{t('skillsGovernanceSourceKind')}</label>
+              <select
+                id="managed-source-kind"
+                value={managedSourceKind}
+                onChange={(event) => setManagedSourceKind(event.target.value as 'local' | 'library')}
+              >
+                <option value="library">{t('skillsGovernanceLibraryArtifact')}</option>
+                <option value="local">{t('skillsGovernanceLocalArtifact')}</option>
+              </select>
+              {managedSourceKind === 'library' ? (
+                <label>
+                  <span>{t('skillsSelectedLibrary')}</span>
+                  <select value={selectedLibraryId} onChange={(event) => setSelectedLibraryId(event.target.value)}>
+                    {catalog.map((entry) => (
+                      <option key={entry.id} value={entry.id}>{entry.displayName || entry.name}</option>
+                    ))}
+                  </select>
+                </label>
+              ) : (
+                <label htmlFor="managed-local-path">
+                  {t('skillsGovernanceLocalPath')}
+                  <input
+                    id="managed-local-path"
+                    value={managedLocalPath}
+                    onChange={(event) => setManagedLocalPath(event.target.value)}
+                    placeholder="/absolute/trusted/skill"
+                  />
+                </label>
+              )}
+              <button type="submit" disabled={action === 'governance:managed-preview'}>
+                {t('skillsGovernancePreviewManagedArtifact')}
+              </button>
+            </form>
+            <section className="governance-list">
+              <h3>{t('skillsGovernanceManagedStore')}</h3>
+              {managedPreview && (
+                <article className={managedPreview.blocked ? 'warning' : ''}>
+                  <strong>{managedPreview.blocked ? t('skillsGovernanceBlocked') : t('skillsGovernanceReady')}</strong>
+                  <span>{shortHash(managedPreview.contentDigest)} · {shortHash(managedPreview.manifestDigest)}</span>
+                  <p>{managedPreview.storeRelativePath}</p>
+                  {managedPreview.hazards.map((hazard) => <code key={hazard}>{hazard}</code>)}
+                  <label>
+                    <span>{t('skillsGovernanceIdempotencyKey')}</span>
+                    <input value={managedIdempotencyKey} onChange={(event) => setManagedIdempotencyKey(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>{t('skillsGovernanceConfirmationNonce')}</span>
+                    <input value={managedNonce} onChange={(event) => setManagedNonce(event.target.value)} />
+                  </label>
+                  <label className="governance-check">
+                    <input
+                      type="checkbox"
+                      checked={managedConfirmed}
+                      onChange={(event) => setManagedConfirmed(event.target.checked)}
+                    />
+                    <span>{t('skillsGovernanceExplicitConfirmManaged')}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="danger-action"
+                    onClick={commitManagedArtifact}
+                    disabled={managedPreview.blocked || !managedConfirmed || !managedIdempotencyKey.trim() || !managedNonce.trim()}
+                  >
+                    {t('skillsGovernanceCommitManagedArtifact')}
+                  </button>
+                </article>
+              )}
+              {managedArtifacts.length === 0 && <p>{t('skillsGovernanceNoManagedArtifacts')}</p>}
+              {managedArtifacts.map((artifact) => (
+                <article key={artifact.id}>
+                  <strong>{artifact.artifactKind} · {shortHash(artifact.artifactKey)}</strong>
+                  <span>{t('skillsGovernanceRevision')}: {shortHash(artifact.revision)} · {artifact.referenced ? t('skillsGovernanceReferenced') : t('skillsGovernanceUnreferenced')}</span>
+                  <p>{artifact.storeRelativePath}</p>
+                  <code>{shortHash(artifact.contentDigest)} · {shortHash(artifact.manifestDigest)}</code>
+                </article>
+              ))}
+            </section>
+          </div>
+        )}
+
+        {governanceTab === 'materializations' && (
+          <div className="governance-list">
+            <h3>{t('skillsGovernanceMaterializations')}</h3>
+            <button
+              type="button"
+              onClick={() => void runAction('governance:materializations', refreshManagedGovernance)}
+              disabled={action === 'governance:materializations'}
+            >
+              {t('skillsGovernanceRefreshManaged')}
+            </button>
+            {materializations.length === 0 && <p>{t('skillsGovernanceNoMaterializations')}</p>}
+            {materializations.map((materialization) => (
+              <article key={materialization.id}>
+                <strong>{materialization.ownership} · {materialization.installationMode} · {materialization.verifyStatus}</strong>
+                <span>{materialization.targetRuntime} · {materialization.scope}:{materialization.scopeId} · {materialization.rootKind}</span>
+                <p>
+                  artifact_stored={materialization.artifactId ? 'yes' : 'unknown'} · materialized_on_disk={materialization.verifyStatus} · runtime_discovered=unknown · session_effective=unknown/new-session-required
+                </p>
+                <code>{materialization.targetPath}</code>
+              </article>
+            ))}
+          </div>
+        )}
+
+        {governanceTab === 'adoption' && (
+          <div className="governance-grid">
+            <form className="governance-form" onSubmit={previewAdoption}>
+              <label htmlFor="adoption-runtime">{t('skillsRuntime')}</label>
+              <select
+                id="adoption-runtime"
+                value={selectedManagedRuntime}
+                onChange={(event) => setAdoptionRuntime(event.target.value)}
+              >
+                <option value="">{t('skillsGovernanceSelectRuntime')}</option>
+                {governanceRuntimeOptions.map((runtime) => <option key={runtime} value={runtime}>{runtime}</option>)}
+              </select>
+              <label htmlFor="adoption-skill-name">{t('skillsGovernanceSkillName')}</label>
+              <input
+                id="adoption-skill-name"
+                value={adoptionSkillName}
+                onChange={(event) => setAdoptionSkillName(event.target.value)}
+                placeholder="reviewer"
+              />
+              <label htmlFor="adoption-mode">{t('skillsGovernanceAdoptionMode')}</label>
+              <select
+                id="adoption-mode"
+                value={adoptionMode}
+                onChange={(event) => setAdoptionMode(event.target.value as typeof adoptionMode)}
+              >
+                <option value="record_only">record-only</option>
+                <option value="import_copy">import-copy</option>
+                <option value="keep_foreign">keep-foreign</option>
+              </select>
+              <button
+                type="submit"
+                disabled={!selectedManagedRuntime || !managedScopeId || !adoptionSkillName.trim() || action === 'governance:adoption-preview'}
+              >
+                {t('skillsGovernancePreviewAdoption')}
+              </button>
+            </form>
+            <section className="governance-list">
+              <h3>{t('skillsGovernanceAdoption')}</h3>
+              {!adoptionPreview && <p>{t('skillsGovernanceNoAdoptionPreview')}</p>}
+              {adoptionPreview && (
+                <article className={adoptionPreview.blocked ? 'warning' : ''}>
+                  <strong>{adoptionPreview.skillName} · {adoptionMode}</strong>
+                  <span>{adoptionPreview.runtime} · {adoptionPreview.scope}:{adoptionPreview.scopeId} · {adoptionPreview.existingOwnership ?? 'foreign'}</span>
+                  <p>{adoptionPreview.blocked ? t('skillsGovernanceBlocked') : t('skillsGovernanceReady')}</p>
+                  {adoptionPreview.hazards.map((hazard) => <code key={hazard}>{hazard}</code>)}
+                  <code>{adoptionPreview.targetPath}</code>
+                  <label>
+                    <span>{t('skillsGovernanceIdempotencyKey')}</span>
+                    <input value={adoptionIdempotencyKey} onChange={(event) => setAdoptionIdempotencyKey(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>{t('skillsGovernanceConfirmationNonce')}</span>
+                    <input value={adoptionNonce} onChange={(event) => setAdoptionNonce(event.target.value)} />
+                  </label>
+                  <label className="governance-check">
+                    <input
+                      type="checkbox"
+                      checked={adoptionConfirmed}
+                      onChange={(event) => setAdoptionConfirmed(event.target.checked)}
+                    />
+                    <span>{t('skillsGovernanceExplicitConfirmAdoption')}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="danger-action"
+                    onClick={commitAdoption}
+                    disabled={adoptionPreview.blocked || !adoptionConfirmed || !adoptionIdempotencyKey.trim() || !adoptionNonce.trim()}
+                  >
+                    {t('skillsGovernanceCommitAdoption')}
+                  </button>
+                </article>
+              )}
+            </section>
+          </div>
+        )}
+
+        {governanceTab === 'workspace-lockfile' && (
+          <div className="governance-grid">
+            <section className="governance-form">
+              <label htmlFor="workspace-lockfile-path">{t('skillsGovernanceWorkspaceLockfile')}</label>
+              <input
+                id="workspace-lockfile-path"
+                value={workspaceLockfilePath}
+                onChange={(event) => setWorkspaceLockfilePath(event.target.value)}
+              />
+              <button
+                type="button"
+                onClick={inspectWorkspaceLockfile}
+                disabled={!governanceWorkspaceId.trim() || action === 'governance:lockfile-inspect'}
+              >
+                {t('skillsGovernanceInspectLockfile')}
+              </button>
+              <button
+                type="button"
+                onClick={previewLockfileRestore}
+                disabled={!workspaceLockfile?.stored || action === 'governance:lockfile-restore-preview'}
+              >
+                {t('skillsGovernancePreviewRestore')}
+              </button>
+            </section>
+            <section className="governance-list">
+              <h3>{t('skillsGovernanceWorkspaceLockfile')}</h3>
+              {!workspaceLockfile && <p>{t('skillsGovernanceNoWorkspaceLockfile')}</p>}
+              {workspaceLockfile && (
+                <article>
+                  <strong>{workspaceLockfile.exists ? t('skillsGovernanceExists') : t('skillsGovernanceMissing')}</strong>
+                  <span>{workspaceLockfile.lockfilePath} · disk {shortHash(workspaceLockfile.diskHash)}</span>
+                  <p>{workspaceLockfile.stored ? `${t('skillsGovernanceStored')}: v${workspaceLockfile.stored.version}` : t('skillsGovernanceNoStoredLockfile')}</p>
+                  <code>{workspaceLockfile.diskFingerprint}</code>
+                </article>
+              )}
+              {lockfileRestorePreview && (
+                <article className="warning">
+                  <strong>{t('skillsGovernanceRestorePreview')}</strong>
+                  <span>{formatBytes(lockfileRestorePreview.bytes)} · {shortHash(lockfileRestorePreview.previewHash)}</span>
+                  <code>{lockfileRestorePreview.beforeHash} → {lockfileRestorePreview.afterHash}</code>
+                  <label>
+                    <span>{t('skillsGovernanceIdempotencyKey')}</span>
+                    <input value={lockfileRestoreIdempotencyKey} onChange={(event) => setLockfileRestoreIdempotencyKey(event.target.value)} />
+                  </label>
+                  <label>
+                    <span>{t('skillsGovernanceConfirmationNonce')}</span>
+                    <input value={lockfileRestoreNonce} onChange={(event) => setLockfileRestoreNonce(event.target.value)} />
+                  </label>
+                  <label className="governance-check">
+                    <input
+                      type="checkbox"
+                      checked={lockfileRestoreConfirmed}
+                      onChange={(event) => setLockfileRestoreConfirmed(event.target.checked)}
+                    />
+                    <span>{t('skillsGovernanceExplicitConfirmLockfileRestore')}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="danger-action"
+                    onClick={restoreWorkspaceLockfile}
+                    disabled={!lockfileRestoreConfirmed || !lockfileRestoreIdempotencyKey.trim() || !lockfileRestoreNonce.trim()}
+                  >
+                    {t('skillsGovernanceRestoreLockfile')}
+                  </button>
+                </article>
+              )}
+            </section>
+          </div>
+        )}
+
+        {governanceTab === 'gc' && (
+          <div className="governance-list">
+            <h3>{t('skillsGovernanceGc')} · {shortHash(gcPreview?.previewHash)}</h3>
+            <button type="button" onClick={previewGc} disabled={action === 'governance:gc-preview'}>
+              {t('skillsGovernancePreviewGc')}
+            </button>
+            {(!gcPreview || gcPreview.candidates.length === 0) && <p>{t('skillsGovernanceNoGcCandidates')}</p>}
+            {gcPreview?.candidates.map((candidate) => (
+              <article key={`${candidate.entityType}:${candidate.entityId}`}>
+                <strong>{candidate.entityType}</strong>
+                <span>{shortHash(candidate.entityId)}</span>
+                <p>{candidate.reason}</p>
+              </article>
+            ))}
+            {gcPreview && gcPreview.candidates.length > 0 && (
+              <div className="governance-confirmation">
+                <label>
+                  <span>{t('skillsGovernanceIdempotencyKey')}</span>
+                  <input value={gcIdempotencyKey} onChange={(event) => setGcIdempotencyKey(event.target.value)} />
+                </label>
+                <label>
+                  <span>{t('skillsGovernanceConfirmationNonce')}</span>
+                  <input value={gcNonce} onChange={(event) => setGcNonce(event.target.value)} />
+                </label>
+                <label className="governance-check">
+                  <input
+                    type="checkbox"
+                    checked={gcConfirmed}
+                    onChange={(event) => setGcConfirmed(event.target.checked)}
+                  />
+                  <span>{t('skillsGovernanceExplicitConfirmGc')}</span>
+                </label>
+                <button
+                  type="button"
+                  className="danger-action"
+                  onClick={commitGc}
+                  disabled={!gcConfirmed || !gcIdempotencyKey.trim() || !gcNonce.trim()}
+                >
+                  {t('skillsGovernanceCommitGc')}
+                </button>
+              </div>
+            )}
           </div>
         )}
 

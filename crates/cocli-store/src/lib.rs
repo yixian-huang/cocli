@@ -22,12 +22,17 @@ pub use skills::{
 };
 mod skill_governance;
 pub use skill_governance::{
-    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, NewSkillLockSnapshot,
-    SkillGovernanceApplyAction, SkillGovernanceApplyActionStatus, SkillGovernanceApplyAudit,
-    SkillGovernanceApplyRun, SkillGovernanceApplyRunStatus, SkillGovernanceLeaseAcquire,
+    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, NewSkillGovernanceGcReference,
+    NewSkillGovernanceManagedArtifact, NewSkillGovernanceMaterialization, NewSkillLockSnapshot,
+    SkillGovernanceAdoptionAudit, SkillGovernanceApplyAction, SkillGovernanceApplyActionStatus,
+    SkillGovernanceApplyAudit, SkillGovernanceApplyRun, SkillGovernanceApplyRunStatus,
+    SkillGovernanceGcCandidate, SkillGovernanceGcReference, SkillGovernanceInstallationMode,
+    SkillGovernanceLeaseAcquire, SkillGovernanceManagedArtifact, SkillGovernanceMaterialization,
+    SkillGovernanceMaterializationOwnership, SkillGovernanceMaterializationRootKind,
     SkillGovernancePlan, SkillGovernancePlanAudit, SkillGovernancePlanStatus,
     SkillGovernanceRecoveryStatus, SkillGovernanceScope, SkillGovernanceScopedLock,
-    SkillLockSnapshot, SkillProfile, SkillProfileBinding,
+    SkillGovernanceVerifyStatus, SkillGovernanceWorkspaceLockfile, SkillLockSnapshot, SkillProfile,
+    SkillProfileBinding,
 };
 mod workspace;
 pub use workspace::{
@@ -219,6 +224,16 @@ pub enum StoreError {
         entity: &'static str,
         /// Existing durable record identifier.
         id: Uuid,
+    },
+    /// A skill-governance delete was not safe under current references, ownership, or fingerprint.
+    #[error("skill governance delete conflict for {entity} {id}: {reason}")]
+    SkillGovernanceDeleteConflict {
+        /// Entity type being deleted.
+        entity: &'static str,
+        /// Durable record identifier.
+        id: Uuid,
+        /// Stable reason string.
+        reason: &'static str,
     },
     /// A requested logical workspace does not exist.
     #[error("workspace not found: {0}")]
@@ -3683,6 +3698,11 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             14,
             "skill_governance_apply_state",
             include_str!("../migrations/0014_skill_governance_apply_state.sql"),
+        ),
+        (
+            15,
+            "skill_governance_managed_scopes",
+            include_str!("../migrations/0015_skill_governance_managed_scopes.sql"),
         ),
     ] {
         let already_applied: bool =

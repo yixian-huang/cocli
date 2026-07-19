@@ -255,6 +255,148 @@ describe('LocalApp', () => {
           diagnostics: [],
         })
       }
+      if (path.startsWith('/api/skills/governance/scopes')) {
+        return jsonResponse({
+          observedAt: '2026-07-19T08:02:30Z',
+          capabilities: [{
+            runtime: 'fake',
+            scope: 'machine',
+            rootKind: 'runtime_specific',
+            path: '/tmp/cocli-test/fake/skills',
+            status: 'supported',
+            exists: true,
+            writable: true,
+            atomicRename: true,
+            supported: true,
+            evidence: 'runtime-derived canonical target',
+            blockedReason: null,
+          }, {
+            runtime: 'fake',
+            scope: 'workspace',
+            rootKind: 'runtime_specific',
+            path: '/tmp/cocli-test/workspace/.fake/skills',
+            status: 'blocked',
+            exists: false,
+            writable: false,
+            atomicRename: false,
+            supported: false,
+            evidence: 'workspace id required',
+            blockedReason: 'missing workspace binding',
+          }],
+          diagnostics: [],
+        })
+      }
+      if (path === '/api/skills/governance/managed/artifacts' && !init?.method) {
+        return jsonResponse([{
+          id: 'artifact-1',
+          artifactKey: 'sha256:artifact-key',
+          artifactKind: 'local_skill',
+          sourceProvenance: { kind: 'library', libraryId: 'library-1' },
+          contentDigest: 'sha256:content',
+          manifestDigest: 'sha256:manifest',
+          schemaVersion: 1,
+          revision: 'sha256:content',
+          storeRelativePath: 'artifacts/content/source/skill',
+          artifact: { immutable: true },
+          metadata: {},
+          version: 1,
+          createdAt: '2026-07-19T08:02:30Z',
+          referenced: true,
+        }])
+      }
+      if (path === '/api/skills/governance/managed/artifacts/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          sourceKind: 'library',
+          source: { kind: 'library', libraryId: 'library-1' },
+          artifactKey: 'sha256:artifact-key',
+          contentDigest: 'sha256:content',
+          manifestDigest: 'sha256:manifest',
+          revision: 'sha256:content',
+          storeRelativePath: 'artifacts/content/source/skill',
+          previewHash: 'sha256:managed-preview',
+          idempotencyKey: 'managed-key-1',
+          confirmationNonce: 'managed-nonce-1',
+          hazards: [],
+          blocked: false,
+        })
+      }
+      if (path === '/api/skills/governance/materializations?scope=machine&scopeId=machine') {
+        return jsonResponse([{
+          id: 'materialization-1',
+          artifactId: 'artifact-1',
+          scope: 'machine',
+          scopeId: 'machine',
+          targetPath: '/tmp/cocli-test/fake/skills/reviewer',
+          targetRuntime: 'fake',
+          rootKind: 'machine',
+          installationMode: 'copy',
+          ownership: 'managed',
+          contentDigest: 'sha256:content',
+          expectedDestination: '/tmp/cocli-test/fake/skills/reviewer',
+          expectedFingerprint: 'sha256:target',
+          verifyStatus: 'verified',
+          receipt: { newSessionRequired: true, sessionEffective: 'unknown' },
+          version: 1,
+          adoptedAt: null,
+          createdAt: '2026-07-19T08:02:30Z',
+          updatedAt: '2026-07-19T08:02:30Z',
+        }])
+      }
+      if (path === '/api/skills/governance/adoption/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          runtime: 'fake',
+          scope: 'machine',
+          scopeId: 'machine',
+          skillName: 'reviewer',
+          targetPath: '/tmp/cocli-test/fake/skills/reviewer',
+          targetFingerprint: 'sha256:target',
+          contentDigest: 'sha256:content',
+          manifestDigest: 'sha256:manifest',
+          existingOwnership: 'foreign',
+          hazards: ['manual_review_required:foreign target'],
+          blocked: true,
+          previewHash: 'sha256:adoption-preview',
+          idempotencyKey: 'adoption-key-1',
+          confirmationNonce: 'adoption-nonce-1',
+        })
+      }
+      if (path.startsWith('/api/skills/governance/workspace-lockfile')) {
+        return jsonResponse({
+          workspaceId: 'workspace-1',
+          lockfilePath: '.cocli/skills.lock.json',
+          diskHash: 'sha256:disk',
+          diskFingerprint: 'sha256:disk-fingerprint',
+          stored: {
+            id: 'workspace-lockfile-1',
+            workspaceId: 'workspace-1',
+            lockfilePath: '.cocli/skills.lock.json',
+            lockHash: 'sha256:lock',
+            expectedDiskFingerprint: 'sha256:disk-fingerprint',
+            expectedDiskHash: 'sha256:disk',
+            document: {},
+            lastBackupPath: null,
+            lastBackupHash: null,
+            lastReceipt: {},
+            restoreMetadata: {},
+            version: 1,
+            createdAt: '2026-07-19T08:02:30Z',
+            updatedAt: '2026-07-19T08:02:30Z',
+          },
+          exists: true,
+        })
+      }
+      if (path === '/api/skills/governance/gc/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          previewHash: 'sha256:gc-preview',
+          idempotencyKey: 'gc-key-1',
+          confirmationNonce: 'gc-nonce-1',
+          candidates: [{
+            entityType: 'managed_artifact',
+            entityId: 'artifact-unreferenced',
+            reason: 'unreferenced',
+          }],
+        })
+      }
       if (path === '/api/skills/governance/lock/preview' && init?.method === 'POST') {
         return jsonResponse({
           snapshot: {
@@ -1134,6 +1276,34 @@ describe('LocalApp', () => {
     expect(await screen.findByRole('heading', { name: 'Governance preview' })).toBeInTheDocument()
     expect(screen.getAllByText('dry-run').length).toBeGreaterThan(0)
     expect(screen.getAllByText('session-effective unknown').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Scopes' }))
+    expect(await screen.findByText(/runtime-derived canonical target/)).toBeInTheDocument()
+    expect(await screen.findByText(/missing workspace binding/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Managed Store' }))
+    expect(await screen.findByText(/local_skill/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Preview artifact' }))
+    expect(await screen.findByText('ready')).toBeInTheDocument()
+    expect((await screen.findAllByText(/artifacts\/content\/source\/skill/)).length).toBeGreaterThan(0)
+    expect(screen.getByDisplayValue('managed-key-1')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('managed-nonce-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Materializations' }))
+    expect(await screen.findByText(/artifact_stored=yes/)).toBeInTheDocument()
+    expect(await screen.findByText(/session_effective=unknown/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Adoption' }))
+    fireEvent.change(screen.getByLabelText('Skill name'), { target: { value: 'reviewer' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview adoption' }))
+    expect(await screen.findByText(/manual_review_required:foreign target/)).toBeInTheDocument()
+    expect(await screen.findByText(/blocked\/manual/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspace Lockfile' }))
+    fireEvent.change(screen.getByLabelText('Workspace target'), { target: { value: 'workspace-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect lockfile' }))
+    expect(await screen.findByText(/stored snapshot: v1/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'GC' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview GC' }))
+    expect(await screen.findByText('unreferenced')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('gc-key-1')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('gc-nonce-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Profiles' }))
     fireEvent.click(screen.getByRole('button', { name: 'Create demo profile' }))
     expect((await screen.findAllByText(/default-governance-profile/)).length).toBeGreaterThan(0)
     fireEvent.click(screen.getByRole('button', { name: 'Bind profile' }))
@@ -1193,7 +1363,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View files' }))
     expect(await screen.findByRole('heading', { name: 'Reviewer' })).toBeInTheDocument()
     expect(await screen.findByText(/Review local changes\./)).toBeInTheDocument()
-  })
+  }, 15_000)
 
   it('creates, assigns, updates, and links local tasks', async () => {
     render(<LocalApp />)

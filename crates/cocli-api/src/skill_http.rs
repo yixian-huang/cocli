@@ -142,6 +142,10 @@ impl SkillSnapshotCoordinator {
             .await
             .retain(|key, _| !matches!(key, SkillSnapshotKey::Agent(id) if *id == agent_id));
     }
+
+    pub(super) async fn invalidate_all(&self) {
+        self.cache.lock().await.clear();
+    }
 }
 
 pub(super) fn router() -> Router<AppState> {
