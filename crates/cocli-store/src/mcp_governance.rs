@@ -353,14 +353,15 @@ impl Store {
         query(
             "INSERT INTO mcp_plans \
              (id, target_json, effective_desired_state_json, actions_json, observation_hash, \
-              config_hash, plan_hash, generated_at, dry_run, applied) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+              config_hash, capability_hash, plan_hash, generated_at, dry_run, applied) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO UPDATE SET \
                 target_json = excluded.target_json, \
                 effective_desired_state_json = excluded.effective_desired_state_json, \
                 actions_json = excluded.actions_json, \
                 observation_hash = excluded.observation_hash, \
                 config_hash = excluded.config_hash, \
+                capability_hash = excluded.capability_hash, \
                 plan_hash = excluded.plan_hash, \
                 generated_at = excluded.generated_at, \
                 dry_run = excluded.dry_run, \
@@ -372,6 +373,7 @@ impl Store {
         .bind(serde_json::to_string(&plan.actions)?)
         .bind(&plan.observation_hash)
         .bind(&plan.config_hash)
+        .bind(&plan.capability_hash)
         .bind(&plan.plan_hash)
         .bind(&plan.generated_at)
         .bind(plan.dry_run)
@@ -385,7 +387,7 @@ impl Store {
     pub async fn get_mcp_plan(&self, plan_id: &str) -> Result<Option<McpPlan>, StoreError> {
         let row = query(
             "SELECT id, target_json, effective_desired_state_json, actions_json, \
-             observation_hash, config_hash, plan_hash, generated_at, dry_run, applied \
+             observation_hash, config_hash, capability_hash, plan_hash, generated_at, dry_run, applied \
              FROM mcp_plans WHERE id = ?",
         )
         .bind(plan_id)
@@ -601,6 +603,7 @@ fn plan_from_row(row: SqliteRow) -> Result<McpPlan, StoreError> {
         actions: serde_json::from_str(row.try_get::<String, _>("actions_json")?.as_str())?,
         observation_hash: row.try_get("observation_hash")?,
         config_hash: row.try_get("config_hash")?,
+        capability_hash: row.try_get("capability_hash")?,
         plan_hash: row.try_get("plan_hash")?,
         generated_at: row.try_get("generated_at")?,
         dry_run: row.try_get("dry_run")?,

@@ -759,6 +759,33 @@ pub trait RuntimeService: Send + Sync {
         Ok(cocli_driver_core::McpInventory::default())
     }
 
+    /// Negotiates the versioned MCP adapter contract without mutating Runtime
+    /// or user configuration state.
+    async fn inspect_mcp_capabilities(
+        &self,
+    ) -> Result<cocli_driver_core::McpCapabilitySnapshot, RuntimeError> {
+        let mut snapshot = cocli_driver_core::McpCapabilitySnapshot::default();
+        snapshot.hash = cocli_driver_core::hash_mcp_capabilities(&snapshot);
+        Ok(snapshot)
+    }
+
+    /// Revalidates adapter/version/source constraints for a persisted plan.
+    async fn preflight_mcp(
+        &self,
+        plan: &cocli_driver_core::McpPlan,
+    ) -> Result<cocli_driver_core::McpPreflightReport, RuntimeError> {
+        Ok(cocli_driver_core::McpPreflightReport {
+            plan_id: plan.id.clone(),
+            plan_hash: plan.plan_hash.clone(),
+            capability_hash: plan.capability_hash.clone(),
+            observation_hash: plan.observation_hash.clone(),
+            config_hash: plan.config_hash.clone(),
+            actions: Vec::new(),
+            stale_reasons: Vec::new(),
+            executable: false,
+        })
+    }
+
     /// Applies an already-approved MCP plan through runtime-specific writers.
     /// Implementations must enforce per-source CAS and atomic backup/write
     /// semantics; the default is deliberately unsupported.

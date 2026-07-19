@@ -71,6 +71,7 @@ fn empty_plan(id: &str) -> McpPlan {
         actions: Vec::new(),
         observation_hash: "observation-hash".to_owned(),
         config_hash: "config-hash".to_owned(),
+        capability_hash: "capability-hash".to_owned(),
         plan_hash: "plan-hash".to_owned(),
         generated_at: Utc::now().to_rfc3339(),
         dry_run: true,

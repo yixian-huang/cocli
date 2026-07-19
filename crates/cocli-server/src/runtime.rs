@@ -561,6 +561,19 @@ impl RuntimeService for LocalRuntimeService {
         Ok(crate::mcp::inspect(&self.catalog, &self.config).await)
     }
 
+    async fn inspect_mcp_capabilities(
+        &self,
+    ) -> Result<cocli_driver_core::McpCapabilitySnapshot, RuntimeError> {
+        Ok(crate::mcp::capabilities(&self.catalog, &self.config).await)
+    }
+
+    async fn preflight_mcp(
+        &self,
+        plan: &cocli_driver_core::McpPlan,
+    ) -> Result<cocli_driver_core::McpPreflightReport, RuntimeError> {
+        Ok(crate::mcp::preflight(&self.catalog, &self.config, plan).await)
+    }
+
     async fn apply_mcp(
         &self,
         request: cocli_driver_core::McpApplyExecutionRequest,

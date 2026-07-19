@@ -6,11 +6,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use cocli_driver_core::{
-    generate_mcp_plan, hash_mcp_config, hash_mcp_observation, resolve_mcp_desired_state,
-    McpApplyExecutionRequest, McpApplyExecutionResult, McpBindingTargetType, McpDesiredTarget,
-    McpDiagnosticSeverity, McpDoctorReport, McpDoctorSummary, McpEffectiveDesiredState,
-    McpInventory, McpPlan, McpProfile, McpProfileBinding, McpRiskLevel,
-    McpRollbackExecutionRequest, McpVerificationResult, McpVerificationStatus,
+    bind_mcp_plan_capabilities, generate_mcp_plan, hash_mcp_config, hash_mcp_observation,
+    resolve_mcp_desired_state, McpApplyExecutionRequest, McpApplyExecutionResult,
+    McpApplyJournalEntry, McpApplyJournalPhase, McpBindingTargetType, McpCapabilitySnapshot,
+    McpDesiredTarget, McpDiagnosticSeverity, McpDoctorReport, McpDoctorSummary,
+    McpEffectiveDesiredState, McpInventory, McpPlan, McpPreflightReport, McpProfile,
+    McpProfileBinding, McpRiskLevel, McpRollbackExecutionRequest, McpSessionEffectiveStatus,
+    McpVerificationResult, McpVerificationStatus,
 };
 use cocli_store::{
     McpApplyRun, McpApplyRunStatus, McpPlanDecision, McpPlanDecisionStatus, NewMcpApplyRun,
@@ -26,6 +28,10 @@ pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/runtimes/mcp/inventory", get(machine_mcp_inventory))
         .route("/api/runtimes/mcp/doctor", get(machine_mcp_doctor))
+        .route(
+            "/api/runtimes/mcp/capabilities",
+            get(machine_mcp_capabilities),
+        )
         .route(
             "/api/runtimes/mcp/profiles",
             get(list_profiles).post(create_profile),
@@ -46,6 +52,10 @@ pub(super) fn router() -> Router<AppState> {
         .route("/api/runtimes/mcp/plans", post(create_plan))
         .route("/api/runtimes/mcp/plans/:plan_id", get(get_plan))
         .route(
+            "/api/runtimes/mcp/plans/:plan_id/preflight",
+            get(preflight_plan),
+        )
+        .route(
             "/api/runtimes/mcp/plans/:plan_id/approve",
             post(approve_plan),
         )
@@ -55,6 +65,10 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/api/runtimes/mcp/apply-runs/:run_id/rollback",
             post(rollback_apply_run),
+        )
+        .route(
+            "/api/runtimes/mcp/apply-runs/:run_id/manual-recovery",
+            post(record_manual_recovery),
         )
 }
 
@@ -69,6 +83,12 @@ async fn machine_mcp_doctor(
 ) -> Result<Json<McpDoctorReport>, ApiError> {
     let inventory = state.runtime.inspect_mcp().await?;
     Ok(Json(doctor_report(inventory)))
+}
+
+async fn machine_mcp_capabilities(
+    State(state): State<AppState>,
+) -> Result<Json<McpCapabilitySnapshot>, ApiError> {
+    Ok(Json(state.runtime.inspect_mcp_capabilities().await?))
 }
 
 #[derive(Debug, Serialize)]
@@ -219,14 +239,24 @@ async fn create_plan(
 ) -> Result<(StatusCode, Json<McpPlanView>), ApiError> {
     let effective = resolve_state(&state, target).await?;
     let inventory = state.runtime.inspect_mcp().await?;
-    let plan = generate_mcp_plan(
+    let mut plan = generate_mcp_plan(
         Uuid::new_v4().to_string(),
         Utc::now().to_rfc3339(),
         effective,
         &inventory,
     );
+    let capabilities = state.runtime.inspect_mcp_capabilities().await?;
+    bind_mcp_plan_capabilities(&mut plan, &capabilities);
     state.store.save_mcp_plan(&plan).await?;
     Ok((StatusCode::CREATED, Json(McpPlanView::pending(plan))))
+}
+
+async fn preflight_plan(
+    State(state): State<AppState>,
+    Path(plan_id): Path<String>,
+) -> Result<Json<McpPreflightReport>, ApiError> {
+    let plan = require_plan(&state, &plan_id).await?;
+    Ok(Json(state.runtime.preflight_mcp(&plan).await?))
 }
 
 async fn get_plan(
@@ -254,8 +284,11 @@ async fn approve_plan(
     if request.plan_hash != plan.plan_hash {
         return Err(ApiError::conflict("MCP plan hash is stale"));
     }
-    let (observation_hash, config_hash) = current_hashes(&state, &plan).await?;
-    if observation_hash != plan.observation_hash || config_hash != plan.config_hash {
+    let (observation_hash, config_hash, capability_hash) = current_hashes(&state, &plan).await?;
+    if observation_hash != plan.observation_hash
+        || config_hash != plan.config_hash
+        || capability_hash != plan.capability_hash
+    {
         return Err(ApiError::conflict(
             "MCP plan observation or desired configuration is stale",
         ));
@@ -343,25 +376,26 @@ async fn apply_plan(
         .store
         .get_mcp_apply_run_for_approval(&plan.id, decision.id)
         .await?;
-    if let Some(existing) = existing.as_ref().filter(|run| {
-        !matches!(
-            run.status,
-            McpApplyRunStatus::Pending | McpApplyRunStatus::Running
-        )
-    }) {
+    if let Some(existing) = existing
+        .as_ref()
+        .filter(|run| !is_active_apply_status(run.status))
+    {
         return Ok(Json(ApplyRunView {
             run: existing.clone(),
         }));
     }
-    let (observation_hash, config_hash) = current_hashes(&state, &plan).await?;
-    if observation_hash != plan.observation_hash || config_hash != plan.config_hash {
+    let (observation_hash, config_hash, capability_hash) = current_hashes(&state, &plan).await?;
+    if observation_hash != plan.observation_hash
+        || config_hash != plan.config_hash
+        || capability_hash != plan.capability_hash
+    {
         if let Some(existing) = existing
             .as_ref()
-            .filter(|run| run.status == McpApplyRunStatus::Running)
+            .filter(|run| is_active_apply_status(run.status))
         {
             let run = state
                 .store
-                .fail_interrupted_mcp_apply_run(
+                .mark_mcp_apply_recovery_required(
                     existing.id,
                     "observation or desired configuration drifted during an interrupted apply",
                 )
@@ -379,6 +413,12 @@ async fn apply_plan(
     if high_risk && !request.confirm_high_risk {
         return Err(ApiError::bad_request(
             "high-risk MCP plan requires explicit second confirmation",
+        ));
+    }
+    let preflight = state.runtime.preflight_mcp(&plan).await?;
+    if !preflight.stale_reasons.is_empty() {
+        return Err(ApiError::conflict(
+            "MCP adapter preflight is stale; regenerate and approve the plan",
         ));
     }
     let run = match existing {
@@ -399,12 +439,15 @@ async fn apply_plan(
                     plan_hash: plan.plan_hash.clone(),
                     observation_hash: plan.observation_hash.clone(),
                     config_hash: plan.config_hash.clone(),
+                    capability_hash: plan.capability_hash.clone(),
                     actor: request.actor.clone(),
                     confirm_high_risk: request.confirm_high_risk,
                 })
                 .await?
         }
     };
+    let run = checkpoint_preflight(&state, run, &preflight).await?;
+    let capability_hash = plan.capability_hash.clone();
     let execution = match state
         .runtime
         .apply_mcp(McpApplyExecutionRequest {
@@ -412,17 +455,90 @@ async fn apply_plan(
             plan,
             actor: request.actor,
             confirm_high_risk: request.confirm_high_risk,
+            capability_hash,
+            resume_journal: run.journal.clone(),
         })
         .await
     {
         Ok(result) => result,
         Err(error) => failed_execution(&run, error),
     };
+    checkpoint_execution(&state, run.id, &execution).await?;
     let run = state
         .store
         .complete_mcp_apply_run(run.id, &execution)
         .await?;
     Ok(Json(ApplyRunView { run }))
+}
+
+async fn checkpoint_execution(
+    state: &AppState,
+    run_id: Uuid,
+    execution: &McpApplyExecutionResult,
+) -> Result<(), ApiError> {
+    for entry in &execution.journal {
+        state
+            .store
+            .checkpoint_mcp_apply_run(run_id, entry.phase, entry, None, None)
+            .await?;
+    }
+    Ok(())
+}
+
+async fn checkpoint_preflight(
+    state: &AppState,
+    run: McpApplyRun,
+    preflight: &McpPreflightReport,
+) -> Result<McpApplyRun, ApiError> {
+    let mut next = run;
+    for action in &preflight.actions {
+        let entry = McpApplyJournalEntry {
+            sequence: next
+                .journal
+                .iter()
+                .map(|entry| entry.sequence)
+                .max()
+                .unwrap_or(0)
+                + 1,
+            action_index: action.action_index,
+            runtime: action.runtime.clone(),
+            server_id: action.server_id.clone(),
+            idempotency_key: action.idempotency_key.clone(),
+            phase: McpApplyJournalPhase::Preflight,
+            attempt: (next.attempt + 1).max(1) as u32,
+            expected_source_hash: action.expected_source_hash.clone(),
+            expected_schema_hash: action.expected_schema_hash.clone(),
+            backup: None,
+            reason: action.reason.clone(),
+            evidence: Vec::new(),
+        };
+        next = state
+            .store
+            .checkpoint_mcp_apply_run(
+                next.id,
+                McpApplyJournalPhase::Preflight,
+                &entry,
+                Some(preflight),
+                None,
+            )
+            .await?;
+    }
+    Ok(next)
+}
+
+fn is_active_apply_status(status: McpApplyRunStatus) -> bool {
+    matches!(
+        status,
+        McpApplyRunStatus::Pending
+            | McpApplyRunStatus::Running
+            | McpApplyRunStatus::Preflight
+            | McpApplyRunStatus::Locked
+            | McpApplyRunStatus::BackedUp
+            | McpApplyRunStatus::Written
+            | McpApplyRunStatus::ReloadPending
+            | McpApplyRunStatus::Reloaded
+            | McpApplyRunStatus::RecoveryRequired
+    )
 }
 
 async fn valid_apply_approval(
@@ -482,7 +598,10 @@ fn failed_execution(run: &McpApplyRun, error: super::RuntimeError) -> McpApplyEx
             status: verification_status,
             observation_hash: run.observation_hash.clone(),
             mismatches: vec![format!("{reason}; no configuration success was recorded")],
+            written_config_hashes: Default::default(),
+            session_effective: McpSessionEffectiveStatus::Unknown,
         },
+        journal: run.journal.clone(),
     }
 }
 
@@ -508,10 +627,15 @@ async fn rollback_apply_run(
     Path(run_id): Path<Uuid>,
     Json(request): Json<RollbackRunRequest>,
 ) -> Result<Json<ApplyRunView>, ApiError> {
+    let initial = state
+        .store
+        .get_mcp_apply_run(run_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("MCP apply run not found"))?;
     let lock = {
         let mut locks = state.mcp_apply_locks.lock().await;
         locks
-            .entry(format!("rollback:{run_id}"))
+            .entry(initial.plan_id.clone())
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
             .clone()
     };
@@ -523,7 +647,11 @@ async fn rollback_apply_run(
         .ok_or_else(|| ApiError::not_found("MCP apply run not found"))?;
     if matches!(
         run.status,
-        McpApplyRunStatus::Pending | McpApplyRunStatus::Running
+        McpApplyRunStatus::Pending
+            | McpApplyRunStatus::Running
+            | McpApplyRunStatus::Preflight
+            | McpApplyRunStatus::Locked
+            | McpApplyRunStatus::RollingBack
     ) {
         return Err(ApiError::conflict(
             "MCP apply run must finish before rollback",
@@ -555,6 +683,31 @@ async fn rollback_apply_run(
     let run = state
         .store
         .complete_mcp_rollback(run.id, &actor, &result)
+        .await?;
+    Ok(Json(ApplyRunView { run }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManualRecoveryRequest {
+    actor: Option<String>,
+    reason: String,
+}
+
+async fn record_manual_recovery(
+    State(state): State<AppState>,
+    Path(run_id): Path<Uuid>,
+    Json(request): Json<ManualRecoveryRequest>,
+) -> Result<Json<ApplyRunView>, ApiError> {
+    let actor = request.actor.unwrap_or_else(|| "desktop-user".to_owned());
+    if actor.trim().is_empty() || request.reason.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "manual recovery actor and reason are required",
+        ));
+    }
+    let run = state
+        .store
+        .record_mcp_manual_recovery(run_id, &actor, &request.reason)
         .await?;
     Ok(Json(ApplyRunView { run }))
 }
@@ -599,7 +752,10 @@ async fn require_plan(state: &AppState, plan_id: &str) -> Result<McpPlan, ApiErr
         .ok_or_else(|| ApiError::not_found("MCP plan not found"))
 }
 
-async fn current_hashes(state: &AppState, plan: &McpPlan) -> Result<(String, String), ApiError> {
+async fn current_hashes(
+    state: &AppState,
+    plan: &McpPlan,
+) -> Result<(String, String, String), ApiError> {
     let target = TargetInput {
         workspace_id: plan
             .target
@@ -618,9 +774,11 @@ async fn current_hashes(state: &AppState, plan: &McpPlan) -> Result<(String, Str
     };
     let effective = resolve_state(state, target).await?;
     let inventory = state.runtime.inspect_mcp().await?;
+    let capabilities = state.runtime.inspect_mcp_capabilities().await?;
     Ok((
         hash_mcp_observation(&inventory),
         hash_mcp_config(&effective),
+        capabilities.hash,
     ))
 }
 
@@ -660,13 +818,17 @@ impl McpPlanView {
 async fn plan_view(state: &AppState, plan: McpPlan) -> Result<McpPlanView, ApiError> {
     let decision = state.store.get_mcp_plan_decision(&plan.id).await?;
     let Some(decision) = decision else {
-        let (current_observation_hash, current_config_hash) = current_hashes(state, &plan).await?;
+        let (current_observation_hash, current_config_hash, current_capability_hash) =
+            current_hashes(state, &plan).await?;
         let mut stale_reasons = Vec::new();
         if current_observation_hash != plan.observation_hash {
             stale_reasons.push("observation_drift".to_owned());
         }
         if current_config_hash != plan.config_hash {
             stale_reasons.push("desired_config_drift".to_owned());
+        }
+        if current_capability_hash != plan.capability_hash {
+            stale_reasons.push("adapter_capability_or_version_drift".to_owned());
         }
         return Ok(McpPlanView {
             plan,
@@ -699,12 +861,16 @@ async fn plan_view(state: &AppState, plan: McpPlan) -> Result<McpPlanView, ApiEr
     if decision.config_hash != plan.config_hash {
         stale_reasons.push("approval_base_config_mismatch".to_owned());
     }
-    let (current_observation_hash, current_config_hash) = current_hashes(state, &plan).await?;
+    let (current_observation_hash, current_config_hash, current_capability_hash) =
+        current_hashes(state, &plan).await?;
     if current_observation_hash != plan.observation_hash {
         stale_reasons.push("observation_drift".to_owned());
     }
     if current_config_hash != plan.config_hash {
         stale_reasons.push("desired_config_drift".to_owned());
+    }
+    if current_capability_hash != plan.capability_hash {
+        stale_reasons.push("adapter_capability_or_version_drift".to_owned());
     }
     let expired = decision
         .expires_at

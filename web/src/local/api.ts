@@ -337,6 +337,17 @@ export type McpPlanActionKind =
   | 'approval_required'
   | 'authentication_required'
   | 'manual_unsupported'
+export type McpCapabilitySupport = 'supported' | 'read_only' | 'unsupported' | 'unknown'
+export type McpCapabilityOperation =
+  | 'read_discover'
+  | 'add_configure'
+  | 'enable_disable'
+  | 'remove'
+  | 'secret_reference'
+  | 'reload'
+  | 'verify'
+  | 'rollback'
+export type McpReloadStrategy = 'native_reload' | 'new_session_only' | 'deferred' | 'unsupported'
 
 export interface McpBindingTarget {
   targetType: McpBindingTargetType
@@ -446,10 +457,63 @@ export interface McpPlan {
   actions: McpPlanAction[]
   observationHash: string
   configHash: string
+  capabilityHash: string
   planHash: string
   generatedAt: string
   dryRun: boolean
   applied: boolean
+}
+
+export interface McpCapabilityDetail {
+  support: McpCapabilitySupport
+  reason: string
+  evidence: McpEvidence[]
+}
+
+export interface McpRuntimeCapability {
+  runtime: string
+  adapter: string
+  binaryPath?: string
+  binaryVersion?: string
+  configSchemaVersion: string
+  destination: string
+  allowedSubtree: string
+  reloadStrategy: McpReloadStrategy
+  operations: Partial<Record<McpCapabilityOperation, McpCapabilityDetail>>
+}
+
+export interface McpCapabilitySnapshot {
+  hash: string
+  observedAt: string
+  runtimes: McpRuntimeCapability[]
+}
+
+export interface McpPreflightAction {
+  actionIndex: number
+  runtime: string
+  serverId: string
+  operation: McpCapabilityOperation
+  support: McpCapabilitySupport
+  executable: boolean
+  reason: string
+  adapter: string
+  destination: string
+  allowedSubtree: string
+  reloadStrategy: McpReloadStrategy
+  idempotencyKey: string
+  expectedSourceHash?: string
+  expectedSchemaHash?: string
+}
+
+export interface McpPreflightReport {
+  planId: string
+  planHash: string
+  capabilityHash: string
+  observationHash: string
+  configHash: string
+  actions: McpPreflightAction[]
+  staleReasons: string[]
+  executable: boolean
 }
 
 export interface McpPlanDecision {
@@ -486,11 +550,19 @@ export type McpVerificationStatus = 'matched' | 'mismatched' | 'blocked' | 'fail
 export type McpApplyRunStatus =
   | 'pending'
   | 'running'
+  | 'preflight'
+  | 'locked'
+  | 'backed_up'
+  | 'written'
+  | 'reload_pending'
+  | 'reloaded'
   | 'completed'
   | 'blocked'
   | 'failed'
   | 'verified'
   | 'rolled_back'
+  | 'rolling_back'
+  | 'recovery_required'
   | 'partial'
 
 export interface McpBackupDescriptor {
@@ -525,6 +597,34 @@ export interface McpVerificationResult {
   status: McpVerificationStatus
   observationHash: string
   mismatches: string[]
+  writtenConfigHashes?: Record<string, string>
+  sessionEffective?: 'effective' | 'new_session_required' | 'unknown'
+}
+
+export interface McpApplyJournalEntry {
+  sequence: number
+  actionIndex: number
+  runtime: string
+  serverId: string
+  idempotencyKey: string
+  phase:
+    | 'preflight'
+    | 'locked'
+    | 'backed_up'
+    | 'written'
+    | 'reload_pending'
+    | 'reloaded'
+    | 'verified'
+    | 'failed'
+    | 'rolling_back'
+    | 'rolled_back'
+    | 'recovery_required'
+  attempt: number
+  expectedSourceHash?: string
+  expectedSchemaHash?: string
+  backup?: McpBackupDescriptor
+  reason: string
+  evidence: McpEvidence[]
 }
 
 export interface McpApplyRun {
@@ -533,6 +633,7 @@ export interface McpApplyRun {
   planHash: string
   observationHash: string
   configHash: string
+  capabilityHash: string
   actor: string
   status: McpApplyRunStatus
   confirmHighRisk: boolean
@@ -542,6 +643,10 @@ export interface McpApplyRun {
   reloads: McpReloadResult[]
   verification: McpVerificationResult
   staleReasons: string[]
+  journal: McpApplyJournalEntry[]
+  preflight?: Record<string, unknown>
+  recoveryReason?: string
+  attempt: number
   canRollback: boolean
   rollbackStatus?: McpApplyRunStatus
   rollbackActor?: string
@@ -558,6 +663,11 @@ export interface McpApplyPlanRequest {
 
 export interface McpRollbackRunRequest {
   actor?: string
+}
+
+export interface McpManualRecoveryRequest {
+  actor?: string
+  reason: string
 }
 
 export interface McpApplyRunView {
@@ -825,6 +935,8 @@ export const localApi = {
     request<McpDoctorReport>('/api/runtimes/mcp/doctor'),
   listMachineMcp: () =>
     request<McpInventory>('/api/runtimes/mcp/inventory'),
+  inspectMcpCapabilities: () =>
+    request<McpCapabilitySnapshot>('/api/runtimes/mcp/capabilities'),
   listMcpProfiles: () =>
     request<{ profiles: McpProfile[] }>('/api/runtimes/mcp/profiles'),
   listMcpProfileBindings: () =>
@@ -836,6 +948,8 @@ export const localApi = {
       method: 'POST',
       body: JSON.stringify({}),
     }),
+  preflightMcpPlan: (planId: string) =>
+    request<McpPreflightReport>(`/api/runtimes/mcp/plans/${planId}/preflight`),
   approveMcpPlan: (
     planId: string,
     planHash: string,
@@ -858,6 +972,11 @@ export const localApi = {
     }),
   rollbackMcpApplyRun: (runId: string, input: McpRollbackRunRequest = {}) =>
     request<McpApplyRunView>(`/api/runtimes/mcp/apply-runs/${runId}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ actor: 'desktop-user', ...input }),
+    }),
+  recordMcpManualRecovery: (runId: string, input: McpManualRecoveryRequest) =>
+    request<McpApplyRunView>(`/api/runtimes/mcp/apply-runs/${runId}/manual-recovery`, {
       method: 'POST',
       body: JSON.stringify({ actor: 'desktop-user', ...input }),
     }),

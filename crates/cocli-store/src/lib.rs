@@ -3672,6 +3672,11 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             "mcp_governance_phase_2b",
             include_str!("../migrations/0014_mcp_governance_phase_2b.sql"),
         ),
+        (
+            15,
+            "mcp_governance_phase_2c",
+            include_str!("../migrations/0015_mcp_governance_phase_2c.sql"),
+        ),
     ] {
         let already_applied: bool =
             query_scalar("SELECT EXISTS(SELECT 1 FROM cocli_schema_migrations WHERE version = ?)")

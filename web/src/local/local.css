@@ -1486,7 +1486,8 @@ textarea::placeholder {
 }
 
 .mcp-apply-controls,
-.mcp-apply-run {
+.mcp-apply-run,
+.mcp-preflight {
   margin-top: var(--space-4);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
@@ -1523,6 +1524,12 @@ textarea::placeholder {
 
 .mcp-apply-run {
   padding: var(--space-4);
+}
+
+.mcp-preflight {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3);
 }
 
 .mcp-apply-run h3,

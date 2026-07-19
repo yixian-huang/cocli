@@ -3,10 +3,12 @@ import { RefreshCw } from 'lucide-react'
 import {
   localApi,
   type McpApplyRun,
+  type McpCapabilitySnapshot,
   type McpDoctorReport,
   type McpEffectiveDesiredState,
   type McpPlanAction,
   type McpPlanView,
+  type McpPreflightReport,
   type McpProfile,
   type McpProfileBinding,
   type McpStateSummary,
@@ -71,13 +73,16 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
   const [profiles, setProfiles] = useState<McpProfile[]>([])
   const [bindings, setBindings] = useState<McpProfileBinding[]>([])
   const [effective, setEffective] = useState<McpEffectiveDesiredState | null>(null)
+  const [capabilities, setCapabilities] = useState<McpCapabilitySnapshot | null>(null)
   const [planView, setPlanView] = useState<McpPlanView | null>(null)
+  const [preflight, setPreflight] = useState<McpPreflightReport | null>(null)
   const [applyRun, setApplyRun] = useState<McpApplyRun | null>(null)
   const [loading, setLoading] = useState(true)
   const [planning, setPlanning] = useState(false)
   const [decisionBusy, setDecisionBusy] = useState(false)
   const [applying, setApplying] = useState(false)
   const [rollingBack, setRollingBack] = useState(false)
+  const [recordingRecovery, setRecordingRecovery] = useState(false)
   const [confirmHighRisk, setConfirmHighRisk] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -85,16 +90,18 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
     setLoading(true)
     setError(null)
     try {
-      const [nextReport, nextProfiles, nextBindings, nextEffective] = await Promise.all([
+      const [nextReport, nextProfiles, nextBindings, nextEffective, nextCapabilities] = await Promise.all([
         localApi.inspectMachineMcp(),
         localApi.listMcpProfiles(),
         localApi.listMcpProfileBindings(),
         localApi.getMcpEffectiveDesiredState(),
+        localApi.inspectMcpCapabilities(),
       ])
       setReport(nextReport)
       setProfiles(nextProfiles.profiles)
       setBindings(nextBindings.bindings)
       setEffective(nextEffective)
+      setCapabilities(nextCapabilities)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : t('mcpLoadError'))
     } finally {
@@ -124,9 +131,12 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
     setPlanning(true)
     setError(null)
     setApplyRun(null)
+    setPreflight(null)
     setConfirmHighRisk(false)
     try {
-      setPlanView(await localApi.createMcpPlan())
+      const nextPlan = await localApi.createMcpPlan()
+      setPlanView(nextPlan)
+      setPreflight(await localApi.preflightMcpPlan(nextPlan.plan.id))
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : t('mcpPlanError'))
     } finally {
@@ -188,6 +198,22 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
       setError(nextError instanceof Error ? nextError.message : t('mcpRollbackError'))
     } finally {
       setRollingBack(false)
+    }
+  }
+
+  const recordManualRecovery = async () => {
+    if (!applyRun) return
+    setRecordingRecovery(true)
+    setError(null)
+    try {
+      const next = await localApi.recordMcpManualRecovery(applyRun.id, {
+        reason: 'Manual recovery acknowledged from desktop recovery surface',
+      })
+      setApplyRun(next.run)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpRollbackError'))
+    } finally {
+      setRecordingRecovery(false)
     }
   }
 
@@ -281,6 +307,53 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                 </article>
               ))}
             </div>
+          </section>
+
+          <section className="mcp-panel" aria-labelledby="mcp-capability-title">
+            <div className="workspace-section-title">
+              <div>
+                <h2 id="mcp-capability-title">{t('mcpCapabilities')}</h2>
+                <p>{t('mcpCapabilitiesDescription')}</p>
+              </div>
+            </div>
+            {capabilities ? (
+              <>
+                <div className="mcp-plan-status">
+                  <span>{t('mcpCapabilityHash')}: {capabilities.hash}</span>
+                  <span>{new Date(capabilities.observedAt).toLocaleString()}</span>
+                </div>
+                <div className="skill-inventory-table-wrap">
+                  <table className="skill-inventory-table mcp-matrix">
+                    <thead>
+                      <tr>
+                        <th>{t('mcpRuntime')}</th>
+                        <th>{t('mcpAdapter')}</th>
+                        <th>{t('mcpBinaryVersion')}</th>
+                        <th>{t('mcpReloadStrategy')}</th>
+                        <th>{t('mcpDestination')}</th>
+                        <th>{t('mcpOperations')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {capabilities.runtimes.map((runtime) => (
+                        <tr key={runtime.runtime}>
+                          <th scope="row">{runtime.runtime}</th>
+                          <td>{runtime.adapter}</td>
+                          <td>{runtime.binaryVersion ?? 'unknown'}</td>
+                          <td>{runtime.reloadStrategy}</td>
+                          <td>{runtime.destination} · {runtime.allowedSubtree}</td>
+                          <td>
+                            {Object.entries(runtime.operations)
+                              .map(([operation, detail]) => `${operation}=${detail?.support ?? 'unknown'}`)
+                              .join(' · ')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : <p>{t('mcpNoCapabilities')}</p>}
           </section>
 
           <section className="mcp-panel" aria-labelledby="mcp-findings-title">
@@ -398,11 +471,34 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                 <div className="mcp-plan-status">
                   <span>{t('mcpApprovalStatus')}: {planView.approvalStatus}</span>
                   <span>{t('mcpPlanHash')}: {planView.plan.planHash}</span>
+                  <span>{t('mcpCapabilityHash')}: {planView.plan.capabilityHash}</span>
                   <span>{planView.plan.dryRun ? t('mcpDryRun') : t('mcpNotDryRun')}</span>
                   {planView.decision?.expiresAt && <span>{t('mcpApprovalExpires')}: {new Date(planView.decision.expiresAt).toLocaleString()}</span>}
                   {planView.approvedButNotApplied && <strong>{t('mcpApprovedNotApplied')}</strong>}
                 </div>
                 <p className="mcp-apply-boundary">{t('mcpApplyBoundary')}</p>
+                {preflight && (
+                  <div className="mcp-preflight">
+                    <div className="mcp-plan-status">
+                      <strong>{t('mcpPreflight')}: {preflight.executable ? t('mcpExecutableAction') : t('mcpNonExecutableAction')}</strong>
+                      <span>{t('mcpCapabilityHash')}: {preflight.capabilityHash}</span>
+                      <span>{t('mcpExpectedHashes')}: {preflight.observationHash} / {preflight.configHash}</span>
+                    </div>
+                    {preflight.staleReasons.length > 0 && (
+                      <ul className="mcp-conflict-list">
+                        {preflight.staleReasons.map((reason) => <li key={`preflight-${reason}`}>{reason}</li>)}
+                      </ul>
+                    )}
+                    <ul className="mcp-conflict-list">
+                      {preflight.actions.map((action) => (
+                        <li key={`${action.actionIndex}-${action.idempotencyKey}`}>
+                          <strong>{action.operation} · {action.support} · {action.reloadStrategy}</strong>
+                          <span>{action.adapter} · {action.destination} · {action.reason}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 {planView.staleReasons.length > 0 && (
                   <ul className="mcp-conflict-list">
                     {planView.staleReasons.map((reason) => <li key={reason}>{reason}</li>)}
@@ -470,13 +566,20 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                           {rollingBack ? t('mcpRollingBack') : t('mcpRollback')}
                         </button>
                       )}
+                      {applyRun.status === 'recovery_required' && (
+                        <button type="button" className="secondary-action" onClick={() => void recordManualRecovery()} disabled={recordingRecovery}>
+                          {recordingRecovery ? t('mcpRecordingRecovery') : t('mcpManualRecovery')}
+                        </button>
+                      )}
                     </div>
                     <div className="mcp-plan-status">
                       <span>{t('mcpApplyRunId')}: {applyRun.id}</span>
                       <span>{t('mcpApplyStatus')}: {applyRun.status}</span>
                       <span>{t('mcpPlanHash')}: {applyRun.planHash}</span>
-                      <span>{t('mcpExpectedHashes')}: {applyRun.observationHash} / {applyRun.configHash}</span>
+                      <span>{t('mcpExpectedHashes')}: {applyRun.observationHash} / {applyRun.configHash} / {applyRun.capabilityHash}</span>
+                      <span>{t('mcpAttempt')}: {applyRun.attempt}</span>
                       {applyRun.rollbackStatus && <span>{t('mcpRollbackStatus')}: {applyRun.rollbackStatus}</span>}
+                      {applyRun.recoveryReason && <strong>{t('mcpRecoveryRequired')}: {applyRun.recoveryReason}</strong>}
                     </div>
                     {applyRun.staleReasons.length > 0 && (
                       <ul className="mcp-conflict-list">
@@ -506,11 +609,24 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                           ))}
                           <li>
                             <strong>{t('mcpVerify')}: {applyRun.verification.status}</strong>
-                            <span>{applyRun.verification.mismatches.join(' · ') || applyRun.verification.observationHash}</span>
+                            <span>{applyRun.verification.mismatches.join(' · ') || applyRun.verification.observationHash} · session={applyRun.verification.sessionEffective ?? 'unknown'}</span>
                           </li>
                         </ul>
                       </div>
                     </div>
+                    {applyRun.journal.length > 0 && (
+                      <div>
+                        <h4>{t('mcpJournal')}</h4>
+                        <ul className="mcp-conflict-list">
+                          {applyRun.journal.map((entry) => (
+                            <li key={`${entry.sequence}-${entry.idempotencyKey}-${entry.phase}`}>
+                              <strong>#{entry.sequence} · {entry.phase} · {entry.runtime}</strong>
+                              <span>{entry.serverId} · attempt={entry.attempt} · {entry.reason}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
                     {(applyRun.rollbackActions?.length ?? 0) > 0 && (
                       <div>
                         <h4>{t('mcpRollback')}</h4>

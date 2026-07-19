@@ -592,6 +592,106 @@ pub struct McpPlanAction {
     pub blocked: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpCapabilitySupport {
+    Supported,
+    ReadOnly,
+    Unsupported,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpCapabilityOperation {
+    ReadDiscover,
+    AddConfigure,
+    EnableDisable,
+    Remove,
+    SecretReference,
+    Reload,
+    Verify,
+    Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCapabilityDetail {
+    pub support: McpCapabilitySupport,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence: Vec<McpEvidence>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpReloadStrategy {
+    NativeReload,
+    NewSessionOnly,
+    #[default]
+    Deferred,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRuntimeCapability {
+    pub runtime: String,
+    pub adapter: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary_version: Option<String>,
+    pub config_schema_version: String,
+    pub destination: String,
+    pub allowed_subtree: String,
+    pub reload_strategy: McpReloadStrategy,
+    pub operations: BTreeMap<McpCapabilityOperation, McpCapabilityDetail>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCapabilitySnapshot {
+    pub hash: String,
+    pub observed_at: String,
+    pub runtimes: Vec<McpRuntimeCapability>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpPreflightAction {
+    pub action_index: usize,
+    pub runtime: String,
+    pub server_id: String,
+    pub operation: McpCapabilityOperation,
+    pub support: McpCapabilitySupport,
+    pub executable: bool,
+    pub reason: String,
+    pub adapter: String,
+    pub destination: String,
+    pub allowed_subtree: String,
+    pub reload_strategy: McpReloadStrategy,
+    pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_source_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_schema_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpPreflightReport {
+    pub plan_id: String,
+    pub plan_hash: String,
+    pub capability_hash: String,
+    pub observation_hash: String,
+    pub config_hash: String,
+    pub actions: Vec<McpPreflightAction>,
+    pub stale_reasons: Vec<String>,
+    pub executable: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct McpPlan {
@@ -601,6 +701,8 @@ pub struct McpPlan {
     pub actions: Vec<McpPlanAction>,
     pub observation_hash: String,
     pub config_hash: String,
+    #[serde(default)]
+    pub capability_hash: String,
     pub plan_hash: String,
     pub generated_at: String,
     pub dry_run: bool,
@@ -616,6 +718,47 @@ pub struct McpApplyExecutionRequest {
     pub plan: McpPlan,
     pub actor: String,
     pub confirm_high_risk: bool,
+    #[serde(default)]
+    pub capability_hash: String,
+    #[serde(default)]
+    pub resume_journal: Vec<McpApplyJournalEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpApplyJournalPhase {
+    Preflight,
+    Locked,
+    BackedUp,
+    Written,
+    ReloadPending,
+    Reloaded,
+    Verified,
+    Failed,
+    RollingBack,
+    RolledBack,
+    RecoveryRequired,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpApplyJournalEntry {
+    pub sequence: u64,
+    pub action_index: usize,
+    pub runtime: String,
+    pub server_id: String,
+    pub idempotency_key: String,
+    pub phase: McpApplyJournalPhase,
+    pub attempt: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_source_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_schema_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup: Option<McpBackupDescriptor>,
+    pub reason: String,
+    #[serde(default)]
+    pub evidence: Vec<McpEvidence>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -646,6 +789,15 @@ pub enum McpVerificationStatus {
     Mismatched,
     Blocked,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpSessionEffectiveStatus {
+    Effective,
+    NewSessionRequired,
+    #[default]
+    Unknown,
 }
 
 /// Opaque backup metadata. Backup contents never cross the adapter boundary.
@@ -693,6 +845,10 @@ pub struct McpVerificationResult {
     pub observation_hash: String,
     #[serde(default)]
     pub mismatches: Vec<String>,
+    #[serde(default)]
+    pub written_config_hashes: BTreeMap<String, String>,
+    #[serde(default)]
+    pub session_effective: McpSessionEffectiveStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -701,6 +857,8 @@ pub struct McpApplyExecutionResult {
     pub actions: Vec<McpApplyActionResult>,
     pub reloads: Vec<McpReloadResult>,
     pub verification: McpVerificationResult,
+    #[serde(default)]
+    pub journal: Vec<McpApplyJournalEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -772,6 +930,26 @@ pub fn hash_mcp_config(state: &McpEffectiveDesiredState) -> String {
         (&left.profile_id, &left.binding_id).cmp(&(&right.profile_id, &right.binding_id))
     });
     hash_value(&serde_json::to_value(stable).expect("effective state is serializable"))
+}
+
+#[must_use]
+pub fn hash_mcp_capabilities(snapshot: &McpCapabilitySnapshot) -> String {
+    let mut runtimes = snapshot.runtimes.clone();
+    runtimes.sort_by(|left, right| left.runtime.cmp(&right.runtime));
+    hash_value(&serde_json::to_value(runtimes).expect("capabilities are serializable"))
+}
+
+/// Binds an adapter capability snapshot into an existing dry-run plan. The
+/// generated plan hash changes whenever the adapter contract or binary version
+/// changes, invalidating approvals without relying on wall-clock timestamps.
+pub fn bind_mcp_plan_capabilities(plan: &mut McpPlan, snapshot: &McpCapabilitySnapshot) {
+    plan.capability_hash = hash_mcp_capabilities(snapshot);
+    plan.plan_hash = hash_value(&json!({
+        "observationHash": plan.observation_hash,
+        "configHash": plan.config_hash,
+        "capabilityHash": plan.capability_hash,
+        "actions": plan.actions,
+    }));
 }
 
 #[must_use]
@@ -1030,6 +1208,7 @@ pub fn generate_mcp_plan(
         actions,
         observation_hash,
         config_hash,
+        capability_hash: String::new(),
         plan_hash,
         generated_at,
         dry_run: true,

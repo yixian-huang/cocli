@@ -209,6 +209,38 @@ describe('LocalApp', () => {
           },
         })
       }
+      if (path === '/api/runtimes/mcp/capabilities') {
+        return jsonResponse({
+          hash: 'cap-hash-1',
+          observedAt: '2026-07-19T09:00:00Z',
+          runtimes: [{
+            runtime: 'cursor',
+            adapter: 'cursor_structured_json_fallback',
+            binaryVersion: '1.0.0-test',
+            configSchemaVersion: 'cursor.mcpServers.v1',
+            destination: '/tmp/workspace/.cursor/mcp.json',
+            allowedSubtree: 'mcpServers',
+            reloadStrategy: 'new_session_only',
+            operations: {
+              read_discover: { support: 'supported', reason: 'native probe', evidence: [] },
+              add_configure: { support: 'supported', reason: 'structured fallback', evidence: [] },
+              reload: { support: 'read_only', reason: 'new sessions only', evidence: [] },
+              verify: { support: 'supported', reason: 'fresh readback', evidence: [] },
+            },
+          }, {
+            runtime: 'grok',
+            adapter: 'grok_read_only',
+            configSchemaVersion: 'grok.mcp_servers.v1',
+            destination: '$GROK_HOME/config.toml',
+            allowedSubtree: 'mcp_servers',
+            reloadStrategy: 'deferred',
+            operations: {
+              read_discover: { support: 'read_only', reason: 'no binary', evidence: [] },
+              add_configure: { support: 'read_only', reason: 'no safe writer', evidence: [] },
+            },
+          }],
+        })
+      }
       if (path === '/api/runtimes/mcp/profiles') {
         return jsonResponse({
           profiles: [{
@@ -281,6 +313,27 @@ describe('LocalApp', () => {
           }],
         })
       }
+      if (path === '/api/runtimes/mcp/capabilities') {
+        return jsonResponse({
+          hash: 'cap-hash-1',
+          observedAt: '2026-07-19T09:00:00Z',
+          runtimes: [{
+            runtime: 'cursor',
+            adapter: 'cursor_structured_json_fallback',
+            binaryVersion: '1.2.3',
+            configSchemaVersion: 'cursor.mcpServers.v1',
+            destination: '/tmp/workspace/.cursor/mcp.json',
+            allowedSubtree: 'mcpServers',
+            reloadStrategy: 'new_session_only',
+            operations: {
+              read_discover: { support: 'supported', reason: 'native readback available', evidence: [] },
+              add_configure: { support: 'supported', reason: 'structured fallback', evidence: [] },
+              reload: { support: 'read_only', reason: 'new sessions only', evidence: [] },
+              verify: { support: 'supported', reason: 'fresh readback', evidence: [] },
+            },
+          }],
+        })
+      }
       if (path === '/api/runtimes/mcp/plans' && init?.method === 'POST') {
         return jsonResponse({
           plan: {
@@ -328,6 +381,7 @@ describe('LocalApp', () => {
             }],
             observationHash: 'obs-hash-1',
             configHash: 'config-hash-1',
+            capabilityHash: 'cap-hash-1',
             planHash: 'plan-hash-1',
             generatedAt: '2026-07-19T09:10:00Z',
             dryRun: true,
@@ -349,6 +403,33 @@ describe('LocalApp', () => {
           approvedButNotApplied: mcpPlanDecision === 'approved',
         })
       }
+      if (path === '/api/runtimes/mcp/plans/plan-1/preflight') {
+        return jsonResponse({
+          planId: 'plan-1',
+          planHash: 'plan-hash-1',
+          capabilityHash: 'cap-hash-1',
+          observationHash: 'obs-hash-1',
+          configHash: 'config-hash-1',
+          executable: false,
+          staleReasons: [],
+          actions: [{
+            actionIndex: 0,
+            runtime: 'cursor',
+            serverId: 'srv-docs',
+            operation: 'verify',
+            support: 'supported',
+            executable: false,
+            reason: 'plan action requires manual handling',
+            adapter: 'cursor_structured_json_fallback',
+            destination: '/tmp/workspace/.cursor/mcp.json',
+            allowedSubtree: 'mcpServers',
+            reloadStrategy: 'new_session_only',
+            idempotencyKey: 'idem-plan-1-cursor-docs',
+            expectedSourceHash: 'obs-hash-1',
+            expectedSchemaHash: 'schema-hash-1',
+          }],
+        })
+      }
       if (path === '/api/runtimes/mcp/plans/plan-1/approve' && init?.method === 'POST') {
         mcpPlanDecision = 'approved'
         return (fetch as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>)('/api/runtimes/mcp/plans', { method: 'POST' })
@@ -366,6 +447,7 @@ describe('LocalApp', () => {
             planHash: 'plan-hash-1',
             observationHash: 'obs-hash-1',
             configHash: 'config-hash-1',
+            capabilityHash: 'cap-hash-1',
             actor: 'desktop-user',
             status: 'verified',
             confirmHighRisk: true,
@@ -387,8 +469,23 @@ describe('LocalApp', () => {
               status: 'matched',
               observationHash: 'obs-hash-after',
               mismatches: [],
+              writtenConfigHashes: {},
+              sessionEffective: 'new_session_required',
             },
             staleReasons: [],
+            journal: [{
+              sequence: 1,
+              actionIndex: 0,
+              runtime: 'cursor',
+              serverId: 'srv-docs',
+              idempotencyKey: 'idem-plan-1-cursor-docs',
+              phase: 'preflight',
+              attempt: 1,
+              reason: 'adapter capability and approved hashes were revalidated',
+              evidence: [],
+            }],
+            preflight: {},
+            attempt: 1,
             canRollback: true,
           },
         })
@@ -402,6 +499,7 @@ describe('LocalApp', () => {
             planHash: 'plan-hash-1',
             observationHash: 'obs-hash-1',
             configHash: 'config-hash-1',
+            capabilityHash: 'cap-hash-1',
             actor: 'desktop-user',
             status: 'rolled_back',
             confirmHighRisk: true,
@@ -429,8 +527,13 @@ describe('LocalApp', () => {
               status: 'matched',
               observationHash: 'obs-hash-rollback',
               mismatches: [],
+              writtenConfigHashes: {},
+              sessionEffective: 'unknown',
             },
             staleReasons: [],
+            journal: [],
+            preflight: {},
+            attempt: 1,
             canRollback: false,
             rollbackStatus: 'rolled_back',
           },
@@ -1008,7 +1111,9 @@ describe('LocalApp', () => {
     expect(screen.getByRole('row', { name: /cursor D✓ C✓ L✓ E✓ P× A· H× S· I·/ })).toBeInTheDocument()
     expect(screen.getByText(/cursor-agent mcp list-tools/)).toBeInTheDocument()
     expect(screen.getByText(/approval_missing/)).toBeInTheDocument()
-    expect(screen.getByText(/Phase 2B applies only valid approvals/)).toBeInTheDocument()
+    expect(screen.getByText(/Phase 2C applies only valid approvals/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Runtime adapter capabilities' })).toBeInTheDocument()
+    expect(screen.getByText(/cursor_structured_json_fallback/)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Profiles' })).toBeInTheDocument()
     expect(screen.getByText('Ops baseline')).toBeInTheDocument()
     expect(screen.getAllByText(/machine:machine-local/).length).toBeGreaterThan(0)
@@ -1019,6 +1124,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Generate dry-run plan' }))
 
     expect(await screen.findByText(/Approval status: pending/)).toBeInTheDocument()
+    expect(screen.getByText(/Preflight:/)).toBeInTheDocument()
     expect(screen.getByText(/approval_required/)).toBeInTheDocument()
     expect(screen.getByText(/high · blocked/)).toBeInTheDocument()
     expect(screen.getByText(/runtime reports server is not approved/)).toBeInTheDocument()
@@ -1043,6 +1149,8 @@ describe('LocalApp', () => {
     expect(screen.getByText(/deferred · cursor/)).toBeInTheDocument()
     expect(screen.getByText(/active sessions were not restarted/)).toBeInTheDocument()
     expect(screen.getByText(/Verify: matched/)).toBeInTheDocument()
+    expect(screen.getByText(/Durable journal/)).toBeInTheDocument()
+    expect(screen.getByText(/adapter capability and approved hashes were revalidated/)).toBeInTheDocument()
     expect(mcpApplyRequest).toMatchObject({
       planHash: 'plan-hash-1',
       observationHash: 'obs-hash-1',

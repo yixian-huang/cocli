@@ -153,6 +153,21 @@ then a fresh inventory verifies desired state. Apply runs, per-action outcomes,
 backups, verification, and rollback remain durable and auditable. See
 [docs/mcp-governance-phase-2b.md](docs/mcp-governance-phase-2b.md).
 
+Phase 2C hardens apply with a versioned Runtime capability contract and durable
+recovery journal. Plans now bind the adapter capability hash in addition to
+observation and desired-state hashes; adapter or binary-version drift makes an
+approval stale. The API exposes `/api/runtimes/mcp/capabilities` and
+`/api/runtimes/mcp/plans/:plan_id/preflight` so the desktop can show each
+Runtime's read, write, secret, reload, verify, and rollback support before
+apply. Codex capability negotiation is native-CLI/version aware, Cursor and
+Claude keep controlled JSON fallback writers for the MCP subtree, and Grok
+remains read-only/manual until a transactionally safe writer exists. Apply
+runs persist a journal across preflight, lock, backup, write, reload, verify,
+failure, rollback, and recovery-required phases; resumed runs use idempotency
+keys and do not repeat completed non-idempotent writes. Reload remains
+new-session-only/deferred and never restarts active sessions. See
+[docs/mcp-governance-phase-2c.md](docs/mcp-governance-phase-2c.md).
+
 ## Repository layout
 
 - `bin/cocli/` — local server binary

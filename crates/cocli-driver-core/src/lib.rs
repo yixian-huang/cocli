@@ -26,14 +26,17 @@ pub use mcp::{
     McpStartupState, McpTransport, ObservedMcpInstance,
 };
 pub use mcp_governance::{
-    generate_mcp_plan, hash_mcp_config, hash_mcp_observation, mcp_definition_fingerprint,
-    resolve_mcp_desired_state, validate_mcp_profile, McpApplyActionResult, McpApplyActionStatus,
-    McpApplyExecutionRequest, McpApplyExecutionResult, McpApprovalMode, McpBackupDescriptor,
-    McpBindingTarget, McpBindingTargetType, McpDesiredServer, McpDesiredTarget,
-    McpEffectiveDesiredState, McpEffectiveServer, McpPlan, McpPlanAction, McpPlanActionKind,
-    McpProfile, McpProfileBinding, McpProfileConflict, McpProfileResolution, McpReloadResult,
-    McpReloadStatus, McpRiskLevel, McpRollbackExecutionRequest, McpRollbackExecutionResult,
-    McpStateSummary, McpVerificationResult, McpVerificationStatus,
+    bind_mcp_plan_capabilities, generate_mcp_plan, hash_mcp_capabilities, hash_mcp_config,
+    hash_mcp_observation, mcp_definition_fingerprint, resolve_mcp_desired_state,
+    validate_mcp_profile, McpApplyActionResult, McpApplyActionStatus, McpApplyExecutionRequest,
+    McpApplyExecutionResult, McpApplyJournalEntry, McpApplyJournalPhase, McpApprovalMode,
+    McpBackupDescriptor, McpBindingTarget, McpBindingTargetType, McpCapabilityDetail,
+    McpCapabilityOperation, McpCapabilitySnapshot, McpCapabilitySupport, McpDesiredServer,
+    McpDesiredTarget, McpEffectiveDesiredState, McpEffectiveServer, McpPlan, McpPlanAction,
+    McpPlanActionKind, McpPreflightAction, McpPreflightReport, McpProfile, McpProfileBinding,
+    McpProfileConflict, McpProfileResolution, McpReloadResult, McpReloadStatus, McpReloadStrategy,
+    McpRiskLevel, McpRollbackExecutionRequest, McpRollbackExecutionResult, McpRuntimeCapability,
+    McpSessionEffectiveStatus, McpStateSummary, McpVerificationResult, McpVerificationStatus,
 };
 pub use subtraits::{
     ExitCodeClassifier, ProcessFactory, ProcessInitializer, SessionFileGC, StdinBinder,

@@ -2,9 +2,10 @@ use std::path::{Path, PathBuf};
 
 use chrono::{Duration, Utc};
 use cocli_driver_core::{
-    McpApplyActionResult, McpApplyActionStatus, McpApplyExecutionResult, McpBackupDescriptor,
-    McpDesiredTarget, McpEffectiveDesiredState, McpPlan, McpReloadResult, McpReloadStatus,
-    McpRollbackExecutionResult, McpVerificationResult, McpVerificationStatus,
+    McpApplyActionResult, McpApplyActionStatus, McpApplyExecutionResult, McpApplyJournalEntry,
+    McpApplyJournalPhase, McpBackupDescriptor, McpDesiredTarget, McpEffectiveDesiredState, McpPlan,
+    McpReloadResult, McpReloadStatus, McpRollbackExecutionResult, McpVerificationResult,
+    McpVerificationStatus,
 };
 use cocli_store::{
     McpApplyRunStatus, McpPlanDecisionStatus, NewMcpApplyRun, NewMcpPlanDecision, Store, StoreError,
@@ -37,6 +38,7 @@ fn plan(id: &str) -> McpPlan {
         actions: Vec::new(),
         observation_hash: "observation-hash".to_owned(),
         config_hash: "config-hash".to_owned(),
+        capability_hash: "capability-hash".to_owned(),
         plan_hash: "plan-hash".to_owned(),
         generated_at: Utc::now().to_rfc3339(),
         dry_run: true,
@@ -93,7 +95,27 @@ fn execution(reason: &str) -> McpApplyExecutionResult {
             status: McpVerificationStatus::Matched,
             observation_hash: "after-observation".to_owned(),
             mismatches: Vec::new(),
+            written_config_hashes: Default::default(),
+            session_effective: Default::default(),
         },
+        journal: vec![journal(1, McpApplyJournalPhase::Written)],
+    }
+}
+
+fn journal(sequence: u64, phase: McpApplyJournalPhase) -> McpApplyJournalEntry {
+    McpApplyJournalEntry {
+        sequence,
+        action_index: 0,
+        runtime: "cursor".to_owned(),
+        server_id: "docs".to_owned(),
+        idempotency_key: "idem-cursor-docs".to_owned(),
+        phase,
+        attempt: 1,
+        expected_source_hash: Some("before".to_owned()),
+        expected_schema_hash: Some("schema".to_owned()),
+        backup: None,
+        reason: "redacted journal checkpoint".to_owned(),
+        evidence: Vec::new(),
     }
 }
 
@@ -108,6 +130,7 @@ async fn apply_run_is_idempotent_redacted_and_persists_across_reopen() {
         plan_hash: plan.plan_hash.clone(),
         observation_hash: plan.observation_hash.clone(),
         config_hash: plan.config_hash.clone(),
+        capability_hash: plan.capability_hash.clone(),
         actor: "desktop-user".to_owned(),
         confirm_high_risk: true,
     };
@@ -131,6 +154,7 @@ async fn apply_run_is_idempotent_redacted_and_persists_across_reopen() {
         .expect("read interrupted run")
         .expect("interrupted run exists");
     assert_eq!(interrupted.status, McpApplyRunStatus::Running);
+    assert_eq!(interrupted.capability_hash, "capability-hash");
 
     let secret = store
         .complete_mcp_apply_run(created.id, &execution("token=must-not-persist"))
@@ -142,6 +166,7 @@ async fn apply_run_is_idempotent_redacted_and_persists_across_reopen() {
         .await
         .expect("complete run");
     assert_eq!(completed.status, McpApplyRunStatus::Verified);
+    assert_eq!(completed.journal.len(), 1);
     assert!(completed.can_rollback);
     let rollback = McpRollbackExecutionResult {
         actions: vec![
@@ -170,6 +195,8 @@ async fn apply_run_is_idempotent_redacted_and_persists_across_reopen() {
             status: McpVerificationStatus::Matched,
             observation_hash: "rollback-observation".to_owned(),
             mismatches: Vec::new(),
+            written_config_hashes: Default::default(),
+            session_effective: Default::default(),
         },
     };
     let rolled_back = store
@@ -192,6 +219,7 @@ async fn apply_run_is_idempotent_redacted_and_persists_across_reopen() {
         .expect("run exists");
     assert_eq!(persisted.status, McpApplyRunStatus::Verified);
     assert_eq!(persisted.actions[0].reason, "verified safely");
+    assert_eq!(persisted.journal[0].phase, McpApplyJournalPhase::Written);
     assert_eq!(persisted.rollback_actor.as_deref(), Some("rollback-actor"));
     assert_eq!(persisted.rollback_actions.len(), 2);
     assert_eq!(
@@ -218,6 +246,7 @@ async fn apply_run_preserves_partial_runtime_failure_details() {
             plan_hash: plan.plan_hash,
             observation_hash: plan.observation_hash,
             config_hash: plan.config_hash,
+            capability_hash: plan.capability_hash,
             actor: "api-test".to_owned(),
             confirm_high_risk: true,
         })
@@ -249,5 +278,117 @@ async fn apply_run_preserves_partial_runtime_failure_details() {
     assert_eq!(completed.actions[1].status, McpApplyActionStatus::Failed);
     assert_eq!(completed.actions[1].reason, "atomic replace failed");
     store.close().await;
+    remove_database(&database_path).await;
+}
+
+#[tokio::test]
+async fn apply_run_journal_checkpoints_are_idempotent_and_recoverable() {
+    let database_path = temporary_database_path();
+    let store = Store::open(&database_path).await.expect("open store");
+    let (plan, approval_id) = approved_plan(&store).await;
+    let run = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan.id,
+            approval_id,
+            plan_hash: plan.plan_hash,
+            observation_hash: plan.observation_hash,
+            config_hash: plan.config_hash,
+            capability_hash: plan.capability_hash,
+            actor: "journal-test".to_owned(),
+            confirm_high_risk: true,
+        })
+        .await
+        .expect("create run");
+
+    let boundaries = [
+        (
+            McpApplyJournalPhase::Preflight,
+            McpApplyRunStatus::Preflight,
+        ),
+        (McpApplyJournalPhase::Locked, McpApplyRunStatus::Locked),
+        (McpApplyJournalPhase::BackedUp, McpApplyRunStatus::BackedUp),
+        (McpApplyJournalPhase::Written, McpApplyRunStatus::Written),
+        (
+            McpApplyJournalPhase::ReloadPending,
+            McpApplyRunStatus::ReloadPending,
+        ),
+        (McpApplyJournalPhase::Reloaded, McpApplyRunStatus::Reloaded),
+        (
+            McpApplyJournalPhase::RecoveryRequired,
+            McpApplyRunStatus::RecoveryRequired,
+        ),
+    ];
+    let mut latest = run;
+    for (index, (phase, status)) in boundaries.into_iter().enumerate() {
+        let entry = journal(index as u64 + 1, phase);
+        latest = store
+            .checkpoint_mcp_apply_run(
+                latest.id,
+                phase,
+                &entry,
+                None,
+                (phase == McpApplyJournalPhase::RecoveryRequired)
+                    .then_some("restart found reload pending"),
+            )
+            .await
+            .expect("checkpoint");
+        assert_eq!(latest.status, status);
+        let repeated = store
+            .checkpoint_mcp_apply_run(latest.id, phase, &entry, None, None)
+            .await
+            .expect("repeat checkpoint");
+        assert_eq!(repeated.journal.len(), latest.journal.len());
+        latest = repeated;
+    }
+    assert_eq!(
+        latest.recovery_reason.as_deref(),
+        Some("restart found reload pending")
+    );
+    store.close().await;
+
+    let reopened = Store::open(&database_path).await.expect("reopen store");
+    let recovered = reopened
+        .get_mcp_apply_run(latest.id)
+        .await
+        .expect("read run")
+        .expect("run exists");
+    assert_eq!(recovered.status, McpApplyRunStatus::RecoveryRequired);
+    assert_eq!(recovered.journal.len(), 7);
+    assert!(recovered.attempt >= 8);
+
+    let secret = reopened
+        .checkpoint_mcp_apply_run(
+            recovered.id,
+            McpApplyJournalPhase::Failed,
+            &McpApplyJournalEntry {
+                reason: "api_key=must-not-persist".to_owned(),
+                ..journal(99, McpApplyJournalPhase::Failed)
+            },
+            None,
+            None,
+        )
+        .await
+        .expect_err("secret-like journal must be rejected");
+    assert!(matches!(secret, StoreError::InvalidMcpApplyRun(_)));
+
+    let manual = reopened
+        .record_mcp_manual_recovery(
+            recovered.id,
+            "ops-user",
+            "operator verified rollback outside active session",
+        )
+        .await
+        .expect("record manual recovery");
+    assert_eq!(manual.status, McpApplyRunStatus::RecoveryRequired);
+    assert_eq!(
+        manual.recovery_reason.as_deref(),
+        Some("operator verified rollback outside active session")
+    );
+    assert!(manual
+        .stale_reasons
+        .iter()
+        .any(|reason| reason == "manual_recovery_recorded_by:ops-user"));
+
+    reopened.close().await;
     remove_database(&database_path).await;
 }

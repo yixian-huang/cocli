@@ -184,7 +184,10 @@ impl RuntimeService for ApplyMcpRuntime {
                 status: McpVerificationStatus::Matched,
                 observation_hash: "verified-observation".to_owned(),
                 mismatches: Vec::new(),
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
             },
+            journal: Vec::new(),
         })
     }
 
@@ -213,6 +216,8 @@ impl RuntimeService for ApplyMcpRuntime {
                 status: McpVerificationStatus::Matched,
                 observation_hash: "rollback-observation".to_owned(),
                 mismatches: Vec::new(),
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
             },
         })
     }
@@ -632,6 +637,10 @@ async fn mcp_approval_becomes_stale_after_observation_drift() {
             plan_hash: plan_hash.to_owned(),
             observation_hash: observation_hash.to_owned(),
             config_hash: config_hash.to_owned(),
+            capability_hash: plan_view["plan"]["capabilityHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
             actor: "api-test".to_owned(),
             confirm_high_risk: false,
         })
@@ -682,9 +691,9 @@ async fn mcp_approval_becomes_stale_after_observation_drift() {
     .await;
     assert_eq!(apply_status, StatusCode::OK);
     assert_eq!(recovered["run"]["id"], interrupted.id.to_string());
-    assert_eq!(recovered["run"]["status"], "failed");
+    assert_eq!(recovered["run"]["status"], "recovery_required");
     assert_eq!(
-        recovered["run"]["staleReasons"][0],
+        recovered["run"]["recoveryReason"],
         "observation or desired configuration drifted during an interrupted apply"
     );
 }
@@ -725,6 +734,10 @@ async fn mcp_apply_api_revalidates_hashes_is_idempotent_and_rolls_back() {
             plan_hash: plan_hash.to_owned(),
             observation_hash: observation_hash.to_owned(),
             config_hash: config_hash.to_owned(),
+            capability_hash: plan["capabilityHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
             actor: "api-test".to_owned(),
             confirm_high_risk: false,
         })

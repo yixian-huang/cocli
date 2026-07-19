@@ -67,9 +67,18 @@ package-manager direction.
   per-source locks, pre-write backups, and atomic subtree updates; preserve
   action-level partial-failure evidence; defer active-session reloads; verify
   against a fresh inventory; and expose audited rollback.
+- **Phase 2C — native adapter negotiation and durable recovery (complete):**
+  add a versioned capability matrix for Codex, Cursor, Claude, and Grok; bind
+  plan hashes to adapter capabilities and binary/config schema evidence; expose
+  preflight previews; persist action-level apply journals with idempotency
+  keys, backup references, recovery-required states, rollback evidence, and
+  saga-style partial-failure results; and verify with fresh inventory/doctor
+  readback while reporting new-session-only activation separately from active
+  Session effectiveness.
 
 MCP governance does not introduce a Gateway or Registry and is not a secret
-store. Phase 2B keeps unsupported/authentication actions blocked and never
+store. Unsupported/authentication actions remain blocked, Grok write support
+stays manual until a stable transactional writer exists, and cocli never
 restarts an active Runtime session without separate future authorization.
 
 ## Beta milestones
