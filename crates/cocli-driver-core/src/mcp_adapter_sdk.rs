@@ -1192,10 +1192,10 @@ impl McpRuntimeAdapter for FakeMcpAdapter {
         }
         let source = PathBuf::from(&backup.source_path);
         let backup_path = PathBuf::from(&backup.backup_path);
-        let bytes = fs::read(&backup_path)
+        let bytes = fs::read(backup_path)
             .map_err(|error| McpAdapterError::ExecutionFailed(error.to_string()))?;
         let temporary = source.with_extension("rollback.tmp");
-        fs::write(&temporary, &bytes)
+        fs::write(&temporary, bytes)
             .and_then(|()| fs::rename(&temporary, &source))
             .map_err(|error| McpAdapterError::ExecutionFailed(error.to_string()))?;
         Ok(McpAdapterApplyOutcome {

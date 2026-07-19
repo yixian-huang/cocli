@@ -604,6 +604,60 @@ impl RuntimeService for LocalRuntimeService {
         crate::skills::inspect(&self.registry, &self.config, agent).await
     }
 
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<cocli_api::RuntimeSkillInspection, RuntimeError> {
+        crate::skills::inspect_machine(&self.registry, &self.config, runtime).await
+    }
+
+    async fn governance_skill_target(
+        &self,
+        agent: &Agent,
+        skill_name: &str,
+    ) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+        crate::skills::governance_target(&self.registry, &self.config, agent, skill_name)
+    }
+
+    async fn governance_scope_capabilities(
+        &self,
+        runtime: &str,
+        scope: &str,
+        scope_root: Option<&Path>,
+    ) -> Result<Vec<cocli_api::GovernanceScopeCapability>, RuntimeError> {
+        crate::skills::governance_scope_capabilities(
+            &self.registry,
+            &self.config,
+            runtime,
+            scope,
+            scope_root,
+        )
+    }
+
+    async fn governance_skill_target_in_scope(
+        &self,
+        runtime: &str,
+        scope: &str,
+        scope_root: Option<&Path>,
+        skill_name: &str,
+    ) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+        crate::skills::governance_target_in_scope(
+            &self.registry,
+            &self.config,
+            runtime,
+            scope,
+            scope_root,
+            skill_name,
+        )
+    }
+
+    async fn governance_managed_artifact_root(&self) -> Result<PathBuf, RuntimeError> {
+        let data_root = self.config.workspace_root.parent().ok_or_else(|| {
+            RuntimeError::Unsupported("cocli data root is unavailable".to_owned())
+        })?;
+        Ok(data_root.join("managed-skills/v1/artifacts"))
+    }
+
     async fn install_skill(
         &self,
         agent: &Agent,

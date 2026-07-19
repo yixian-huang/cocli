@@ -56,6 +56,10 @@ describe('LocalApp', () => {
 
   beforeEach(() => {
     let skillInstalled = false
+    let governanceProfileCreated = false
+    let governanceBound = false
+    let governanceRunCreated = false
+    let governanceRunRolledBack = false
     let agentCreated = false
     let taskState: Array<{
       id: string
@@ -111,13 +115,16 @@ describe('LocalApp', () => {
       if (path === '/api/runtimes/compatibility') {
         return jsonResponse({ fake: 'supported' })
       }
-      if (path === '/api/runtimes/skills/doctor') {
+      if (path.startsWith('/api/runtimes/skills/doctor')) {
         const evidence = {
           source: 'filesystem',
           detail: 'runtime driver search paths',
           provesSessionVisibility: false,
         }
         return jsonResponse({
+          observedAt: '2026-07-19T08:00:00Z',
+          cacheStatus: path.includes('force=true') ? 'fresh' : 'cached',
+          forceRefresh: path.includes('force=true'),
           summary: {
             status: 'ok',
             runtimeCount: 1,
@@ -134,8 +141,18 @@ describe('LocalApp', () => {
             skillCount: skillInstalled ? 2 : 0,
             issueCount: 0,
             evidenceSources: agentCreated ? ['filesystem'] : [],
+            observedAt: '2026-07-19T08:00:00Z',
+            cacheStatus: 'cached',
+            expiresAt: '2026-07-19T08:00:03Z',
+            evidence,
+            searchPaths: [],
+            skills: [],
+            issues: [],
           }],
           agents: agentCreated ? [{
+            observedAt: '2026-07-19T08:00:00Z',
+            cacheStatus: 'cached',
+            expiresAt: '2026-07-19T08:00:03Z',
             agentId: 'agent-1',
             agentName: 'builder',
             runtime: 'fake',
@@ -151,6 +168,7 @@ describe('LocalApp', () => {
             skills: [],
             issues: [],
           }] : [],
+          diagnostics: [],
         })
       }
       if (path === '/api/runtimes/mcp/doctor') {
@@ -719,6 +737,576 @@ describe('LocalApp', () => {
           },
         })
       }
+      if (path === '/api/skills/governance/profiles' && !init?.method) {
+        return jsonResponse(governanceProfileCreated ? [{
+          id: 'profile-1',
+          version: 1,
+          schemaVersion: 1,
+          name: 'default-governance-profile',
+          description: 'Safe default profile with no desired skills yet.',
+          skills: [],
+          createdAt: '2026-07-19T08:00:00Z',
+          updatedAt: '2026-07-19T08:00:00Z',
+        }] : [])
+      }
+      if (path === '/api/skills/governance/profiles' && init?.method === 'POST') {
+        governanceProfileCreated = true
+        const body = JSON.parse(String(init.body)) as {
+          schemaVersion: number
+          name: string
+          description: string
+          skills: unknown[]
+        }
+        return jsonResponse({
+          id: 'profile-1',
+          version: 1,
+          ...body,
+          createdAt: '2026-07-19T08:00:00Z',
+          updatedAt: '2026-07-19T08:00:00Z',
+        }, 201)
+      }
+      if (path === '/api/skills/governance/bindings' && !init?.method) {
+        return jsonResponse(governanceBound ? [{
+          id: 'binding-1',
+          scope: 'machine',
+          scopeId: 'machine',
+          profileId: 'profile-1',
+          version: 1,
+          createdAt: '2026-07-19T08:01:00Z',
+          updatedAt: '2026-07-19T08:01:00Z',
+        }] : [])
+      }
+      if (path === '/api/skills/governance/bindings' && init?.method === 'POST') {
+        governanceBound = true
+        const body = JSON.parse(String(init.body)) as {
+          profileId: string
+          scope: 'machine' | 'workspace' | 'agent'
+          scopeId: string
+        }
+        return jsonResponse({
+          id: 'binding-1',
+          ...body,
+          version: 1,
+          createdAt: '2026-07-19T08:01:00Z',
+          updatedAt: '2026-07-19T08:01:00Z',
+        }, 201)
+      }
+      if (path.startsWith('/api/skills/governance/desired/effective')) {
+        return jsonResponse({
+          schemaVersion: 1,
+          desiredConfigHash: 'desired-hash-1',
+          skills: [],
+          conflicts: [],
+        })
+      }
+      if (path.startsWith('/api/skills/governance/evidence')) {
+        return jsonResponse({
+          observedAt: '2026-07-19T08:02:00Z',
+          snapshotHash: 'observation-hash-1',
+          skills: [{
+            logicalIdentity: 'reviewer',
+            runtime: 'fake',
+            scope: 'workspace',
+            sourceProvenance: 'local:/tmp/reviewer',
+            version: null,
+            contentDigest: 'sha256:content',
+            manifestDigest: 'sha256:manifest',
+            installationMode: 'copy',
+            destination: '.fake/skills/reviewer',
+            fingerprint: 'governance-skill-1',
+            enabled: true,
+            shadowed: false,
+            brokenSymlink: false,
+            evidenceStatus: 'observed',
+            evidenceSource: 'filesystem',
+            sessionEffective: 'unknown',
+            sessionReason: 'running session visibility cannot be proven',
+            observedAt: '2026-07-19T08:02:00Z',
+            supported: true,
+          }],
+          diagnostics: [],
+        })
+      }
+      if (path.startsWith('/api/skills/governance/scopes')) {
+        return jsonResponse({
+          observedAt: '2026-07-19T08:02:30Z',
+          capabilities: [{
+            runtime: 'fake',
+            scope: 'machine',
+            rootKind: 'runtime_specific',
+            path: '/tmp/cocli-test/fake/skills',
+            status: 'supported',
+            exists: true,
+            writable: true,
+            atomicRename: true,
+            supported: true,
+            evidence: 'runtime-derived canonical target',
+            blockedReason: null,
+          }, {
+            runtime: 'fake',
+            scope: 'workspace',
+            rootKind: 'runtime_specific',
+            path: '/tmp/cocli-test/workspace/.fake/skills',
+            status: 'blocked',
+            exists: false,
+            writable: false,
+            atomicRename: false,
+            supported: false,
+            evidence: 'workspace id required',
+            blockedReason: 'missing workspace binding',
+          }],
+          diagnostics: [],
+        })
+      }
+      if (path === '/api/skills/governance/managed/artifacts' && !init?.method) {
+        return jsonResponse([{
+          id: 'artifact-1',
+          artifactKey: 'sha256:artifact-key',
+          artifactKind: 'local_skill',
+          sourceProvenance: { kind: 'library', libraryId: 'library-1' },
+          contentDigest: 'sha256:content',
+          manifestDigest: 'sha256:manifest',
+          schemaVersion: 1,
+          revision: 'sha256:content',
+          storeRelativePath: 'artifacts/content/source/skill',
+          artifact: { immutable: true },
+          metadata: {},
+          version: 1,
+          createdAt: '2026-07-19T08:02:30Z',
+          referenced: true,
+        }])
+      }
+      if (path === '/api/skills/governance/managed/artifacts/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          sourceKind: 'library',
+          source: { kind: 'library', libraryId: 'library-1' },
+          artifactKey: 'sha256:artifact-key',
+          contentDigest: 'sha256:content',
+          manifestDigest: 'sha256:manifest',
+          revision: 'sha256:content',
+          storeRelativePath: 'artifacts/content/source/skill',
+          previewHash: 'sha256:managed-preview',
+          idempotencyKey: 'managed-key-1',
+          confirmationNonce: 'managed-nonce-1',
+          hazards: [],
+          blocked: false,
+        })
+      }
+      if (path === '/api/skills/governance/materializations?scope=machine&scopeId=machine') {
+        return jsonResponse([{
+          id: 'materialization-1',
+          artifactId: 'artifact-1',
+          scope: 'machine',
+          scopeId: 'machine',
+          targetPath: '/tmp/cocli-test/fake/skills/reviewer',
+          targetRuntime: 'fake',
+          rootKind: 'machine',
+          installationMode: 'copy',
+          ownership: 'managed',
+          contentDigest: 'sha256:content',
+          expectedDestination: '/tmp/cocli-test/fake/skills/reviewer',
+          expectedFingerprint: 'sha256:target',
+          verifyStatus: 'verified',
+          receipt: { newSessionRequired: true, sessionEffective: 'unknown' },
+          version: 1,
+          adoptedAt: null,
+          createdAt: '2026-07-19T08:02:30Z',
+          updatedAt: '2026-07-19T08:02:30Z',
+        }])
+      }
+      if (path === '/api/skills/governance/adoption/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          runtime: 'fake',
+          scope: 'machine',
+          scopeId: 'machine',
+          skillName: 'reviewer',
+          targetPath: '/tmp/cocli-test/fake/skills/reviewer',
+          targetFingerprint: 'sha256:target',
+          contentDigest: 'sha256:content',
+          manifestDigest: 'sha256:manifest',
+          existingOwnership: 'foreign',
+          hazards: ['manual_review_required:foreign target'],
+          blocked: true,
+          previewHash: 'sha256:adoption-preview',
+          idempotencyKey: 'adoption-key-1',
+          confirmationNonce: 'adoption-nonce-1',
+        })
+      }
+      if (path.startsWith('/api/skills/governance/workspace-lockfile')) {
+        return jsonResponse({
+          workspaceId: 'workspace-1',
+          lockfilePath: '.cocli/skills.lock.json',
+          diskHash: 'sha256:disk',
+          diskFingerprint: 'sha256:disk-fingerprint',
+          stored: {
+            id: 'workspace-lockfile-1',
+            workspaceId: 'workspace-1',
+            lockfilePath: '.cocli/skills.lock.json',
+            lockHash: 'sha256:lock',
+            expectedDiskFingerprint: 'sha256:disk-fingerprint',
+            expectedDiskHash: 'sha256:disk',
+            document: {},
+            lastBackupPath: null,
+            lastBackupHash: null,
+            lastReceipt: {},
+            restoreMetadata: {},
+            version: 1,
+            createdAt: '2026-07-19T08:02:30Z',
+            updatedAt: '2026-07-19T08:02:30Z',
+          },
+          exists: true,
+        })
+      }
+      if (path === '/api/skills/governance/gc/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          previewHash: 'sha256:gc-preview',
+          idempotencyKey: 'gc-key-1',
+          confirmationNonce: 'gc-nonce-1',
+          candidates: [{
+            entityType: 'managed_artifact',
+            entityId: 'artifact-unreferenced',
+            reason: 'unreferenced',
+          }],
+        })
+      }
+      if (path === '/api/skills/governance/lock/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          snapshot: {
+            id: 'lock-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            profileId: null,
+            snapshot: {},
+            observationHash: 'observation-hash-1',
+            desiredHash: 'desired-hash-1',
+            lockHash: 'lock-hash-1',
+            createdAt: '2026-07-19T08:03:00Z',
+          },
+          preview: {
+            observedAt: '2026-07-19T08:03:00Z',
+            snapshotHash: 'observation-hash-1',
+            desiredConfigHash: 'desired-hash-1',
+            lockfileHash: 'lock-hash-1',
+            content: {
+              schemaVersion: 1,
+              generatedFrom: {
+                observationHash: 'observation-hash-1',
+                desiredConfigHash: 'desired-hash-1',
+              },
+              entries: [],
+            },
+            serialized: '{}\n',
+          },
+          drift: [{
+            fingerprint: 'drift-1',
+            skillFingerprint: 'governance-skill-1',
+            kind: 'unknown_evidence',
+            logicalIdentity: 'reviewer',
+            runtime: 'fake',
+            scope: 'workspace',
+            reason: 'session-effective unknown',
+            expected: 'desired',
+            actual: 'observed',
+          }],
+          previousLockHash: null,
+          lockfileChanged: true,
+          writesRealDirectories: false,
+          lockfileBoundary: 'store_only',
+        })
+      }
+      if (path === '/api/skills/governance/plans' && init?.method === 'POST') {
+        return jsonResponse({
+          plan: {
+            id: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            plan: {
+              schemaVersion: 1,
+              dryRun: true,
+              applied: false,
+              lockfileChanged: true,
+              preview: {
+                planHash: 'plan-hash-1',
+                dryRun: true,
+                content: {
+                  schemaVersion: 1,
+                  observationHash: 'observation-hash-1',
+                  desiredConfigHash: 'desired-hash-1',
+                  lockfileHash: 'lock-hash-1',
+                  actions: [],
+                },
+              },
+            },
+            observationHash: 'observation-hash-1',
+            desiredHash: 'desired-hash-1',
+            status: 'approved',
+            version: 1,
+            createdAt: '2026-07-19T08:04:00Z',
+            updatedAt: '2026-07-19T08:04:00Z',
+          },
+          preview: {
+            planHash: 'plan-hash-1',
+            dryRun: true,
+            content: {
+              schemaVersion: 1,
+              observationHash: 'observation-hash-1',
+              desiredConfigHash: 'desired-hash-1',
+              lockfileHash: 'lock-hash-1',
+              actions: [{
+                action: 'manual',
+                runtime: 'fake',
+                scope: 'workspace',
+                target: 'reviewer',
+                skillFingerprint: 'governance-skill-1',
+                before: 'unknown',
+                after: 'review',
+                risk: 'medium',
+                reason: 'session-effective unknown',
+                evidence: 'filesystem',
+                expectedObservationHash: 'observation-hash-1',
+                expectedConfigHash: 'desired-hash-1',
+                expectedLockHash: 'lock-hash-1',
+                approvalRequired: true,
+                blocked: false,
+              }],
+            },
+          },
+          drift: [],
+          lockSnapshotId: 'lock-1',
+          lockfileChanged: true,
+          applied: false,
+        }, 201)
+      }
+      if (path === '/api/skills/governance/plans/plan-1/apply/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          plan: {
+            id: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            plan: { schemaVersion: 1, dryRun: true, applied: false },
+            observationHash: 'observation-hash-1',
+            desiredHash: 'desired-hash-1',
+            status: 'approved',
+            version: 1,
+            createdAt: '2026-07-19T08:04:00Z',
+            updatedAt: '2026-07-19T08:04:00Z',
+          },
+          dryRun: true,
+          applied: false,
+          highRisk: true,
+          confirmationRequired: true,
+          nonceRequired: true,
+          confirmationNonce: 'nonce-123',
+          idempotencyKey: 'apply-key-1',
+          recoveryRequired: true,
+          recoveryReasons: ['backup required before applying high-risk changes'],
+          lockSnapshotId: 'lock-1',
+          backupId: 'backup-1',
+          quarantineId: 'quarantine-1',
+          effects: [{
+            kind: 'backup',
+            status: 'pending',
+            label: 'Create backup before apply',
+            createdId: 'backup-1',
+          }, {
+            kind: 'quarantine',
+            status: 'pending',
+            label: 'Quarantine replaced skill files',
+            createdId: 'quarantine-1',
+          }],
+          actions: [],
+          staleReasons: [],
+        })
+      }
+      if (path === '/api/skills/governance/plans/plan-1/apply' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          idempotencyKey: string
+          confirmationNonce?: string
+          confirmHighRisk?: boolean
+        }
+        if (body.idempotencyKey !== 'apply-key-1' || body.confirmationNonce !== 'nonce-123' || !body.confirmHighRisk) {
+          return jsonResponse({ error: 'missing explicit confirmation' }, 409)
+        }
+        governanceRunCreated = true
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'recovery_required',
+            phase: 'verify',
+            progress: 65,
+            message: 'Apply finished; verification requires recovery review',
+            dryRun: false,
+            applied: true,
+            highRisk: true,
+            recoveryRequired: true,
+            recoveryReasons: ['verification found session-effective unknown'],
+            lockSnapshotId: 'lock-1',
+            backupId: 'backup-1',
+            quarantineId: 'quarantine-1',
+            effects: [{
+              kind: 'lock',
+              status: 'succeeded',
+              label: 'Lock snapshot recorded',
+              createdId: 'lock-1',
+            }, {
+              kind: 'backup',
+              status: 'succeeded',
+              label: 'Backup created',
+              createdId: 'backup-1',
+            }, {
+              kind: 'quarantine',
+              status: 'succeeded',
+              label: 'Quarantine captured replaced files',
+              createdId: 'quarantine-1',
+            }],
+            actions: [],
+            startedAt: '2026-07-19T08:05:00Z',
+            updatedAt: '2026-07-19T08:05:10Z',
+          },
+          applied: true,
+          recoveryRequired: true,
+        })
+      }
+      if (path === '/api/skills/governance/runs?scope=machine&scopeId=machine' && !init?.method) {
+        return jsonResponse(governanceRunCreated ? [{
+          id: 'run-1',
+          planId: 'plan-1',
+          scope: 'machine',
+          scopeId: 'machine',
+          status: governanceRunRolledBack ? 'rolled_back' : 'recovery_required',
+          phase: governanceRunRolledBack ? 'rollback' : 'verify',
+          progress: governanceRunRolledBack ? 100 : 65,
+          message: governanceRunRolledBack ? 'Rollback complete' : 'Recovery review required',
+          dryRun: false,
+          applied: !governanceRunRolledBack,
+          highRisk: true,
+          recoveryRequired: !governanceRunRolledBack,
+          recoveryReasons: governanceRunRolledBack ? [] : ['verification found session-effective unknown'],
+          lockSnapshotId: 'lock-1',
+          backupId: 'backup-1',
+          quarantineId: 'quarantine-1',
+          effects: [{
+            kind: 'backup',
+            status: 'succeeded',
+            label: 'Backup created',
+            createdId: 'backup-1',
+          }],
+          actions: [],
+          startedAt: '2026-07-19T08:05:00Z',
+          updatedAt: '2026-07-19T08:05:10Z',
+        }] : [])
+      }
+      if (path === '/api/skills/governance/runs/run-1/verify' && init?.method === 'POST') {
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'recovery_required',
+            phase: 'verify',
+            progress: 72,
+            message: 'Verification requires recovery',
+            dryRun: false,
+            applied: true,
+            highRisk: true,
+            recoveryRequired: true,
+            recoveryReasons: ['session-effective unknown'],
+            effects: [],
+            actions: [],
+            updatedAt: '2026-07-19T08:06:00Z',
+          },
+          verified: false,
+          recoveryRequired: true,
+          reasons: ['session-effective unknown'],
+        })
+      }
+      if (path === '/api/skills/governance/runs/run-1/rollback/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'recovery_required',
+            phase: 'rollback',
+            progress: 72,
+            dryRun: false,
+            applied: true,
+            highRisk: true,
+            recoveryRequired: true,
+            recoveryReasons: ['session-effective unknown'],
+            effects: [],
+            actions: [],
+            updatedAt: '2026-07-19T08:06:00Z',
+          },
+          dryRun: true,
+          rollbackRequired: true,
+          confirmationRequired: true,
+          confirmationNonce: 'rollback-nonce-1',
+          idempotencyKey: 'rollback-key-1',
+          effects: [{
+            kind: 'rollback',
+            status: 'pending',
+            label: 'Restore from backup',
+            createdId: 'backup-1',
+          }],
+          actions: [],
+        })
+      }
+      if (path === '/api/skills/governance/runs/run-1/rollback' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          idempotencyKey: string
+          confirmationNonce?: string
+          confirmRollback?: boolean
+        }
+        if (
+          body.idempotencyKey !== 'rollback-key-1'
+          || body.confirmationNonce !== 'rollback-nonce-1'
+          || !body.confirmRollback
+        ) {
+          return jsonResponse({ error: 'missing rollback confirmation' }, 409)
+        }
+        governanceRunRolledBack = true
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'rolled_back',
+            phase: 'rollback',
+            progress: 100,
+            message: 'Rollback complete',
+            dryRun: false,
+            applied: false,
+            highRisk: true,
+            recoveryRequired: false,
+            recoveryReasons: [],
+            backupId: 'backup-1',
+            quarantineId: 'quarantine-1',
+            effects: [{
+              kind: 'rollback',
+              status: 'succeeded',
+              label: 'Restored from backup',
+              createdId: 'backup-1',
+            }],
+            actions: [],
+            updatedAt: '2026-07-19T08:07:00Z',
+          },
+          rolledBack: true,
+          recoveryRequired: false,
+        })
+      }
+      if (path === '/api/skills/governance/plans?scope=machine&scopeId=machine' && !init?.method) {
+        return jsonResponse([])
+      }
+      if (path === '/api/skills/governance/locks?scope=machine&scopeId=machine' && !init?.method) {
+        return jsonResponse([])
+      }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
       if (path === '/api/agents' && !init?.method) {
         return jsonResponse(agentCreated ? [createdAgent] : [])
@@ -1128,6 +1716,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    await waitFor(() => expect(FakeEventSource.instance?.url).toBe('/api/events'))
     const eventSource = FakeEventSource.instance
     expect(eventSource?.url).toBe('/api/events')
     eventSource?.onopen?.()
@@ -1256,9 +1845,78 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     fireEvent.click(screen.getByRole('button', { name: 'Skills' }))
     expect(await screen.findByRole('heading', { name: 'Skills workspace' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Governance preview' })).toBeInTheDocument()
+    expect(screen.getAllByText('dry-run').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('session-effective unknown').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Scopes' }))
+    expect(await screen.findByText(/runtime-derived canonical target/)).toBeInTheDocument()
+    expect(await screen.findByText(/missing workspace binding/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Managed Store' }))
+    expect(await screen.findByText(/local_skill/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Preview artifact' }))
+    expect(await screen.findByText('ready')).toBeInTheDocument()
+    expect((await screen.findAllByText(/artifacts\/content\/source\/skill/)).length).toBeGreaterThan(0)
+    expect(screen.getByDisplayValue('managed-key-1')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('managed-nonce-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Materializations' }))
+    expect(await screen.findByText(/artifact_stored=yes/)).toBeInTheDocument()
+    expect(await screen.findByText(/session_effective=unknown/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Adoption' }))
+    fireEvent.change(screen.getByLabelText('Skill name'), { target: { value: 'reviewer' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Preview adoption' }))
+    expect(await screen.findByText(/manual_review_required:foreign target/)).toBeInTheDocument()
+    expect(await screen.findByText(/blocked\/manual/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Workspace Lockfile' }))
+    fireEvent.change(screen.getByLabelText('Workspace target'), { target: { value: 'workspace-1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Inspect lockfile' }))
+    expect(await screen.findByText(/stored snapshot: v1/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'GC' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview GC' }))
+    expect(await screen.findByText('unreferenced')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('gc-key-1')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('gc-nonce-1')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Profiles' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Create demo profile' }))
+    expect((await screen.findAllByText(/default-governance-profile/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Bind profile' }))
+    expect(await screen.findByText(/machine:machine/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Lock/Drift' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview lock' }))
+    expect((await screen.findAllByText(/unknown_evidence/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Plan Preview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview dry-run plan' }))
+    expect((await screen.findAllByText('approved but not applied')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText(/manual/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Apply/Recovery' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Preview apply' })[0])
+    expect((await screen.findAllByText('high risk')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('recovery required')).length).toBeGreaterThan(0)
+    expect(await screen.findByText(/Backup created|Create backup before apply/)).toBeInTheDocument()
+    expect(screen.getByDisplayValue('apply-key-1')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('nonce-123')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('I explicitly confirm this apply operation.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Apply with confirmation' }))
+    expect(await screen.findByText(/Apply finished/)).toBeInTheDocument()
+    expect(await screen.findByText(/Lock snapshot recorded/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
+    expect((await screen.findAllByText(/session-effective unknown/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Preview rollback' }))
+    expect(await screen.findByText(/Restore from backup/)).toBeInTheDocument()
+    const idempotencyInputs = screen.getAllByLabelText('Idempotency key')
+    fireEvent.change(idempotencyInputs[idempotencyInputs.length - 1], {
+      target: { value: 'rollback-key-1' },
+    })
+    fireEvent.click(screen.getByLabelText('I explicitly confirm this rollback operation.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Rollback' }))
+    expect(await screen.findByText(/Rollback complete/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Evidence' }))
+    expect((await screen.findAllByText(/observed/)).length).toBeGreaterThan(0)
     expect(await screen.findByRole('heading', { name: 'Runtime × Skill inventory' })).toBeInTheDocument()
     expect(screen.getByText(/Neither proves that a running session loaded or activated/)).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /fake supported/ })).toBeInTheDocument()
+    expect(screen.getByLabelText('Severity')).toBeInTheDocument()
+    expect(screen.getAllByLabelText('Scope').length).toBeGreaterThan(0)
+    expect(screen.getByText(/cached snapshot/)).toBeInTheDocument()
     expect(await screen.findByText('Review local changes')).toBeInTheDocument()
 
     const installButtons = await screen.findAllByRole('button', { name: 'Install' })
@@ -1277,7 +1935,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View files' }))
     expect(await screen.findByRole('heading', { name: 'Reviewer' })).toBeInTheDocument()
     expect(await screen.findByText(/Review local changes\./)).toBeInTheDocument()
-  })
+  }, 15_000)
 
   it('shows the read-only MCP runtime matrix and evidence', async () => {
     render(<LocalApp />)

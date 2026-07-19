@@ -41,9 +41,57 @@ cross-platform release evidence.
   source evidence, Runtime-reported disabled state, filesystem fallback, and
   probe-failure diagnostics. Native discovery still does not claim active
   Session visibility or activation.
-- **Phase 2B — remaining probes and governed changes (planned):** add a stable
-  Cursor native probe, explicit plan/apply/verify operations, and lockfile plus
-  drift governance.
+- **Phase 2B — snapshot and diagnostic hardening (complete):** add explicit
+  observation timestamps, bounded short-TTL caching, in-flight native-probe
+  coalescing, force refresh, lightweight filesystem-only Agent lists, true
+  machine Runtime inventory without synthetic Agents, partial-failure
+  diagnostics, and stable Skill/issue fingerprints with grouped root causes.
+- **Phase 3A — read-only governed desired state (complete):** add versioned
+  SkillProfile documents, machine/workspace/Agent profile bindings, deterministic
+  effective desired-state inheritance, same-layer conflict reporting, immutable
+  lock snapshots, stable SHA-256 observation/config/lock/plan hashes, drift and
+  dry-run plan previews, approval/rejection audit rows, optimistic
+  `expectedVersion` checks, approval staleness checks, and the
+  `/api/skills/governance` API surface. Runtime and filesystem Skill evidence
+  remains read-only, Cursor native Skill/session probing is explicitly
+  unsupported by current stable CLI contracts, and no discovery result is
+  treated as Session-effective proof.
+- **Phase 3B — governed apply and verification (complete for the safe local
+  subset):** apply only approved, non-stale plans whose observation, desired,
+  and lock hashes still match. The first automatic writer established
+  Runtime-target-derived Skill entries for digest-verified local or
+  cocli-vendored copy/symlink actions,
+  cocli-managed or symlink removal through quarantine, scoped leases, backup
+  manifests, staging plus atomic rename, force-refresh verification, CAS-safe
+  rollback, idempotent retries, and recovery-required state. Remote downloads,
+  private credentials, Git clone, Registry/Marketplace sources, installation
+  scripts, Runtime reload, and Session-effective adapters remain blocked/manual
+  until stable source and Runtime contracts exist. Phase 3C extends this writer
+  to canonical machine, Workspace, and Agent scopes and real Workspace
+  lockfiles.
+- **Phase 3C — canonical scopes, materialization, lockfile, and GC contracts
+  (complete for the safe local governance loop):** define machine/user,
+  workspace/project, and Agent scope semantics; expose Runtime capability
+  evidence for runtime-specific and shared Skill roots; block reserved roots,
+  legacy command roots, whole-root symlink takeover, symlink escape, read-only
+  roots, cross-filesystem atomic-rename hazards, and out-of-scope roots; persist
+  immutable managed artifacts, per-Skill materializations, ownership state (`managed`, `adopted`,
+  `unmanaged`, `foreign`), adoption audit, workspace lockfile records with CAS
+  and restore metadata, and GC protection references. Versioned HTTP APIs and
+  the Skills workspace expose Scopes, Managed Store, Materializations,
+  three-mode Adoption, Workspace Lockfile, and GC. Approved apply supports
+  capability-approved machine, Workspace, and Agent targets, uses the managed
+  store for per-Skill copy/symlink materialization, and performs real Workspace
+  lockfile writes with journaled backup and rollback. GC is preview/nonce/CAS
+  protected and quarantines managed artifact bytes before deletion. This phase
+  does not add remote source support, install-script execution, arbitrary target
+  paths, Runtime reload, or Session-effective proof.
+- **Phase 3D — remote sources and Runtime/session integration (planned):** add
+  explicit Registry/Marketplace and private-source credential policy without
+  executing untrusted installation scripts; add Runtime reload adapters and
+  session-bound verification only where a Runtime publishes a stable native
+  contract. Filesystem or discovery evidence continues to require a new Session
+  and must not be promoted to Session-effective proof.
 
 This track remains subordinate to cocli's persistent Agent and Channel model;
 it is Runtime governance for multi-Agent desktop work, not a standalone Skill
@@ -89,6 +137,17 @@ MCP governance does not introduce a Gateway or Registry and is not a secret
 store. Unsupported/authentication actions remain blocked, Grok write support
 stays manual until a stable transactional writer exists, and cocli never
 restarts an active Runtime session without separate future authorization.
+
+### Supporting governance integration (complete)
+
+The completed Skill and MCP histories now run together through one Store, API,
+and desktop without promoting either track into the Agent/Channel core model.
+The integrated migration sequence reserves 0013-0016 for MCP and 0017-0019 for
+Skill governance, reconciles the temporary Skill-only 0013-0015 development
+lineage by exact recorded name, and regression-tests fresh, 0012, MCP-only,
+Skill-only, restart, and failed-migration recovery paths. Domain-specific
+approval, nonce, idempotency, lock, journal, run, audit, bundle, artifact, and
+lockfile state remains isolated.
 
 ## Beta milestones
 

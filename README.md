@@ -10,10 +10,10 @@ runtime session.
 
 **Status:** early alpha. The local server, SQLite state, web client, eight
 Runtime adapters, durable delivery, Tasks, Memory, Skills, runtime history,
-live execution events, search, and state backup/restore are implemented. The
-persistent Agent/Channel model in [DESIGN.md](DESIGN.md) is landed; APIs,
-Workspace provider contracts, installers, and release guarantees are still
-evolving toward a public alpha.
+live execution events, search, state backup/restore, and Skill governance are
+implemented. The persistent Agent/Channel model in
+[DESIGN.md](DESIGN.md) is landed; APIs, Workspace provider contracts,
+installers, and release guarantees are still evolving toward a public alpha.
 
 ## Product model
 
@@ -84,30 +84,67 @@ session-resume features.
 
 ## Desktop Skill governance
 
-The first Skill governance phase is available as a supporting Agent/Runtime
-diagnostic surface. The desktop Skills workspace keeps the existing local
-library and per-Agent install/uninstall flow, and adds a read-only
-Runtime × Skill inventory plus doctor details. The HTTP API exposes matching
-machine-level endpoints at `/api/runtimes/skills/{inventory,doctor}` and
-Agent-level endpoints at `/api/agents/:agent_id/skills/{inventory,doctor}`.
+Skill governance is available as an Agent/Runtime governance surface.
+The desktop Skills workspace keeps the existing local library and per-Agent
+install/uninstall flow, and adds Runtime inventory, doctor details, versioned
+desired-state profiles, lockfile previews, drift classification, deterministic
+plans, approved apply/recovery, canonical scope inspection, managed artifacts,
+materializations, adoption, workspace lockfile restore, and reference-gated
+garbage collection.
 
-Discovery reports runtime compatibility, ordered search paths, scope, source
-and resolved paths, managed/external/broken state, invalid frontmatter,
-broken symbolic links, duplicate targets, and shadowed names. Cursor Agent
-Skills are discovered from `.cursor/skills` and `.agents/skills` at workspace
-and user scope; `.cursor/rules` remains a separate Rules surface. Claude,
-Codex, and Grok retain their existing search-path behavior.
+The inventory API exposes machine-level endpoints at
+`/api/runtimes/skills/{inventory,doctor}` and Agent-level endpoints at
+`/api/agents/:agent_id/skills/{inventory,doctor}`. The governance API is under
+`/api/skills/governance`.
 
-The Codex and Grok drivers now augment that filesystem scan with read-only
-native evidence from app-server `skills/list` and `grok inspect --json`.
-Inventory distinguishes a filesystem-only installed candidate from a Skill
-returned by the Runtime, exposes Runtime-reported disabled state when present,
-and falls back to filesystem evidence with a doctor warning when a native probe
-fails. A native discovery response is still not proof that an already-running
-Runtime Session loaded or activated the Skill. The doctor UI and API expose the
-evidence source explicitly, and discovery does not write to user-global Skill
-directories. Planned follow-up work adds a Cursor native probe,
-plan/apply/verify changes, and lockfile/drift governance.
+Evidence boundaries are intentionally strict. Filesystem discovery, Codex
+app-server `skills/list`, Grok `inspect --json`, and Cursor filesystem
+inventory do not prove that a concrete running Session loaded or activated a
+Skill. `sessionEffective` remains `unknown` unless a future session-bound
+native contract provides direct proof. The current Cursor CLI has no stable
+read-only Skill listing or session Skill contract, so cocli performs a bounded
+capability check, returns structured unsupported/manual governance evidence,
+and falls back to filesystem inventory.
+
+Governance persists profiles, profile bindings, immutable lock snapshots,
+dry-run plans, approval audit rows, apply runs, action journals, scoped locks,
+backup references, quarantine references, canonical managed artifacts,
+per-target materializations, workspace lockfile records, GC references, and
+recovery state in SQLite. Mutable profile, binding, and plan decisions use
+optimistic `expectedVersion` checks. Apply requires a non-stale approved plan,
+matching observation/desired/lock hashes, an idempotency key, and a current
+confirmation nonce for high-risk actions.
+
+The governed apply path is intentionally local-only. For machine/user,
+workspace/project, and Agent scopes, it can automatically copy or symlink
+digest-verified local, cocli-managed, library, or vendored artifacts into a
+Runtime-derived supported root. It records immutable artifacts and per-Skill
+materializations, writes `.cocli/skills.lock.json` for Workspace plans through
+CAS, backup, fsync, atomic rename, journal, and rollback boundaries, and removes
+only hash-matched managed/adopted entries through quarantine. Machine and
+Workspace writes are high risk and require the current preview-bound
+confirmation nonce. It does not accept arbitrary target paths, execute Skill
+scripts, clone repositories, resolve private credentials, download from a
+Registry or Marketplace, restart Runtime Sessions, or claim Session activation.
+Filesystem/runtime verification reports installed or configured-on-disk state;
+`sessionEffective` remains `unknown` without session-bound native evidence.
+The Phase 3C scope contract distinguishes machine/user, workspace/project, and
+Agent targets; records runtime-specific and shared Skill roots; stores
+immutable cocli-owned artifacts separately from Runtime search paths; and tracks
+each per-Skill materialization as `managed`, `adopted`, `unmanaged`, or
+`foreign`. Adoption supports audited record-only ownership, import-copy into the
+managed store, or an explicit keep-foreign record. Preview hashes and
+idempotency-bound confirmation nonces protect every managed-store, adoption,
+restore, and GC commit. Whole-root symlink takeover is blocked, while GC uses
+fresh references, optimistic versions, fingerprints, and quarantine for managed
+artifact bytes.
+
+See [docs/skill-governance-phase-3a.md](docs/skill-governance-phase-3a.md)
+for desired-state and dry-run planning,
+[docs/skill-governance-phase-3b.md](docs/skill-governance-phase-3b.md) for
+approved apply, verification, rollback, and recovery semantics, and
+[docs/skill-governance-phase-3c.md](docs/skill-governance-phase-3c.md) for
+canonical scope, materialization, lockfile, adoption, and GC contracts.
 
 ## Desktop MCP governance
 
@@ -183,6 +220,21 @@ The library boundary and reusable test-kit contract are documented separately
 in [docs/mcp-adapter-sdk.md](docs/mcp-adapter-sdk.md) and
 [docs/mcp-adapter-sdk-conformance.md](docs/mcp-adapter-sdk-conformance.md).
 
+## Skill and MCP governance integration
+
+Skill and MCP governance share one API process, Store, migration sequence, and
+desktop navigation while remaining separate supporting capabilities. MCP owns
+migrations 0013-0016 and Skill governance owns 0017-0019. Databases created by
+the isolated Skill development lineage, where those Skill migrations were
+temporarily recorded as 0013-0015, are reconciled transactionally by exact
+migration name before MCP migrations run. Profiles, approvals, journals,
+locks, recovery scans, bundles, artifacts, materializations, and lockfiles stay
+in domain-specific tables and namespaces.
+
+See [docs/governance-integration.md](docs/governance-integration.md) for the
+merge history, migration compatibility contract, unified validation matrix,
+and explicit unsupported boundaries.
+
 ## Repository layout
 
 - `bin/cocli/` — local server binary
@@ -198,9 +250,10 @@ in [docs/mcp-adapter-sdk.md](docs/mcp-adapter-sdk.md) and
 ## Development checks
 
 ```bash
-cargo test --workspace
+cargo test --workspace --locked
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-cargo fmt --all -- --check
+cargo +stable fmt --all -- --check
+cargo build --workspace --locked
 cd web
 npm test
 npm run lint

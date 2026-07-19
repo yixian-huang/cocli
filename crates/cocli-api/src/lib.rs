@@ -1,6 +1,7 @@
 //! Local HTTP API and runtime-neutral application service.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,8 +32,31 @@ pub use cocli_driver_core::{
 };
 
 mod mcp_http;
+mod skill_apply;
+mod skill_apply_http;
+mod skill_governance;
+mod skill_governance_http;
 mod skill_http;
 mod skill_import;
+mod skill_managed_http;
+
+/// Deterministic content and manifest digests used by trusted local Skill
+/// profiles. This helper is read-only and never executes artifact content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceArtifactDigests {
+    pub content_digest: String,
+    pub manifest_digest: String,
+}
+
+/// Computes Phase 3B digests for a local Skill directory without mutating it.
+pub fn governance_artifact_digests(root: &FsPath) -> Result<GovernanceArtifactDigests, String> {
+    let artifact = skill_apply::load_local_artifact(root)?;
+    Ok(GovernanceArtifactDigests {
+        content_digest: artifact.content_digest,
+        manifest_digest: artifact.manifest_digest,
+    })
+}
 
 /// Reconciles SQLite-managed skill installs with runtime workspace files.
 ///
@@ -280,6 +304,8 @@ pub struct RuntimeSkillSearchPath {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSkillIssue {
+    /// Stable identifier for the logical root cause, independent of display order.
+    pub fingerprint: String,
     pub code: String,
     pub severity: String,
     pub message: String,
@@ -287,6 +313,10 @@ pub struct RuntimeSkillIssue {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_codes: Vec<String>,
 }
 
 /// One discovered candidate plus the evidence needed to interpret it.
@@ -296,6 +326,8 @@ pub struct RuntimeSkillFinding {
     #[serde(flatten)]
     pub skill: RuntimeSkill,
     pub runtime: String,
+    /// Stable identity used to deduplicate filesystem aliases and machine/Agent overlays.
+    pub fingerprint: String,
     pub scope: String,
     pub source_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -311,10 +343,45 @@ pub struct RuntimeSkillFinding {
     pub issues: Vec<RuntimeSkillIssue>,
 }
 
+/// Runtime-owned canonical destination for one governed Agent Skill.
+///
+/// The governance applier never accepts an arbitrary target path from an API
+/// caller. It asks the Runtime adapter to derive the search root and entry from
+/// the Agent workspace and logical Skill name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernanceSkillTarget {
+    pub scope_root: PathBuf,
+    pub search_root: PathBuf,
+    pub entry_path: PathBuf,
+}
+
+/// Read-only capability evidence for one Runtime-derived Skill root.
+///
+/// API callers never provide `path` back as an automatic mutation target. The
+/// Runtime service resolves the target again from the canonical scope before
+/// every governed write.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceScopeCapability {
+    pub runtime: String,
+    pub scope: String,
+    pub root_kind: String,
+    pub path: String,
+    pub status: String,
+    pub exists: bool,
+    pub writable: bool,
+    pub atomic_rename: bool,
+    pub supported: bool,
+    pub evidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
 /// Filesystem/native-probe report returned by the runtime boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSkillInspection {
+    pub observed_at: DateTime<Utc>,
     pub runtime: String,
     pub compatibility: RuntimeSkillCompatibility,
     pub evidence: RuntimeSkillEvidence,
@@ -856,6 +923,7 @@ pub trait RuntimeService: Send + Sync {
             .await?
             .into_iter()
             .map(|skill| RuntimeSkillFinding {
+                fingerprint: format!("{}:{}", runtime, skill.path),
                 scope: skill.skill_type.clone(),
                 source_path: skill.path.clone(),
                 resolved_path: None,
@@ -871,6 +939,7 @@ pub trait RuntimeService: Send + Sync {
             })
             .collect();
         Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
             runtime,
             compatibility: self.skill_compatibility(&agent.runtime),
             evidence,
@@ -878,6 +947,70 @@ pub trait RuntimeService: Send + Sync {
             skills,
             issues: Vec::new(),
         })
+    }
+
+    /// Inspects user/global skill roots for a Runtime without creating an Agent.
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<RuntimeSkillInspection, RuntimeError> {
+        Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: self.skill_compatibility(runtime),
+            evidence: RuntimeSkillEvidence::default(),
+            search_paths: Vec::new(),
+            skills: Vec::new(),
+            issues: Vec::new(),
+        })
+    }
+
+    /// Resolves a canonical Agent-workspace target without creating it or
+    /// stopping/restarting a Runtime Session.
+    async fn governance_skill_target(
+        &self,
+        _agent: &Agent,
+        _skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed Agent Skill target".to_owned(),
+        ))
+    }
+
+    /// Reports canonical Runtime Skill roots for a machine/user or resolved
+    /// Workspace scope without creating any directory.
+    async fn governance_scope_capabilities(
+        &self,
+        _runtime: &str,
+        _scope: &str,
+        _scope_root: Option<&FsPath>,
+    ) -> Result<Vec<GovernanceScopeCapability>, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed machine/workspace Skill root contract".to_owned(),
+        ))
+    }
+
+    /// Resolves one canonical machine/user or Workspace Skill target. The
+    /// optional root is supplied only after cocli resolves a durable Workspace
+    /// binding; arbitrary HTTP paths are never forwarded here.
+    async fn governance_skill_target_in_scope(
+        &self,
+        _runtime: &str,
+        _scope: &str,
+        _scope_root: Option<&FsPath>,
+        _skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed machine/workspace Skill target".to_owned(),
+        ))
+    }
+
+    /// Returns the cocli-owned immutable artifact root. This is not a Runtime
+    /// Skill search path and never confers ownership over a whole Runtime root.
+    async fn governance_managed_artifact_root(&self) -> Result<PathBuf, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime service has no managed Skill artifact store".to_owned(),
+        ))
     }
 
     /// Atomically installs or refreshes one library skill in the agent workspace.
@@ -985,6 +1118,7 @@ pub(crate) struct AppState {
     _delivery_worker: Arc<DeliveryWorker>,
     skill_mutation_locks: SkillMutationLocks,
     mcp_apply_locks: McpApplyLocks,
+    skill_snapshots: Arc<skill_http::SkillSnapshotCoordinator>,
     bridge_mutation_lock: Arc<Mutex<()>>,
 }
 
@@ -1361,6 +1495,9 @@ fn router_with_delivery_config_and_live_events(
         ));
     Router::new()
         .merge(mcp_http::router())
+        .merge(skill_apply_http::router())
+        .merge(skill_governance_http::router())
+        .merge(skill_managed_http::router())
         .merge(skill_http::router())
         .merge(bridge_router)
         .route("/healthz", get(health))
@@ -1498,6 +1635,7 @@ fn router_with_delivery_config_and_live_events(
             _delivery_worker: delivery_worker,
             skill_mutation_locks: Arc::new(Mutex::new(HashMap::new())),
             mcp_apply_locks: Arc::new(Mutex::new(HashMap::new())),
+            skill_snapshots: skill_http::SkillSnapshotCoordinator::new(),
             bridge_mutation_lock: Arc::new(Mutex::new(())),
         })
 }
@@ -4235,6 +4373,11 @@ impl From<StoreError> for ApiError {
             StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
                 Some(StatusCode::CONFLICT)
             }
+            StoreError::SkillGovernanceNotFound { .. } => Some(StatusCode::NOT_FOUND),
+            StoreError::SkillGovernanceVersionConflict { .. }
+            | StoreError::SkillGovernanceTransitionConflict { .. }
+            | StoreError::SkillGovernanceLockHeld { .. }
+            | StoreError::SkillGovernanceIdempotencyConflict { .. } => Some(StatusCode::CONFLICT),
             StoreError::InvalidSkillName(_)
             | StoreError::InvalidSkillFilePath(_)
             | StoreError::InvalidSkillFileSize { .. } => Some(StatusCode::BAD_REQUEST),

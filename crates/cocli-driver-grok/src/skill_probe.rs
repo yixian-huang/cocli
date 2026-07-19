@@ -14,7 +14,6 @@ const GROK_SKILLS_EVIDENCE: SkillDiscoveryEvidence = SkillDiscoveryEvidence {
 
 #[derive(Debug, Deserialize)]
 struct InspectReport {
-    #[serde(default)]
     skills: Vec<InspectSkill>,
 }
 
@@ -41,8 +40,16 @@ pub(crate) async fn probe_skills(
     grok_binary: &Path,
     workspace: &Path,
 ) -> Result<NativeSkillProbe, DriverError> {
+    probe_skills_with_timeout(grok_binary, workspace, PROBE_TIMEOUT).await
+}
+
+async fn probe_skills_with_timeout(
+    grok_binary: &Path,
+    workspace: &Path,
+    timeout: Duration,
+) -> Result<NativeSkillProbe, DriverError> {
     let output = tokio::time::timeout(
-        PROBE_TIMEOUT,
+        timeout,
         Command::new(grok_binary)
             .arg("inspect")
             .arg("--json")
@@ -183,5 +190,47 @@ mod tests {
 
         assert!(probe.skills.is_empty());
         assert_eq!(probe.evidence.detail, "inspect --json");
+    }
+
+    #[tokio::test]
+    async fn missing_grok_cli_is_reported() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let error = probe_skills(&temp.path().join("missing-grok"), temp.path())
+            .await
+            .expect_err("missing executable should fail");
+        assert!(matches!(error, DriverError::Io(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_and_nonzero_exit_are_reported() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let slow = temp.path().join("slow-grok");
+        fs::write(&slow, "#!/bin/sh\nsleep 1\n").expect("slow executable");
+        fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).expect("permissions");
+        let error = probe_skills_with_timeout(&slow, temp.path(), Duration::from_millis(20))
+            .await
+            .expect_err("probe should time out");
+        assert!(error.to_string().contains("timed out"));
+
+        let failing = temp.path().join("failing-grok");
+        fs::write(&failing, "#!/bin/sh\nprintf 'bad config' >&2\nexit 42\n")
+            .expect("failing executable");
+        fs::set_permissions(&failing, fs::Permissions::from_mode(0o755)).expect("permissions");
+        let error = probe_skills(&failing, temp.path())
+            .await
+            .expect_err("nonzero exit should fail");
+        assert!(error.to_string().contains("bad config"));
+    }
+
+    #[test]
+    fn malformed_and_partial_json_are_handled() {
+        let error = parse_inspect_report(b"{").expect_err("malformed JSON should fail");
+        assert!(error.to_string().contains("decode grok inspect --json"));
+        let error = parse_inspect_report(br#"{}"#).expect_err("partial JSON should fail");
+        assert!(error.to_string().contains("decode grok inspect --json"));
     }
 }

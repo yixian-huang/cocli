@@ -19,6 +19,41 @@ import type {
   OverflowStatsEntry,
   ResponderMode,
   ResponderRole,
+  SkillGovernanceApplyConfirmation,
+  SkillGovernanceApplyPreviewResponse,
+  SkillGovernanceApplyResponse,
+  SkillGovernanceAdoptionCommitRequest,
+  SkillGovernanceAdoptionPreview,
+  SkillGovernanceAdoptionRequest,
+  SkillGovernanceBinding,
+  SkillGovernanceEffectiveDesired,
+  SkillGovernanceGcCommitRequest,
+  SkillGovernanceGcPreviewResponse,
+  SkillGovernanceLockfileRestoreCommitRequest,
+  SkillGovernanceLockfileRestorePreview,
+  SkillGovernanceLockfileRestoreRequest,
+  SkillGovernanceLockPreviewResponse,
+  SkillGovernanceLockSnapshot,
+  SkillGovernanceManagedArtifact,
+  SkillGovernanceManagedArtifactCommitRequest,
+  SkillGovernanceManagedArtifactPreview,
+  SkillGovernanceManagedArtifactPreviewRequest,
+  SkillGovernanceMaterialization,
+  SkillGovernanceObservation,
+  SkillGovernancePlan,
+  SkillGovernancePlanDecisionResponse,
+  SkillGovernancePlanPreviewResponse,
+  SkillGovernancePreviewRequest,
+  SkillGovernanceProfile,
+  SkillGovernanceProfileDocument,
+  SkillGovernanceRollbackConfirmation,
+  SkillGovernanceRollbackPreviewResponse,
+  SkillGovernanceRollbackResponse,
+  SkillGovernanceRun,
+  SkillGovernanceScope,
+  SkillGovernanceScopeCapabilitiesResponse,
+  SkillGovernanceVerifyResponse,
+  SkillGovernanceWorkspaceLockfileInspect,
   SkillFileEntry,
   SkillLibraryEntry,
   SkillLibraryFileMeta,
@@ -608,17 +643,232 @@ export const runtimes = {
     request<Record<string, 'supported' | 'uncertain' | 'unsupported' | 'unknown'>>(
       `/api/runtimes/compatibility`
     ),
-  skillInventory: () =>
-    request<{
-      runtimes: import('@shared/types').RuntimeSkillInventorySummary[]
-      agents: import('@shared/types').AgentSkillInventory[]
-    }>(`/api/runtimes/skills/inventory`),
-  skillDoctor: () =>
-    request<MachineSkillDoctor>(`/api/runtimes/skills/doctor`),
+  skillInventory: (force = false) =>
+    request<Omit<MachineSkillDoctor, 'summary'>>(
+      `/api/runtimes/skills/inventory${force ? '?force=true' : ''}`
+    ),
+  skillDoctor: (force = false) =>
+    request<MachineSkillDoctor>(
+      `/api/runtimes/skills/doctor${force ? '?force=true' : ''}`
+    ),
   mcpInventory: () =>
     request<McpInventory>(`/api/runtimes/mcp/inventory`),
   mcpDoctor: () =>
     request<McpDoctorReport>(`/api/runtimes/mcp/doctor`),
+}
+
+// Skill governance (Phase 3A — desired profiles, bindings, dry-run previews)
+export const skillGovernance = {
+  listProfiles: () =>
+    request<SkillGovernanceProfile[]>('/api/skills/governance/profiles'),
+  createProfile: (document: SkillGovernanceProfileDocument) =>
+    request<SkillGovernanceProfile>('/api/skills/governance/profiles', {
+      method: 'POST',
+      body: JSON.stringify(document),
+    }),
+  getProfile: (profileId: string) =>
+    request<SkillGovernanceProfile>(`/api/skills/governance/profiles/${profileId}`),
+  updateProfile: (
+    profileId: string,
+    input: { expectedVersion: number; document: SkillGovernanceProfileDocument },
+  ) =>
+    request<SkillGovernanceProfile>(`/api/skills/governance/profiles/${profileId}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  deleteProfile: (profileId: string, expectedVersion: number) =>
+    request<void>(
+      `/api/skills/governance/profiles/${profileId}?expectedVersion=${expectedVersion}`,
+      { method: 'DELETE' },
+    ),
+  listBindings: (input?: { scope?: SkillGovernanceScope; scopeId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.scopeId) params.set('scopeId', input.scopeId)
+    const query = params.toString()
+    return request<SkillGovernanceBinding[]>(
+      `/api/skills/governance/bindings${query ? `?${query}` : ''}`,
+    )
+  },
+  bindProfile: (input: {
+    profileId: string
+    scope: SkillGovernanceScope
+    scopeId: string
+  }) =>
+    request<SkillGovernanceBinding>('/api/skills/governance/bindings', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  unbindProfile: (bindingId: string, expectedVersion: number) =>
+    request<void>(
+      `/api/skills/governance/bindings/${bindingId}?expectedVersion=${expectedVersion}`,
+      { method: 'DELETE' },
+    ),
+  effectiveDesired: (input?: { workspaceId?: string; agentId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.workspaceId) params.set('workspaceId', input.workspaceId)
+    if (input?.agentId) params.set('agentId', input.agentId)
+    const query = params.toString()
+    return request<SkillGovernanceEffectiveDesired>(
+      `/api/skills/governance/desired/effective${query ? `?${query}` : ''}`,
+    )
+  },
+  evidence: (force = false) =>
+    request<SkillGovernanceObservation>(
+      `/api/skills/governance/evidence${force ? '?force=true' : ''}`,
+    ),
+  previewLock: (input: SkillGovernancePreviewRequest) =>
+    request<SkillGovernanceLockPreviewResponse>('/api/skills/governance/lock/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listLocks: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernanceLockSnapshot[]>(`/api/skills/governance/locks?${params}`)
+  },
+  listPlans: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernancePlan[]>(`/api/skills/governance/plans?${params}`)
+  },
+  previewPlan: (input: SkillGovernancePreviewRequest) =>
+    request<SkillGovernancePlanPreviewResponse>('/api/skills/governance/plans', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  approvePlan: (planId: string, expectedVersion: number) =>
+    request<SkillGovernancePlanDecisionResponse>(
+      `/api/skills/governance/plans/${planId}/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion }),
+      },
+    ),
+  rejectPlan: (planId: string, expectedVersion: number) =>
+    request<SkillGovernancePlanDecisionResponse>(
+      `/api/skills/governance/plans/${planId}/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion }),
+      },
+    ),
+  previewApply: (planId: string) =>
+    request<SkillGovernanceApplyPreviewResponse>(
+      `/api/skills/governance/plans/${planId}/apply/preview`,
+      { method: 'POST' },
+    ),
+  applyPlan: (planId: string, input: SkillGovernanceApplyConfirmation) =>
+    request<SkillGovernanceApplyResponse>(
+      `/api/skills/governance/plans/${planId}/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  listRuns: (input?: { scope?: SkillGovernanceScope; scopeId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.scopeId) params.set('scopeId', input.scopeId)
+    const query = params.toString()
+    return request<SkillGovernanceRun[]>(
+      `/api/skills/governance/runs${query ? `?${query}` : ''}`,
+    )
+  },
+  getRun: (runId: string) =>
+    request<SkillGovernanceRun>(`/api/skills/governance/runs/${runId}`),
+  verifyRun: (runId: string) =>
+    request<SkillGovernanceVerifyResponse>(
+      `/api/skills/governance/runs/${runId}/verify`,
+      { method: 'POST' },
+    ),
+  previewRollback: (runId: string) =>
+    request<SkillGovernanceRollbackPreviewResponse>(
+      `/api/skills/governance/runs/${runId}/rollback/preview`,
+      { method: 'POST' },
+    ),
+  rollbackRun: (runId: string, input: SkillGovernanceRollbackConfirmation) =>
+    request<SkillGovernanceRollbackResponse>(
+      `/api/skills/governance/runs/${runId}/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  scopeCapabilities: (input?: {
+    runtime?: string
+    scope?: SkillGovernanceScope
+    workspaceId?: string
+    agentId?: string
+  }) => {
+    const params = new URLSearchParams()
+    if (input?.runtime) params.set('runtime', input.runtime)
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.workspaceId) params.set('workspaceId', input.workspaceId)
+    if (input?.agentId) params.set('agentId', input.agentId)
+    const query = params.toString()
+    return request<SkillGovernanceScopeCapabilitiesResponse>(
+      `/api/skills/governance/scopes${query ? `?${query}` : ''}`,
+    )
+  },
+  listManagedArtifacts: () =>
+    request<SkillGovernanceManagedArtifact[]>('/api/skills/governance/managed/artifacts'),
+  previewManagedArtifact: (input: SkillGovernanceManagedArtifactPreviewRequest) =>
+    request<SkillGovernanceManagedArtifactPreview>('/api/skills/governance/managed/artifacts/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  commitManagedArtifact: (input: SkillGovernanceManagedArtifactCommitRequest) =>
+    request<SkillGovernanceManagedArtifact>('/api/skills/governance/managed/artifacts/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listMaterializations: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernanceMaterialization[]>(
+      `/api/skills/governance/materializations?${params}`,
+    )
+  },
+  previewAdoption: (input: SkillGovernanceAdoptionRequest) =>
+    request<SkillGovernanceAdoptionPreview>('/api/skills/governance/adoption/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  commitAdoption: (input: SkillGovernanceAdoptionCommitRequest) =>
+    request<SkillGovernanceMaterialization>('/api/skills/governance/adoption/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  inspectWorkspaceLockfile: (workspaceId: string, lockfilePath?: string) => {
+    const params = new URLSearchParams({ workspaceId })
+    if (lockfilePath) params.set('lockfilePath', lockfilePath)
+    return request<SkillGovernanceWorkspaceLockfileInspect>(
+      `/api/skills/governance/workspace-lockfile?${params}`,
+    )
+  },
+  previewLockfileRestore: (input: SkillGovernanceLockfileRestoreRequest) =>
+    request<SkillGovernanceLockfileRestorePreview>(
+      '/api/skills/governance/workspace-lockfile/restore/preview',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  restoreLockfile: (input: SkillGovernanceLockfileRestoreCommitRequest) =>
+    request<SkillGovernanceLockfileRestorePreview>(
+      '/api/skills/governance/workspace-lockfile/restore',
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  previewGc: () =>
+    request<SkillGovernanceGcPreviewResponse>('/api/skills/governance/gc/preview', {
+      method: 'POST',
+    }),
+  commitGc: (input: SkillGovernanceGcCommitRequest) =>
+    request<SkillGovernanceGcPreviewResponse>('/api/skills/governance/gc/commit', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
 }
 
 // Unified Memory (L1/L2 read API — Tasks 6.1/6.2)

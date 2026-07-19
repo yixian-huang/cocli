@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use cocli_driver_core::prompt_arg;
@@ -212,10 +213,16 @@ fn merge_trusted_folder(existing: &str, path: &str) -> String {
 /// is lowercased because gemini-cli normalizes trust keys to lowercase when
 /// it compares the process cwd.
 ///
-/// Read-merge-(atomic)write. Concurrency: two simultaneous spawns could
-/// drop one entry; `prepare_workspace` re-registers on every (re)spawn so it
-/// self-heals on the next turn.
+/// Read-merge-(atomic)write. Calls in this process are serialized so parallel
+/// Agent preparation cannot reuse the same timestamp-based temporary name or
+/// lose a just-read entry. A separate process may still race, so
+/// `prepare_workspace` re-registers on every (re)spawn and self-heals later.
 fn register_trusted_folder_at(trusted_file: &Path, work_dir: &str) -> std::io::Result<()> {
+    static TRUSTED_FOLDER_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = TRUSTED_FOLDER_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let lowercased = work_dir.to_lowercase();
     let existing = std::fs::read_to_string(trusted_file).unwrap_or_default();
     let merged = merge_trusted_folder(&existing, &lowercased);

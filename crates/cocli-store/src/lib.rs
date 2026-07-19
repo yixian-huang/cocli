@@ -1,6 +1,7 @@
 //! SQLite-backed persistence for cocli local.
 
 use std::path::Path;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,20 @@ pub use mcp_governance::{
 mod skills;
 pub use skills::{
     AgentSkillInstall, NewSkillLibrary, SkillLibraryEntry, SkillLibraryFile, SkillLibraryFileMeta,
+};
+mod skill_governance;
+pub use skill_governance::{
+    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, NewSkillGovernanceGcReference,
+    NewSkillGovernanceManagedArtifact, NewSkillGovernanceMaterialization, NewSkillLockSnapshot,
+    SkillGovernanceAdoptionAudit, SkillGovernanceApplyAction, SkillGovernanceApplyActionStatus,
+    SkillGovernanceApplyAudit, SkillGovernanceApplyRun, SkillGovernanceApplyRunStatus,
+    SkillGovernanceGcCandidate, SkillGovernanceGcReference, SkillGovernanceInstallationMode,
+    SkillGovernanceLeaseAcquire, SkillGovernanceManagedArtifact, SkillGovernanceMaterialization,
+    SkillGovernanceMaterializationOwnership, SkillGovernanceMaterializationRootKind,
+    SkillGovernancePlan, SkillGovernancePlanAudit, SkillGovernancePlanStatus,
+    SkillGovernanceRecoveryStatus, SkillGovernanceScope, SkillGovernanceScopedLock,
+    SkillGovernanceVerifyStatus, SkillGovernanceWorkspaceLockfile, SkillLockSnapshot, SkillProfile,
+    SkillProfileBinding,
 };
 mod workspace;
 pub use workspace::{
@@ -169,6 +184,70 @@ pub enum StoreError {
     /// The same library is already installed for an agent.
     #[error("skill library {library_id} is already installed for agent {agent_id}")]
     SkillAlreadyInstalled { agent_id: Uuid, library_id: Uuid },
+    /// A skill-governance optimistic-concurrency check failed.
+    #[error(
+        "{entity} version conflict for {id}: current={current_version}, attempted={attempted_version}"
+    )]
+    SkillGovernanceVersionConflict {
+        /// Entity type being modified.
+        entity: &'static str,
+        /// Stable record identifier, or related profile id for scope bindings.
+        id: Uuid,
+        /// Version currently stored.
+        current_version: i64,
+        /// Version supplied by the caller.
+        attempted_version: i64,
+    },
+    /// A governance plan decision was attempted from a terminal/incompatible state.
+    #[error("skill governance plan {id} cannot transition from {from} to {to}")]
+    SkillGovernanceTransitionConflict {
+        /// Plan being transitioned.
+        id: Uuid,
+        /// Current persisted state.
+        from: String,
+        /// Requested state.
+        to: String,
+    },
+    /// A requested skill-governance row does not exist.
+    #[error("{entity} not found: {id}")]
+    SkillGovernanceNotFound {
+        /// Entity type being loaded or changed.
+        entity: &'static str,
+        /// Missing record identifier.
+        id: Uuid,
+    },
+    /// A non-expired skill-governance scoped lock is owned by another actor.
+    #[error(
+        "skill governance lock for {scope}:{scope_id} is held by {owner} until {lease_expires_at}"
+    )]
+    SkillGovernanceLockHeld {
+        /// Persisted scope.
+        scope: String,
+        /// Persisted scope identifier.
+        scope_id: String,
+        /// Current lock owner.
+        owner: String,
+        /// Lease expiry timestamp.
+        lease_expires_at: DateTime<Utc>,
+    },
+    /// An idempotency key was reused with different durable request identity fields.
+    #[error("skill governance idempotency conflict for {entity} {id}")]
+    SkillGovernanceIdempotencyConflict {
+        /// Entity type being created idempotently.
+        entity: &'static str,
+        /// Existing durable record identifier.
+        id: Uuid,
+    },
+    /// A skill-governance delete was not safe under current references, ownership, or fingerprint.
+    #[error("skill governance delete conflict for {entity} {id}: {reason}")]
+    SkillGovernanceDeleteConflict {
+        /// Entity type being deleted.
+        entity: &'static str,
+        /// Durable record identifier.
+        id: Uuid,
+        /// Stable reason string.
+        reason: &'static str,
+    },
     /// A requested logical workspace does not exist.
     #[error("workspace not found: {0}")]
     WorkspaceNotFound(Uuid),
@@ -942,6 +1021,7 @@ impl Store {
         options: SqliteConnectOptions,
         max_connections: u32,
     ) -> Result<Self, StoreError> {
+        let options = options.busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new()
             .max_connections(max_connections)
             .connect_with(options)
@@ -3621,6 +3701,8 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
     .execute(pool)
     .await?;
 
+    reconcile_skill_development_lineage(pool).await?;
+
     for (version, name, migration) in [
         (
             1_i64,
@@ -3696,13 +3778,33 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             "mcp_governance_phase_3a",
             include_str!("../migrations/0016_mcp_governance_phase_3a.sql"),
         ),
+        (
+            17,
+            "skill_governance",
+            include_str!("../migrations/0017_skill_governance.sql"),
+        ),
+        (
+            18,
+            "skill_governance_apply_state",
+            include_str!("../migrations/0018_skill_governance_apply_state.sql"),
+        ),
+        (
+            19,
+            "skill_governance_managed_scopes",
+            include_str!("../migrations/0019_skill_governance_managed_scopes.sql"),
+        ),
     ] {
-        let already_applied: bool =
-            query_scalar("SELECT EXISTS(SELECT 1 FROM cocli_schema_migrations WHERE version = ?)")
+        let applied_name: Option<String> =
+            query_scalar("SELECT name FROM cocli_schema_migrations WHERE version = ?")
                 .bind(version)
-                .fetch_one(pool)
+                .fetch_optional(pool)
                 .await?;
-        if already_applied {
+        if let Some(applied_name) = applied_name {
+            if version >= 13 && applied_name != name {
+                return Err(sqlx_core::Error::Protocol(format!(
+                    "migration version {version} is recorded as `{applied_name}`, expected `{name}`"
+                )));
+            }
             continue;
         }
 
@@ -3722,6 +3824,59 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
         transaction.commit().await?;
     }
     Ok(())
+}
+
+/// Skill governance migrations were briefly numbered 13-15 on their isolated
+/// development branch. Remap only those exact names before the integrated
+/// sequence claims 13-16 for MCP governance. The transaction makes the
+/// reconciliation restart-safe and preserves the original applied timestamps.
+async fn reconcile_skill_development_lineage(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
+    let mut transaction = pool.begin().await?;
+    for (legacy_version, integrated_version, name) in [
+        (13_i64, 17_i64, "skill_governance"),
+        (14, 18, "skill_governance_apply_state"),
+        (15, 19, "skill_governance_managed_scopes"),
+    ] {
+        let legacy_name: Option<String> =
+            query_scalar("SELECT name FROM cocli_schema_migrations WHERE version = ?")
+                .bind(legacy_version)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        if legacy_name.as_deref() != Some(name) {
+            continue;
+        }
+
+        let integrated_name: Option<String> =
+            query_scalar("SELECT name FROM cocli_schema_migrations WHERE version = ?")
+                .bind(integrated_version)
+                .fetch_optional(&mut *transaction)
+                .await?;
+        match integrated_name {
+            None => {
+                query(
+                    "UPDATE cocli_schema_migrations SET version = ? WHERE version = ? AND name = ?",
+                )
+                .bind(integrated_version)
+                .bind(legacy_version)
+                .bind(name)
+                .execute(&mut *transaction)
+                .await?;
+            }
+            Some(integrated_name) if integrated_name == name => {
+                query("DELETE FROM cocli_schema_migrations WHERE version = ? AND name = ?")
+                    .bind(legacy_version)
+                    .bind(name)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            Some(integrated_name) => {
+                return Err(sqlx_core::Error::Protocol(format!(
+                    "cannot reconcile legacy migration `{name}` from version {legacy_version}: version {integrated_version} is recorded as `{integrated_name}`"
+                )));
+            }
+        }
+    }
+    transaction.commit().await
 }
 
 async fn ensure_installation_id(pool: &SqlitePool) -> Result<String, sqlx_core::Error> {

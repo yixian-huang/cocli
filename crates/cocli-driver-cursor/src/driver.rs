@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use cocli_driver_core::types::{
-    BusyDeliveryMode, DriverAgentConfig, EnvPropagation, MessageMode, SkillCompatibility,
-    SpawnConfig,
+    BusyDeliveryMode, DriverAgentConfig, EnvPropagation, MessageMode, NativeSkillProbe,
+    SkillCompatibility, SpawnConfig,
 };
 use cocli_driver_core::{Driver, DriverError, DriverEvent};
 
 use crate::events::parse_line;
+use crate::skill_probe;
 use crate::spawn::{spawn_cursor, SpawnContext};
 
 pub struct CursorDriver {
@@ -103,11 +104,22 @@ impl Driver for CursorDriver {
         let mut paths = vec![
             workspace.join(".cursor").join("skills"),
             workspace.join(".agents").join("skills"),
+            workspace.join(".claude").join("skills"),
+            workspace.join(".codex").join("skills"),
         ];
         if let Some(home) = dirs::home_dir() {
             paths.push(home.join(".cursor").join("skills"));
             paths.push(home.join(".agents").join("skills"));
+            paths.push(home.join(".claude").join("skills"));
+            paths.push(home.join(".codex").join("skills"));
         }
         paths
+    }
+
+    async fn probe_skills(
+        &self,
+        workspace: &Path,
+    ) -> Result<Option<NativeSkillProbe>, DriverError> {
+        skill_probe::probe_skills(&self.cursor_binary, workspace).await
     }
 }

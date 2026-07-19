@@ -5,16 +5,18 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::Utc;
 use cocli_api::{
-    RuntimeError, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence,
-    RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection,
-    RuntimeSkillIssue, RuntimeSkillSearchPath,
+    GovernanceScopeCapability, RuntimeError, RuntimeSkill, RuntimeSkillCompatibility,
+    RuntimeSkillEvidence, RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding,
+    RuntimeSkillInspection, RuntimeSkillIssue, RuntimeSkillSearchPath,
 };
 use cocli_driver_core::types::{
     NativeSkill, NativeSkillProbe, SkillCompatibility, SkillDiscoveryEvidence,
 };
 use cocli_runtime_pool::RuntimeRegistry;
 use cocli_store::{Agent, SkillLibraryFile};
+use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 use crate::runtime::LocalRuntimeConfig;
@@ -38,7 +40,7 @@ pub(crate) async fn list(
     config: &LocalRuntimeConfig,
     agent: &Agent,
 ) -> Result<Vec<RuntimeSkill>, RuntimeError> {
-    Ok(inspect(registry, config, agent)
+    Ok(inspect_agent(registry, config, agent, false)
         .await?
         .skills
         .into_iter()
@@ -51,10 +53,16 @@ pub(crate) async fn inspect(
     config: &LocalRuntimeConfig,
     agent: &Agent,
 ) -> Result<RuntimeSkillInspection, RuntimeError> {
+    inspect_agent(registry, config, agent, true).await
+}
+
+async fn inspect_agent(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+    include_native: bool,
+) -> Result<RuntimeSkillInspection, RuntimeError> {
     let workspace = config.workspace_root.join(agent.id.to_string());
-    tokio::fs::create_dir_all(&workspace)
-        .await
-        .map_err(|error| skill_io_error("create agent workspace", &error))?;
     let paths = skill_paths(registry, &agent.runtime, &workspace);
     let compatibility = compatibility(registry, &agent.runtime);
     let driver = registry.get(&agent.runtime);
@@ -71,9 +79,76 @@ pub(crate) async fn inspect(
     .map_err(|error| RuntimeError::Delivery(format!("skill scan task failed: {error}")))?
     .map_err(|error| skill_io_error("scan runtime skills", &error))?;
 
+    if include_native {
+        if let Some(driver) = driver {
+            match driver.probe_skills(&workspace).await {
+                Ok(Some(probe)) => merge_native_probe(&mut inspection, probe, &workspace),
+                Ok(None) if agent.runtime == "cursor" => inspection.issues.push(skill_issue(
+                    "native_probe_unsupported",
+                    "warning",
+                    "Cursor exposes filesystem-discovered Agent Skills but no stable native discovery or session-effective contract; manual verification is required".to_owned(),
+                    None,
+                    None,
+                )),
+                Ok(None) => {}
+                Err(error) => inspection.issues.push(skill_issue(
+                    "native_probe_failed",
+                    "warning",
+                    format!(
+                        "native runtime skill probe failed; using filesystem evidence: {error}"
+                    ),
+                    None,
+                    None,
+                )),
+            }
+        }
+    }
+    inspection.observed_at = Utc::now();
+    inspection.issues = group_issues(std::mem::take(&mut inspection.issues));
+    namespace_issue_fingerprints(&mut inspection);
+    Ok(inspection)
+}
+
+pub(crate) async fn inspect_machine(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    runtime: &str,
+) -> Result<RuntimeSkillInspection, RuntimeError> {
+    let workspace = &config.workspace_root;
+    let paths: Vec<PathBuf> = skill_paths(registry, runtime, workspace)
+        .into_iter()
+        .filter(|path| !path.starts_with(workspace))
+        .collect();
+    let compatibility = compatibility(registry, runtime);
+    let driver = registry.get(runtime);
+    let scan_runtime = runtime.to_owned();
+    let scan_workspace = workspace.clone();
+    let mut inspection = tokio::task::spawn_blocking(move || {
+        scan_skill_paths(
+            &scan_runtime,
+            compatibility,
+            SkillDiscoveryEvidence::FILESYSTEM,
+            &scan_workspace,
+            &paths,
+        )
+    })
+    .await
+    .map_err(|error| RuntimeError::Delivery(format!("machine skill scan task failed: {error}")))?
+    .map_err(|error| skill_io_error("scan machine runtime skills", &error))?;
+
     if let Some(driver) = driver {
-        match driver.probe_skills(&workspace).await {
-            Ok(Some(probe)) => merge_native_probe(&mut inspection, probe, &workspace),
+        match driver.probe_skills(workspace).await {
+            Ok(Some(probe)) => {
+                merge_native_probe(&mut inspection, probe, workspace);
+                inspection.skills.retain(|skill| skill.scope != "workspace");
+            }
+            Ok(None) if runtime == "cursor" => inspection.issues.push(skill_issue(
+                "native_probe_unsupported",
+                "warning",
+                "Cursor exposes filesystem-discovered Agent Skills but no stable native discovery or session-effective contract; manual verification is required".to_owned(),
+                None,
+                None,
+            )),
             Ok(None) => {}
             Err(error) => inspection.issues.push(skill_issue(
                 "native_probe_failed",
@@ -84,6 +159,9 @@ pub(crate) async fn inspect(
             )),
         }
     }
+    inspection.observed_at = Utc::now();
+    inspection.issues = group_issues(std::mem::take(&mut inspection.issues));
+    namespace_issue_fingerprints(&mut inspection);
     Ok(inspection)
 }
 
@@ -160,6 +238,320 @@ pub(crate) async fn install(
         remove_path(&backup).await?;
     }
     Ok(install_path)
+}
+
+pub(crate) fn governance_target(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+    skill_name: &str,
+) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+    validate_skill_name(skill_name)?;
+    if compatibility(registry, &agent.runtime) == RuntimeSkillCompatibility::Unsupported {
+        return Err(RuntimeError::Unsupported(format!(
+            "{} does not support skills",
+            agent.runtime
+        )));
+    }
+    let workspace = config.workspace_root.join(agent.id.to_string());
+    let search_root = workspace_skill_roots(registry, &agent.runtime, &workspace)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            RuntimeError::Unsupported(format!("{} exposes no workspace skill path", agent.runtime))
+        })?;
+    let entry_path = safe_child_path(&search_root, skill_name)?;
+    Ok(cocli_api::GovernanceSkillTarget {
+        scope_root: workspace,
+        search_root,
+        entry_path,
+    })
+}
+
+pub(crate) fn governance_scope_capabilities(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    runtime: &str,
+    scope: &str,
+    resolved_scope_root: Option<&Path>,
+) -> Result<Vec<GovernanceScopeCapability>, RuntimeError> {
+    let (scope_root, paths) = match scope {
+        "machine" => {
+            let home = std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+                RuntimeError::Unsupported("HOME is unavailable for machine Skill roots".to_owned())
+            })?;
+            let workspace_probe = config.workspace_root.clone();
+            let paths = skill_paths(registry, runtime, &workspace_probe)
+                .into_iter()
+                .filter(|path| !path.starts_with(&workspace_probe))
+                .collect::<Vec<_>>();
+            (home, paths)
+        }
+        "workspace" => {
+            let root = resolved_scope_root.ok_or_else(|| {
+                RuntimeError::Unsupported(
+                    "Workspace scope requires a resolved durable binding".to_owned(),
+                )
+            })?;
+            if !root.is_absolute() {
+                return Err(RuntimeError::Unsupported(
+                    "Workspace binding is not an absolute path".to_owned(),
+                ));
+            }
+            let paths = skill_paths(registry, runtime, root)
+                .into_iter()
+                .filter(|path| path.starts_with(root))
+                .collect::<Vec<_>>();
+            (root.to_path_buf(), paths)
+        }
+        _ => {
+            return Err(RuntimeError::Unsupported(format!(
+                "unsupported governed Skill scope: {scope}"
+            )))
+        }
+    };
+    Ok(governance_scope_capabilities_for_paths(
+        runtime,
+        scope,
+        &scope_root,
+        &paths,
+    ))
+}
+
+pub(crate) fn governance_target_in_scope(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    runtime: &str,
+    scope: &str,
+    resolved_scope_root: Option<&Path>,
+    skill_name: &str,
+) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+    validate_skill_name(skill_name)?;
+    if compatibility(registry, runtime) == RuntimeSkillCompatibility::Unsupported {
+        return Err(RuntimeError::Unsupported(format!(
+            "{runtime} does not support skills"
+        )));
+    }
+    let mut capabilities =
+        governance_scope_capabilities(registry, config, runtime, scope, resolved_scope_root)?;
+    capabilities.sort_by_key(|capability| capability.root_kind == "shared");
+    let capability = capabilities
+        .into_iter()
+        .find(|capability| capability.supported)
+        .ok_or_else(|| {
+            RuntimeError::Unsupported(format!(
+                "{runtime} exposes no automatically writable {scope} Skill root"
+            ))
+        })?;
+    let search_root = PathBuf::from(capability.path);
+    let scope_root = match scope {
+        "machine" => std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| {
+            RuntimeError::Unsupported("HOME is unavailable for machine Skill roots".to_owned())
+        })?,
+        "workspace" => resolved_scope_root
+            .ok_or_else(|| {
+                RuntimeError::Unsupported(
+                    "Workspace scope requires a resolved durable binding".to_owned(),
+                )
+            })?
+            .to_path_buf(),
+        _ => unreachable!("scope was checked by governance_scope_capabilities"),
+    };
+    let entry_path = safe_child_path(&search_root, skill_name)?;
+    Ok(cocli_api::GovernanceSkillTarget {
+        scope_root,
+        search_root,
+        entry_path,
+    })
+}
+
+fn governance_scope_capabilities_for_paths(
+    runtime: &str,
+    scope: &str,
+    scope_root: &Path,
+    paths: &[PathBuf],
+) -> Vec<GovernanceScopeCapability> {
+    let canonical_scope = fs::canonicalize(scope_root).ok();
+    let mut seen = HashSet::new();
+    let mut capabilities = Vec::new();
+    for path in paths {
+        let canonical = fs::canonicalize(path).ok();
+        let lexical_key = normalized_path_alias_key(&lexical_normalize(path));
+        let canonical_key = canonical
+            .as_ref()
+            .map(|resolved| normalized_path_alias_key(resolved));
+        if seen.contains(&lexical_key)
+            || canonical_key.as_ref().is_some_and(|key| seen.contains(key))
+        {
+            continue;
+        }
+        seen.insert(lexical_key);
+        if let Some(key) = canonical_key {
+            seen.insert(key);
+        }
+        let exists = fs::symlink_metadata(path).is_ok();
+        let exact_symlink =
+            fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_symlink());
+        let reserved = path
+            .components()
+            .next_back()
+            .is_some_and(|component| component.as_os_str() == OsStr::new(".system"));
+        let legacy_commands = path
+            .components()
+            .next_back()
+            .is_some_and(|component| component.as_os_str() == OsStr::new("commands"));
+        let within_scope = canonical.as_ref().map_or_else(
+            || path.starts_with(scope_root),
+            |resolved| {
+                canonical_scope
+                    .as_ref()
+                    .is_some_and(|root| resolved.starts_with(root))
+            },
+        );
+        let component_symlink = !exact_symlink && contains_symlink_component(scope_root, path);
+        let writable = nearest_existing_directory(path)
+            .as_deref()
+            .is_some_and(directory_is_writable);
+        let same_device = nearest_existing_directory(path)
+            .as_deref()
+            .is_some_and(|existing| directories_share_device(scope_root, existing));
+        let (status, supported, blocked_reason) = if reserved {
+            (
+                "reserved",
+                false,
+                Some("runtime_managed_system_root".to_owned()),
+            )
+        } else if legacy_commands {
+            ("blocked", false, Some("legacy_commands_root".to_owned()))
+        } else if exact_symlink {
+            (
+                "blocked",
+                false,
+                Some("whole_root_symlink_takeover".to_owned()),
+            )
+        } else if component_symlink {
+            ("blocked", false, Some("symlink_escape".to_owned()))
+        } else if !within_scope {
+            ("blocked", false, Some("root_outside_scope".to_owned()))
+        } else if !writable {
+            ("read_only", false, Some("root_not_writable".to_owned()))
+        } else if !same_device {
+            (
+                "blocked",
+                false,
+                Some("cross_filesystem_atomic_rename".to_owned()),
+            )
+        } else if exists {
+            ("supported", true, None)
+        } else {
+            ("missing", true, None)
+        };
+        capabilities.push(GovernanceScopeCapability {
+            runtime: runtime.to_owned(),
+            scope: scope.to_owned(),
+            root_kind: if is_shared_skill_root(path) {
+                "shared"
+            } else {
+                "runtime_specific"
+            }
+            .to_owned(),
+            path: path.to_string_lossy().into_owned(),
+            status: status.to_owned(),
+            exists,
+            writable,
+            atomic_rename: supported,
+            supported,
+            evidence: "runtime_driver_search_path".to_owned(),
+            blocked_reason,
+        });
+    }
+    capabilities
+}
+
+fn normalized_path_alias_key(path: &Path) -> String {
+    path.to_string_lossy()
+        .nfc()
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+fn is_shared_skill_root(path: &Path) -> bool {
+    path.ends_with(Path::new(".agents/skills"))
+}
+
+fn nearest_existing_directory(path: &Path) -> Option<PathBuf> {
+    let mut current = path;
+    loop {
+        if current.is_dir() {
+            return Some(current.to_path_buf());
+        }
+        current = current.parent()?;
+    }
+}
+
+fn contains_symlink_component(scope_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(scope_root) else {
+        return false;
+    };
+    let mut current = scope_root.to_path_buf();
+    if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return true;
+    }
+    for component in relative.components() {
+        let Component::Normal(component) = component else {
+            continue;
+        };
+        current.push(component);
+        if fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(unix)]
+fn directory_is_writable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && metadata.permissions().mode() & 0o222 != 0)
+}
+
+#[cfg(unix)]
+fn directories_share_device(left: &Path, right: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    let left = nearest_existing_directory(left)
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.dev());
+    let right = nearest_existing_directory(right)
+        .and_then(|path| fs::metadata(path).ok())
+        .map(|metadata| metadata.dev());
+    left.is_some() && left == right
+}
+
+#[cfg(not(unix))]
+fn directory_is_writable(path: &Path) -> bool {
+    fs::metadata(path).is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+}
+
+#[cfg(not(unix))]
+fn directories_share_device(_left: &Path, _right: &Path) -> bool {
+    true
 }
 
 pub(crate) async fn uninstall(
@@ -271,6 +663,8 @@ fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
         "cursor" => vec![
             workspace.join(".cursor/skills"),
             workspace.join(".agents/skills"),
+            workspace.join(".claude/skills"),
+            workspace.join(".codex/skills"),
         ],
         "gemini" => vec![workspace.join(".gemini/skills")],
         "grok" => vec![workspace.join(".grok/skills")],
@@ -289,6 +683,8 @@ fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
             "cursor" => {
                 paths.push(home.join(".cursor/skills"));
                 paths.push(home.join(".agents/skills"));
+                paths.push(home.join(".claude/skills"));
+                paths.push(home.join(".codex/skills"));
             }
             "gemini" => paths.push(home.join(".gemini/skills")),
             "grok" => {
@@ -570,6 +966,7 @@ fn scan_skill_paths(
                 ));
             }
             issues.extend(finding_issues.iter().cloned());
+            let fingerprint = skill_fingerprint(Some(&resolved_candidate), runtime, &name);
             skills.push(RuntimeSkillFinding {
                 skill: RuntimeSkill {
                     display_name: metadata.name.unwrap_or_else(|| name.clone()),
@@ -581,6 +978,7 @@ fn scan_skill_paths(
                     install_path,
                 },
                 runtime: runtime.to_owned(),
+                fingerprint,
                 scope: scope.to_owned(),
                 source_path: source_short,
                 resolved_path: Some(resolved_short),
@@ -595,6 +993,7 @@ fn scan_skill_paths(
         }
     }
     Ok(RuntimeSkillInspection {
+        observed_at: Utc::now(),
         runtime: runtime.to_owned(),
         compatibility,
         evidence,
@@ -691,6 +1090,10 @@ fn native_skill_finding(
     home: Option<&Path>,
 ) -> RuntimeSkillFinding {
     let scope = normalize_native_scope(&native.scope);
+    let fingerprint_path = native
+        .path
+        .as_deref()
+        .map(|path| path.parent().unwrap_or(path).to_path_buf());
     let (path, source_path, resolved_path, install_path) = match native.path {
         Some(metadata_path) => {
             let source_path = metadata_path.parent().unwrap_or(&metadata_path);
@@ -706,6 +1109,7 @@ fn native_skill_finding(
             (source.clone(), source, None, None)
         }
     };
+    let fingerprint = skill_fingerprint(fingerprint_path.as_deref(), runtime, &native.name);
     RuntimeSkillFinding {
         skill: RuntimeSkill {
             display_name: native.name.clone(),
@@ -717,6 +1121,7 @@ fn native_skill_finding(
             install_path,
         },
         runtime: runtime.to_owned(),
+        fingerprint,
         scope: scope.to_owned(),
         source_path,
         resolved_path,
@@ -756,12 +1161,88 @@ fn skill_issue(
     path: Option<String>,
     skill_name: Option<String>,
 ) -> RuntimeSkillIssue {
+    let root_code = match code {
+        "shadowed_skill" | "not_runtime_discovered" => "skill_visibility",
+        other => other,
+    };
+    let basis = skill_name
+        .as_deref()
+        .map(|name| format!("{root_code}|skill|{}", name.to_ascii_lowercase()))
+        .or_else(|| {
+            path.as_deref()
+                .map(|path| format!("{root_code}|path|{path}"))
+        })
+        .unwrap_or_else(|| root_code.to_owned());
     RuntimeSkillIssue {
+        fingerprint: stable_fingerprint(&basis),
         code: code.to_owned(),
         severity: severity.to_owned(),
         message,
+        related_paths: path.clone().into_iter().collect(),
+        related_codes: vec![code.to_owned()],
         path,
         skill_name,
+    }
+}
+
+fn skill_fingerprint(path: Option<&Path>, runtime: &str, name: &str) -> String {
+    let basis = path.map_or_else(
+        || format!("runtime|{runtime}|{}", name.to_ascii_lowercase()),
+        |path| format!("path|{}", comparable_path(path).to_string_lossy()),
+    );
+    stable_fingerprint(&basis)
+}
+
+fn stable_fingerprint(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn group_issues(issues: Vec<RuntimeSkillIssue>) -> Vec<RuntimeSkillIssue> {
+    let mut grouped: Vec<RuntimeSkillIssue> = Vec::new();
+    let mut indexes = HashMap::new();
+    for issue in issues {
+        if let Some(index) = indexes.get(&issue.fingerprint).copied() {
+            let existing: &mut RuntimeSkillIssue = &mut grouped[index];
+            if issue.severity == "error" {
+                "error".clone_into(&mut existing.severity);
+            }
+            for path in issue.related_paths {
+                if !existing.related_paths.contains(&path) {
+                    existing.related_paths.push(path);
+                }
+            }
+            for code in issue.related_codes {
+                if !existing.related_codes.contains(&code) {
+                    existing.related_codes.push(code);
+                }
+            }
+            continue;
+        }
+        indexes.insert(issue.fingerprint.clone(), grouped.len());
+        grouped.push(issue);
+    }
+    grouped
+}
+
+fn namespace_issue_fingerprints(inspection: &mut RuntimeSkillInspection) {
+    for issue in &mut inspection.issues {
+        issue.fingerprint = stable_fingerprint(&format!(
+            "runtime|{}|{}",
+            inspection.runtime, issue.fingerprint
+        ));
+    }
+    for finding in &mut inspection.skills {
+        for issue in &mut finding.issues {
+            issue.fingerprint = stable_fingerprint(&format!(
+                "runtime|{}|{}",
+                inspection.runtime, issue.fingerprint
+            ));
+        }
     }
 }
 
@@ -1279,6 +1760,154 @@ mod tests {
         assert_eq!(builtin.resolved_path, None);
     }
 
+    #[tokio::test]
+    async fn failed_native_probe_keeps_filesystem_inventory() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("codex");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+        let skill = workspace.join(".codex/skills/fallback");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: Fallback\ndescription: Filesystem fallback.\n---\n",
+        )
+        .expect("skill manifest");
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(cocli_driver_codex::CodexDriver::new(
+            temp.path().join("missing-codex"),
+            temp.path().join("missing-bridge"),
+        )));
+
+        let report = inspect(&Arc::new(registry), &config, &agent)
+            .await
+            .expect("filesystem fallback should succeed");
+
+        assert!(report
+            .skills
+            .iter()
+            .any(|finding| finding.skill.name == "fallback"));
+        assert_eq!(report.evidence.source, "filesystem");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_failed"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cursor_unsupported_native_contract_keeps_filesystem_inventory_and_manual_diagnostic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("cursor");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+        let skill = workspace.join(".cursor/skills/fallback");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: Cursor fallback\ndescription: Filesystem evidence.\n---\n",
+        )
+        .expect("skill manifest");
+        let cursor = temp.path().join("cursor-agent");
+        fs::write(
+            &cursor,
+            "#!/bin/sh\nprintf '%s\\n' 'Usage: cursor-agent [options]' 'Start the Cursor Agent'\n",
+        )
+        .expect("fake cursor");
+        fs::set_permissions(&cursor, fs::Permissions::from_mode(0o755))
+            .expect("cursor permissions");
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(cocli_driver_cursor::CursorDriver::new(
+            cursor,
+            temp.path().join("missing-bridge"),
+        )));
+
+        let report = inspect(&Arc::new(registry), &config, &agent)
+            .await
+            .expect("filesystem fallback should succeed");
+
+        assert!(report
+            .skills
+            .iter()
+            .any(|finding| finding.skill.name == "fallback"));
+        assert_eq!(report.evidence.source, "filesystem");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_unsupported"));
+    }
+
+    #[tokio::test]
+    async fn missing_cursor_cli_keeps_filesystem_inventory() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("cursor");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+        let skill = workspace.join(".cursor/skills/fallback");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: Cursor fallback\ndescription: Filesystem evidence.\n---\n",
+        )
+        .expect("skill manifest");
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(cocli_driver_cursor::CursorDriver::new(
+            temp.path().join("missing-cursor"),
+            temp.path().join("missing-bridge"),
+        )));
+
+        let report = inspect(&Arc::new(registry), &config, &agent)
+            .await
+            .expect("filesystem fallback should succeed");
+
+        assert!(report
+            .skills
+            .iter()
+            .any(|finding| finding.skill.name == "fallback"));
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_failed"));
+    }
+
+    #[tokio::test]
+    async fn machine_inventory_reports_user_roots_without_creating_an_agent_workspace() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let registry = Arc::new(RuntimeRegistry::new());
+
+        let report = inspect_machine(&registry, &config, "cursor")
+            .await
+            .expect("machine inspection");
+
+        assert!(report.search_paths.iter().all(|path| path.scope == "user"));
+        assert!(report
+            .search_paths
+            .iter()
+            .any(|path| path.path.ends_with(".cursor/skills")));
+        assert!(!config.workspace_root.exists());
+    }
+
+    #[tokio::test]
+    async fn agent_inventory_does_not_create_a_missing_runtime_workspace() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("cursor");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+
+        let report = inspect(&Arc::new(RuntimeRegistry::new()), &config, &agent)
+            .await
+            .expect("read-only agent inspection");
+
+        assert!(report
+            .skills
+            .iter()
+            .all(|finding| finding.scope != "workspace"));
+        assert!(!workspace.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn scan_follows_skill_symlinks_and_reports_shadowing_invalid_and_broken_entries() {
@@ -1348,5 +1977,215 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.code == "broken_symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_to_one_skill_target_share_a_fingerprint() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let primary = workspace.join(".codex/skills");
+        let shared = workspace.join(".agents/skills");
+        let target = temp.path().join("targets/reviewer");
+        fs::create_dir_all(&primary).expect("primary path");
+        fs::create_dir_all(&shared).expect("shared path");
+        fs::create_dir_all(&target).expect("target");
+        fs::write(
+            target.join("SKILL.md"),
+            "---\nname: Reviewer\ndescription: Reviews.\n---\n",
+        )
+        .expect("manifest");
+        symlink(&target, primary.join("reviewer")).expect("first alias");
+        symlink(&target, shared.join("reviewer-alias")).expect("second alias");
+
+        let report = scan_skill_paths(
+            "codex",
+            RuntimeSkillCompatibility::Supported,
+            SkillDiscoveryEvidence::FILESYSTEM,
+            &workspace,
+            &[primary, shared],
+        )
+        .expect("scan");
+
+        assert_eq!(report.skills.len(), 2);
+        assert_eq!(report.skills[0].fingerprint, report.skills[1].fingerprint);
+        assert!(report.skills[1].duplicate);
+        assert!(report.skills[1]
+            .issues
+            .iter()
+            .any(|issue| issue.code == "duplicate_target"));
+    }
+
+    #[test]
+    fn visibility_issues_for_one_skill_are_grouped_without_losing_paths() {
+        let grouped = group_issues(vec![
+            skill_issue(
+                "shadowed_skill",
+                "warning",
+                "shadowed".to_owned(),
+                Some("~/.agents/skills/quickbox-qb".to_owned()),
+                Some("quickbox-qb".to_owned()),
+            ),
+            skill_issue(
+                "not_runtime_discovered",
+                "warning",
+                "not discovered".to_owned(),
+                Some("~/.codex/skills/quickbox-qb".to_owned()),
+                Some("quickbox-qb".to_owned()),
+            ),
+        ]);
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].related_paths.len(), 2);
+        assert_eq!(grouped[0].related_codes.len(), 2);
+    }
+
+    #[test]
+    fn governance_scope_capabilities_classify_runtime_shared_and_reserved_roots() {
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let paths = vec![
+            workspace.join(".codex/skills"),
+            workspace.join(".agents/skills"),
+            workspace.join(".codex/skills/.system"),
+        ];
+
+        let capabilities =
+            governance_scope_capabilities_for_paths("codex", "workspace", &workspace, &paths);
+
+        assert_eq!(capabilities.len(), 3);
+        assert_eq!(capabilities[0].root_kind, "runtime_specific");
+        assert!(capabilities[0].supported);
+        assert_eq!(capabilities[1].root_kind, "shared");
+        assert!(capabilities[1].supported);
+        assert_eq!(capabilities[2].status, "reserved");
+        assert!(!capabilities[2].supported);
+        assert_eq!(
+            capabilities[2].blocked_reason.as_deref(),
+            Some("runtime_managed_system_root")
+        );
+        assert!(!workspace.exists(), "capability inspection is read-only");
+    }
+
+    #[test]
+    fn governance_scope_capabilities_reject_unsupported_scope() {
+        let temp = tempdir().expect("temp directory");
+        let registry = Arc::new(RuntimeRegistry::new());
+        let config = test_config(temp.path());
+        let error = governance_scope_capabilities(
+            &registry,
+            &config,
+            "codex",
+            "channel",
+            Some(temp.path()),
+        )
+        .expect_err("unsupported scope should fail");
+
+        assert!(
+            matches!(error, RuntimeError::Unsupported(message) if message.contains("unsupported governed Skill scope"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governance_scope_capabilities_report_read_only_roots_without_creating_targets() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let root = workspace.join(".fake/skills");
+        fs::create_dir_all(&root).expect("skill root");
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o555))
+            .expect("read-only root permissions");
+
+        let capabilities =
+            governance_scope_capabilities_for_paths("fake", "workspace", &workspace, &[root]);
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].status, "read_only");
+        assert!(!capabilities[0].supported);
+        assert_eq!(
+            capabilities[0].blocked_reason.as_deref(),
+            Some("root_not_writable")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governance_scope_capabilities_deduplicate_aliases_and_block_root_takeover() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside/skills");
+        fs::create_dir_all(&outside).expect("outside root");
+        fs::create_dir_all(&workspace).expect("workspace root");
+        symlink(&outside, workspace.join("linked-skills")).expect("root alias");
+        let paths = vec![
+            workspace.join("linked-skills"),
+            workspace.join("linked-skills/../linked-skills"),
+        ];
+
+        let capabilities =
+            governance_scope_capabilities_for_paths("fake", "workspace", &workspace, &paths);
+
+        assert_eq!(capabilities.len(), 1, "canonical aliases are deduplicated");
+        assert_eq!(capabilities[0].status, "blocked");
+        assert!(!capabilities[0].supported);
+        assert_eq!(
+            capabilities[0].blocked_reason.as_deref(),
+            Some("whole_root_symlink_takeover")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn governance_scope_capabilities_block_component_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&workspace).expect("workspace root");
+        fs::create_dir_all(&outside).expect("outside root");
+        symlink(&outside, workspace.join("linked")).expect("component symlink");
+
+        let capabilities = governance_scope_capabilities_for_paths(
+            "fake",
+            "workspace",
+            &workspace,
+            &[workspace.join("linked/skills")],
+        );
+
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].status, "blocked");
+        assert!(!capabilities[0].supported);
+        assert_eq!(
+            capabilities[0].blocked_reason.as_deref(),
+            Some("symlink_escape")
+        );
+    }
+
+    #[test]
+    fn governance_scope_capabilities_deduplicate_unicode_and_case_aliases() {
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let composed = workspace.join("Caf\u{e9}/Skills");
+        let decomposed = workspace.join("Cafe\u{301}/skills");
+
+        let capabilities = governance_scope_capabilities_for_paths(
+            "fake",
+            "workspace",
+            &workspace,
+            &[composed, decomposed],
+        );
+
+        assert_eq!(
+            capabilities.len(),
+            1,
+            "Unicode/case aliases are deduplicated"
+        );
     }
 }
