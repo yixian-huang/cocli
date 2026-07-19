@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use axum::extract::{Path, State};
@@ -10,17 +10,26 @@ use cocli_store::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::OwnedMutexGuard;
+use tokio::sync::{OwnedMutexGuard, Semaphore};
+use tokio::task::JoinSet;
 use uuid::Uuid;
 
 use super::skill_import::{
     canonical_skill_name, derive_source_name, fetch_skill, FetchedSkill, SkillImportError,
 };
-use super::{require_agent, ApiError, AppState, RuntimeSkill, RuntimeSkillCompatibility};
+use super::{
+    require_agent, ApiError, AppState, RuntimeSkillCompatibility, RuntimeSkillEvidence,
+    RuntimeSkillFinding, RuntimeSkillInspection, RuntimeSkillIssue, RuntimeSkillSearchPath,
+};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
         .route("/api/runtimes/compatibility", get(runtime_compatibility))
+        .route(
+            "/api/runtimes/skills/inventory",
+            get(machine_skill_inventory),
+        )
+        .route("/api/runtimes/skills/doctor", get(machine_skill_doctor))
         .route(
             "/api/zones/:zone_id/skills/library",
             get(list_library).post(import_library),
@@ -40,6 +49,14 @@ pub(super) fn router() -> Router<AppState> {
         .route(
             "/api/agents/:agent_id/skills",
             get(list_agent_skills).post(install_agent_skill),
+        )
+        .route(
+            "/api/agents/:agent_id/skills/inventory",
+            get(agent_skill_inventory),
+        )
+        .route(
+            "/api/agents/:agent_id/skills/doctor",
+            get(agent_skill_doctor),
         )
         .route(
             "/api/agents/:agent_id/skills/:install_id",
@@ -525,7 +542,7 @@ async fn runtime_compatibility(
     )
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SkillView {
     name: String,
@@ -538,7 +555,21 @@ struct SkillView {
     path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     install_path: Option<String>,
-    state: &'static str,
+    presence: String,
+    state: String,
+    runtime: String,
+    scope: String,
+    source_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_path: Option<String>,
+    evidence: RuntimeSkillEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    valid: Option<bool>,
+    duplicate: bool,
+    shadowed: bool,
+    issues: Vec<RuntimeSkillIssue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     install_id: Option<Uuid>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -554,13 +585,163 @@ struct AgentSkillsResponse {
     skills: Vec<SkillView>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentSkillInventoryResponse {
+    agent_id: Uuid,
+    agent_name: String,
+    runtime: String,
+    compatibility: RuntimeSkillCompatibility,
+    evidence: RuntimeSkillEvidence,
+    search_paths: Vec<RuntimeSkillSearchPath>,
+    skills: Vec<SkillView>,
+    issues: Vec<RuntimeSkillIssue>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeSkillInventorySummary {
+    runtime: String,
+    compatibility: RuntimeSkillCompatibility,
+    agent_count: usize,
+    skill_count: usize,
+    issue_count: usize,
+    evidence_sources: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MachineSkillInventoryResponse {
+    runtimes: Vec<RuntimeSkillInventorySummary>,
+    agents: Vec<AgentSkillInventoryResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillDoctorSummary {
+    status: &'static str,
+    runtime_count: usize,
+    agent_count: usize,
+    skill_count: usize,
+    issue_count: usize,
+    error_count: usize,
+    warning_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentSkillDoctorResponse {
+    summary: SkillDoctorSummary,
+    inventory: AgentSkillInventoryResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct MachineSkillDoctorResponse {
+    summary: SkillDoctorSummary,
+    runtimes: Vec<RuntimeSkillInventorySummary>,
+    agents: Vec<AgentSkillInventoryResponse>,
+}
+
 async fn list_agent_skills(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Json<AgentSkillsResponse>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
-    let scanned = state.runtime.list_skills(&agent).await?;
-    let installs = state.store.list_agent_skill_installs(agent_id).await?;
+    let inventory = build_agent_skill_inventory(&state, agent).await?;
+    Ok(Json(AgentSkillsResponse {
+        skills: inventory.skills,
+    }))
+}
+
+async fn agent_skill_inventory(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<AgentSkillInventoryResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    Ok(Json(build_agent_skill_inventory(&state, agent).await?))
+}
+
+async fn agent_skill_doctor(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<AgentSkillDoctorResponse>, ApiError> {
+    let agent = require_agent(&state.store, agent_id).await?;
+    let inventory = build_agent_skill_inventory(&state, agent).await?;
+    let summary = doctor_summary(std::slice::from_ref(&inventory));
+    Ok(Json(AgentSkillDoctorResponse { summary, inventory }))
+}
+
+async fn machine_skill_inventory(
+    State(state): State<AppState>,
+) -> Result<Json<MachineSkillInventoryResponse>, ApiError> {
+    let agents = build_machine_skill_inventory(&state).await?;
+    let runtimes = runtime_inventory_summaries(&state, &agents).await;
+    Ok(Json(MachineSkillInventoryResponse { runtimes, agents }))
+}
+
+async fn machine_skill_doctor(
+    State(state): State<AppState>,
+) -> Result<Json<MachineSkillDoctorResponse>, ApiError> {
+    let agents = build_machine_skill_inventory(&state).await?;
+    let runtimes = runtime_inventory_summaries(&state, &agents).await;
+    let summary = doctor_summary(&agents);
+    Ok(Json(MachineSkillDoctorResponse {
+        summary,
+        runtimes,
+        agents,
+    }))
+}
+
+async fn build_machine_skill_inventory(
+    state: &AppState,
+) -> Result<Vec<AgentSkillInventoryResponse>, ApiError> {
+    const MAX_CONCURRENT_INSPECTIONS: usize = 4;
+
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_INSPECTIONS));
+    let mut tasks = JoinSet::new();
+    for (index, agent) in state.store.list_agents().await?.into_iter().enumerate() {
+        let state = state.clone();
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.map_err(|error| {
+                ApiError::json(
+                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                    json!({"error": format!("skill inspection semaphore closed: {error}")}),
+                )
+            })?;
+            build_agent_skill_inventory(&state, agent)
+                .await
+                .map(|inventory| (index, inventory))
+        });
+    }
+    let mut inventories = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        let inventory = result.map_err(|error| {
+            ApiError::json(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                json!({"error": format!("skill inspection task failed: {error}")}),
+            )
+        })??;
+        inventories.push(inventory);
+    }
+    inventories.sort_by_key(|(index, _)| *index);
+    Ok(inventories
+        .into_iter()
+        .map(|(_, inventory)| inventory)
+        .collect())
+}
+
+async fn build_agent_skill_inventory(
+    state: &AppState,
+    agent: Agent,
+) -> Result<AgentSkillInventoryResponse, ApiError> {
+    let RuntimeSkillInspection {
+        runtime,
+        compatibility,
+        evidence,
+        search_paths,
+        skills: scanned,
+        mut issues,
+    } = state.runtime.inspect_skills(&agent).await?;
+    let installs = state.store.list_agent_skill_installs(agent.id).await?;
     let mut by_path: HashMap<String, AgentSkillInstall> = installs
         .into_iter()
         .map(|install| (install.install_path.clone(), install))
@@ -568,6 +749,7 @@ async fn list_agent_skills(
     let mut skills = Vec::with_capacity(scanned.len() + by_path.len());
     for scanned_skill in scanned {
         let managed = scanned_skill
+            .skill
             .install_path
             .as_ref()
             .filter(|path| !path.is_empty())
@@ -575,27 +757,65 @@ async fn list_agent_skills(
         skills.push(scanned_skill_view(scanned_skill, managed));
     }
     for install in by_path.into_values() {
-        skills.push(broken_skill_view(install));
+        let issue = RuntimeSkillIssue {
+            code: "missing_managed_install".to_owned(),
+            severity: "error".to_owned(),
+            message: "SQLite install record has no discovered filesystem skill".to_owned(),
+            path: Some(install.install_path.clone()),
+            skill_name: Some(install.library_name.clone()),
+        };
+        issues.push(issue.clone());
+        skills.push(broken_skill_view(
+            &runtime,
+            evidence.clone(),
+            install,
+            issue,
+        ));
     }
     skills.sort_by(|left, right| left.name.cmp(&right.name));
-    Ok(Json(AgentSkillsResponse { skills }))
+    Ok(AgentSkillInventoryResponse {
+        agent_id: agent.id,
+        agent_name: agent.name,
+        runtime,
+        compatibility,
+        evidence,
+        search_paths,
+        skills,
+        issues,
+    })
 }
 
-fn scanned_skill_view(skill: RuntimeSkill, install: Option<AgentSkillInstall>) -> SkillView {
+fn scanned_skill_view(skill: RuntimeSkillFinding, install: Option<AgentSkillInstall>) -> SkillView {
     let state = if install.is_some() {
         "managed"
     } else {
         "external"
     };
+    let presence = if install.is_some() && skill.evidence.source == "filesystem" {
+        "installed".to_owned()
+    } else {
+        skill.presence
+    };
     SkillView {
-        name: skill.name,
-        display_name: skill.display_name,
-        description: skill.description,
-        user_invocable: skill.user_invocable,
-        skill_type: skill.skill_type,
-        path: Some(skill.path),
-        install_path: skill.install_path,
-        state,
+        name: skill.skill.name,
+        display_name: skill.skill.display_name,
+        description: skill.skill.description,
+        user_invocable: skill.skill.user_invocable,
+        skill_type: skill.skill.skill_type,
+        path: Some(skill.skill.path),
+        install_path: skill.skill.install_path,
+        presence,
+        state: state.to_owned(),
+        runtime: skill.runtime,
+        scope: skill.scope,
+        source_path: skill.source_path,
+        resolved_path: skill.resolved_path,
+        evidence: skill.evidence,
+        enabled: skill.enabled,
+        valid: skill.valid,
+        duplicate: skill.duplicate,
+        shadowed: skill.shadowed,
+        issues: skill.issues,
         install_id: install.as_ref().map(|value| value.id),
         library_id: install.as_ref().map(|value| value.library_id),
         source_url: install.as_ref().map(|value| value.source_url.clone()),
@@ -603,7 +823,12 @@ fn scanned_skill_view(skill: RuntimeSkill, install: Option<AgentSkillInstall>) -
     }
 }
 
-fn broken_skill_view(install: AgentSkillInstall) -> SkillView {
+fn broken_skill_view(
+    runtime: &str,
+    evidence: RuntimeSkillEvidence,
+    install: AgentSkillInstall,
+    issue: RuntimeSkillIssue,
+) -> SkillView {
     SkillView {
         name: install.library_name,
         display_name: String::new(),
@@ -611,12 +836,128 @@ fn broken_skill_view(install: AgentSkillInstall) -> SkillView {
         user_invocable: false,
         skill_type: "workspace".to_owned(),
         path: None,
-        install_path: Some(install.install_path),
-        state: "broken",
+        install_path: Some(install.install_path.clone()),
+        presence: "installed".to_owned(),
+        state: "broken".to_owned(),
+        runtime: runtime.to_owned(),
+        scope: "workspace".to_owned(),
+        source_path: install.install_path.clone(),
+        resolved_path: None,
+        evidence,
+        enabled: None,
+        valid: None,
+        duplicate: false,
+        shadowed: false,
+        issues: vec![issue],
         install_id: Some(install.id),
         library_id: Some(install.library_id),
         source_url: Some(install.source_url),
         source_ref: install.source_ref,
+    }
+}
+
+async fn runtime_inventory_summaries(
+    state: &AppState,
+    inventories: &[AgentSkillInventoryResponse],
+) -> Vec<RuntimeSkillInventorySummary> {
+    let mut names = vec![
+        "chatrs".to_owned(),
+        "claude".to_owned(),
+        "codex".to_owned(),
+        "cursor".to_owned(),
+        "gemini".to_owned(),
+        "grok".to_owned(),
+        "kimi".to_owned(),
+        "opencode".to_owned(),
+    ];
+    names.extend(
+        state
+            .runtime
+            .list()
+            .await
+            .into_iter()
+            .map(|runtime| runtime.name),
+    );
+    names.extend(
+        inventories
+            .iter()
+            .map(|inventory| inventory.runtime.clone()),
+    );
+    names.sort();
+    names.dedup();
+    names
+        .into_iter()
+        .map(|runtime| {
+            let matching: Vec<&AgentSkillInventoryResponse> = inventories
+                .iter()
+                .filter(|inventory| inventory.runtime == runtime)
+                .collect();
+            let mut evidence_sources: Vec<String> = matching
+                .iter()
+                .map(|inventory| inventory.evidence.source.clone())
+                .collect();
+            evidence_sources.sort();
+            evidence_sources.dedup();
+            let unique_skills: HashSet<&str> = matching
+                .iter()
+                .flat_map(|inventory| &inventory.skills)
+                .map(|skill| skill.source_path.as_str())
+                .collect();
+            let unique_issues: HashSet<(&str, Option<&str>)> = matching
+                .iter()
+                .flat_map(|inventory| &inventory.issues)
+                .map(|issue| (issue.code.as_str(), issue.path.as_deref()))
+                .collect();
+            RuntimeSkillInventorySummary {
+                compatibility: state.runtime.skill_compatibility(&runtime),
+                runtime,
+                agent_count: matching.len(),
+                skill_count: unique_skills.len(),
+                issue_count: unique_issues.len(),
+                evidence_sources,
+            }
+        })
+        .collect()
+}
+
+fn doctor_summary(inventories: &[AgentSkillInventoryResponse]) -> SkillDoctorSummary {
+    let mut runtimes: Vec<&str> = inventories
+        .iter()
+        .map(|inventory| inventory.runtime.as_str())
+        .collect();
+    runtimes.sort_unstable();
+    runtimes.dedup();
+    let issue_count = inventories
+        .iter()
+        .map(|inventory| inventory.issues.len())
+        .sum();
+    let error_count = inventories
+        .iter()
+        .flat_map(|inventory| &inventory.issues)
+        .filter(|issue| issue.severity == "error")
+        .count();
+    let warning_count = inventories
+        .iter()
+        .flat_map(|inventory| &inventory.issues)
+        .filter(|issue| issue.severity == "warning")
+        .count();
+    SkillDoctorSummary {
+        status: if error_count > 0 {
+            "error"
+        } else if warning_count > 0 {
+            "warning"
+        } else {
+            "ok"
+        },
+        runtime_count: runtimes.len(),
+        agent_count: inventories.len(),
+        skill_count: inventories
+            .iter()
+            .map(|inventory| inventory.skills.len())
+            .sum(),
+        issue_count,
+        error_count,
+        warning_count,
     }
 }
 
@@ -864,5 +1205,59 @@ fn import_gateway_error(error: SkillImportError) -> ApiError {
             axum::http::StatusCode::BAD_GATEWAY,
             json!({ "error": message }),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chrono::Utc;
+
+    use super::*;
+    use crate::RuntimeSkill;
+
+    #[test]
+    fn managed_skill_preserves_native_discovery_presence() {
+        let finding = RuntimeSkillFinding {
+            skill: RuntimeSkill {
+                name: "reviewer".to_owned(),
+                display_name: "Reviewer".to_owned(),
+                description: String::new(),
+                user_invocable: false,
+                skill_type: "workspace".to_owned(),
+                path: "/tmp/reviewer/SKILL.md".to_owned(),
+                install_path: Some(".agents/skills/reviewer".to_owned()),
+            },
+            runtime: "codex".to_owned(),
+            scope: "workspace".to_owned(),
+            source_path: "/tmp/reviewer".to_owned(),
+            resolved_path: Some("/tmp/reviewer".to_owned()),
+            presence: "discovered".to_owned(),
+            evidence: RuntimeSkillEvidence {
+                source: "codex_app_server".to_owned(),
+                detail: "skills/list(forceReload)".to_owned(),
+                proves_session_visibility: false,
+            },
+            enabled: Some(true),
+            valid: Some(true),
+            duplicate: false,
+            shadowed: false,
+            issues: Vec::new(),
+        };
+        let install = AgentSkillInstall {
+            id: Uuid::new_v4(),
+            agent_id: Uuid::new_v4(),
+            library_id: Uuid::new_v4(),
+            install_path: ".agents/skills/reviewer".to_owned(),
+            installed_at: Utc::now(),
+            library_name: "reviewer".to_owned(),
+            source_url: "/tmp/reviewer".to_owned(),
+            source_ref: None,
+        };
+
+        let view = scanned_skill_view(finding, Some(install));
+
+        assert_eq!(view.state, "managed");
+        assert_eq!(view.presence, "discovered");
+        assert_eq!(view.evidence.source, "codex_app_server");
     }
 }

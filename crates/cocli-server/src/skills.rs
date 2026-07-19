@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
@@ -6,10 +6,13 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use cocli_api::{
-    RuntimeError, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent,
-    RuntimeSkillFileEntry,
+    RuntimeError, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence,
+    RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection,
+    RuntimeSkillIssue, RuntimeSkillSearchPath,
 };
-use cocli_driver_core::types::SkillCompatibility;
+use cocli_driver_core::types::{
+    NativeSkill, NativeSkillProbe, SkillCompatibility, SkillDiscoveryEvidence,
+};
 use cocli_runtime_pool::RuntimeRegistry;
 use cocli_store::{Agent, SkillLibraryFile};
 use uuid::Uuid;
@@ -35,15 +38,53 @@ pub(crate) async fn list(
     config: &LocalRuntimeConfig,
     agent: &Agent,
 ) -> Result<Vec<RuntimeSkill>, RuntimeError> {
+    Ok(inspect(registry, config, agent)
+        .await?
+        .skills
+        .into_iter()
+        .map(|finding| finding.skill)
+        .collect())
+}
+
+pub(crate) async fn inspect(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+) -> Result<RuntimeSkillInspection, RuntimeError> {
     let workspace = config.workspace_root.join(agent.id.to_string());
     tokio::fs::create_dir_all(&workspace)
         .await
         .map_err(|error| skill_io_error("create agent workspace", &error))?;
     let paths = skill_paths(registry, &agent.runtime, &workspace);
-    tokio::task::spawn_blocking(move || scan_skill_paths(&workspace, &paths))
-        .await
-        .map_err(|error| RuntimeError::Delivery(format!("skill scan task failed: {error}")))?
-        .map_err(|error| skill_io_error("scan runtime skills", &error))
+    let compatibility = compatibility(registry, &agent.runtime);
+    let driver = registry.get(&agent.runtime);
+    let evidence = driver
+        .as_ref()
+        .map(|driver| driver.skill_discovery_evidence())
+        .unwrap_or(SkillDiscoveryEvidence::FILESYSTEM);
+    let runtime = agent.runtime.clone();
+    let scan_workspace = workspace.clone();
+    let mut inspection = tokio::task::spawn_blocking(move || {
+        scan_skill_paths(&runtime, compatibility, evidence, &scan_workspace, &paths)
+    })
+    .await
+    .map_err(|error| RuntimeError::Delivery(format!("skill scan task failed: {error}")))?
+    .map_err(|error| skill_io_error("scan runtime skills", &error))?;
+
+    if let Some(driver) = driver {
+        match driver.probe_skills(&workspace).await {
+            Ok(Some(probe)) => merge_native_probe(&mut inspection, probe, &workspace),
+            Ok(None) => {}
+            Err(error) => inspection.issues.push(skill_issue(
+                "native_probe_failed",
+                "warning",
+                format!("native runtime skill probe failed; using filesystem evidence: {error}"),
+                None,
+                None,
+            )),
+        }
+    }
+    Ok(inspection)
 }
 
 pub(crate) async fn install(
@@ -227,7 +268,10 @@ fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
             workspace.join(".codex/skills"),
             workspace.join(".agents/skills"),
         ],
-        "cursor" => vec![workspace.join(".cursor/rules")],
+        "cursor" => vec![
+            workspace.join(".cursor/skills"),
+            workspace.join(".agents/skills"),
+        ],
         "gemini" => vec![workspace.join(".gemini/skills")],
         "grok" => vec![workspace.join(".grok/skills")],
         "kimi" => vec![workspace.join(".kimi-code/skills")],
@@ -242,6 +286,10 @@ fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
                 paths.push(home.join(".codex/skills/.system"));
                 paths.push(home.join(".agents/skills"));
             }
+            "cursor" => {
+                paths.push(home.join(".cursor/skills"));
+                paths.push(home.join(".agents/skills"));
+            }
             "gemini" => paths.push(home.join(".gemini/skills")),
             "grok" => {
                 paths.push(home.join(".grok/skills"));
@@ -254,28 +302,214 @@ fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
     paths
 }
 
-fn scan_skill_paths(workspace: &Path, paths: &[PathBuf]) -> io::Result<Vec<RuntimeSkill>> {
+fn scan_skill_paths(
+    runtime: &str,
+    compatibility: RuntimeSkillCompatibility,
+    driver_evidence: SkillDiscoveryEvidence,
+    workspace: &Path,
+    paths: &[PathBuf],
+) -> io::Result<RuntimeSkillInspection> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
-    let mut seen = HashSet::new();
+    let evidence = RuntimeSkillEvidence {
+        source: driver_evidence.source.to_owned(),
+        detail: driver_evidence.detail.to_owned(),
+        proves_session_visibility: driver_evidence.proves_session_visibility,
+    };
+    let mut seen_roots = HashSet::new();
+    let mut seen_targets: HashMap<PathBuf, String> = HashMap::new();
+    let mut seen_names: HashMap<String, String> = HashMap::new();
+    let mut search_paths = Vec::with_capacity(paths.len());
     let mut skills = Vec::new();
+    let mut issues = Vec::new();
+
     for root in paths {
-        let skill_type = if root.starts_with(workspace) {
+        let scope = if root.starts_with(workspace) {
             "workspace"
         } else {
-            "global"
+            "user"
         };
-        let Ok(entries) = fs::read_dir(root) else {
-            continue;
-        };
-        for entry in entries {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            if file_type.is_symlink() {
+        let short_root = shorten_path(root, home.as_deref());
+        let symlink_metadata = match fs::symlink_metadata(root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                search_paths.push(RuntimeSkillSearchPath {
+                    path: short_root,
+                    scope: scope.to_owned(),
+                    exists: false,
+                    readable: false,
+                    symlink: false,
+                    resolved_path: None,
+                    issue: None,
+                });
                 continue;
             }
+            Err(error) => {
+                let issue = skill_issue(
+                    "path_unreadable",
+                    "error",
+                    format!("cannot inspect runtime skill search path: {error}"),
+                    Some(short_root.clone()),
+                    None,
+                );
+                search_paths.push(RuntimeSkillSearchPath {
+                    path: short_root,
+                    scope: scope.to_owned(),
+                    exists: false,
+                    readable: false,
+                    symlink: false,
+                    resolved_path: None,
+                    issue: Some(issue.message.clone()),
+                });
+                issues.push(issue);
+                continue;
+            }
+        };
+        let is_symlink = symlink_metadata.file_type().is_symlink();
+        let resolved_root = match fs::canonicalize(root) {
+            Ok(path) => path,
+            Err(error) => {
+                let code = if is_symlink {
+                    "broken_symlink"
+                } else {
+                    "path_unreadable"
+                };
+                let issue = skill_issue(
+                    code,
+                    "error",
+                    format!("cannot resolve runtime skill search path: {error}"),
+                    Some(short_root.clone()),
+                    None,
+                );
+                search_paths.push(RuntimeSkillSearchPath {
+                    path: short_root,
+                    scope: scope.to_owned(),
+                    exists: true,
+                    readable: false,
+                    symlink: is_symlink,
+                    resolved_path: None,
+                    issue: Some(issue.message.clone()),
+                });
+                issues.push(issue);
+                continue;
+            }
+        };
+        let resolved_short = shorten_path(&resolved_root, home.as_deref());
+        if !seen_roots.insert(resolved_root) {
+            let issue = skill_issue(
+                "duplicate_search_path",
+                "warning",
+                "search path resolves to a target already scanned".to_owned(),
+                Some(short_root.clone()),
+                None,
+            );
+            search_paths.push(RuntimeSkillSearchPath {
+                path: short_root,
+                scope: scope.to_owned(),
+                exists: true,
+                readable: true,
+                symlink: is_symlink,
+                resolved_path: Some(resolved_short),
+                issue: Some(issue.message.clone()),
+            });
+            issues.push(issue);
+            continue;
+        }
+        let entries = match fs::read_dir(root) {
+            Ok(entries) => entries,
+            Err(error) => {
+                let issue = skill_issue(
+                    "path_unreadable",
+                    "error",
+                    format!("cannot read runtime skill search path: {error}"),
+                    Some(short_root.clone()),
+                    None,
+                );
+                search_paths.push(RuntimeSkillSearchPath {
+                    path: short_root,
+                    scope: scope.to_owned(),
+                    exists: true,
+                    readable: false,
+                    symlink: is_symlink,
+                    resolved_path: Some(resolved_short),
+                    issue: Some(issue.message.clone()),
+                });
+                issues.push(issue);
+                continue;
+            }
+        };
+        search_paths.push(RuntimeSkillSearchPath {
+            path: short_root,
+            scope: scope.to_owned(),
+            exists: true,
+            readable: true,
+            symlink: is_symlink,
+            resolved_path: Some(resolved_short),
+            issue: None,
+        });
+
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    issues.push(skill_issue(
+                        "path_unreadable",
+                        "error",
+                        format!("cannot read entry in runtime skill search path: {error}"),
+                        Some(shorten_path(root, home.as_deref())),
+                        None,
+                    ));
+                    continue;
+                }
+            };
             let path = entry.path();
-            let (name, metadata_path, install_path) = if file_type.is_dir() {
-                let skill_md = path.join("SKILL.md");
+            let source_short = shorten_path(&path, home.as_deref());
+            let link_metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    issues.push(skill_issue(
+                        "path_unreadable",
+                        "error",
+                        format!("cannot inspect skill candidate: {error}"),
+                        Some(source_short),
+                        None,
+                    ));
+                    continue;
+                }
+            };
+            let candidate_is_symlink = link_metadata.file_type().is_symlink();
+            let resolved_candidate = match fs::canonicalize(&path) {
+                Ok(path) => path,
+                Err(error) => {
+                    let code = if candidate_is_symlink {
+                        "broken_symlink"
+                    } else {
+                        "path_unreadable"
+                    };
+                    issues.push(skill_issue(
+                        code,
+                        "error",
+                        format!("cannot resolve skill candidate: {error}"),
+                        Some(source_short),
+                        Some(entry.file_name().to_string_lossy().into_owned()),
+                    ));
+                    continue;
+                }
+            };
+            let metadata = match fs::metadata(&resolved_candidate) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    issues.push(skill_issue(
+                        "path_unreadable",
+                        "error",
+                        format!("cannot inspect resolved skill candidate: {error}"),
+                        Some(source_short),
+                        None,
+                    ));
+                    continue;
+                }
+            };
+            let (name, metadata_path, install_path, validates_frontmatter) = if metadata.is_dir() {
+                let skill_md = resolved_candidate.join("SKILL.md");
                 if !skill_md.is_file() {
                     continue;
                 }
@@ -283,9 +517,10 @@ fn scan_skill_paths(workspace: &Path, paths: &[PathBuf]) -> io::Result<Vec<Runti
                     entry.file_name().to_string_lossy().into_owned(),
                     skill_md,
                     relative_to_workspace_optional(workspace, &path),
+                    true,
                 )
             } else {
-                if path.extension() != Some(OsStr::new("md")) {
+                if resolved_candidate.extension() != Some(OsStr::new("md")) {
                     continue;
                 }
                 (
@@ -293,26 +528,241 @@ fn scan_skill_paths(workspace: &Path, paths: &[PathBuf]) -> io::Result<Vec<Runti
                         .unwrap_or_default()
                         .to_string_lossy()
                         .into_owned(),
-                    path.clone(),
+                    resolved_candidate.clone(),
                     relative_to_workspace_optional(workspace, &path),
+                    false,
                 )
             };
-            if !seen.insert(name.clone()) {
-                continue;
+            let resolved_short = shorten_path(&resolved_candidate, home.as_deref());
+            let mut finding_issues = Vec::new();
+            let duplicate_target = seen_targets
+                .insert(resolved_candidate.clone(), source_short.clone())
+                .is_some();
+            if duplicate_target {
+                finding_issues.push(skill_issue(
+                    "duplicate_target",
+                    "warning",
+                    "skill path resolves to a target already discovered".to_owned(),
+                    Some(source_short.clone()),
+                    Some(name.clone()),
+                ));
             }
-            let metadata = parse_skill_frontmatter(&metadata_path);
-            skills.push(RuntimeSkill {
-                display_name: metadata.name.unwrap_or_else(|| name.clone()),
-                name,
-                description: metadata.description.unwrap_or_default(),
-                user_invocable: metadata.user_invocable,
-                skill_type: skill_type.to_owned(),
-                path: shorten_path(&metadata_path, home.as_deref()),
-                install_path,
+            let shadowed = seen_names
+                .insert(name.clone(), source_short.clone())
+                .is_some();
+            if shadowed {
+                finding_issues.push(skill_issue(
+                    "shadowed_skill",
+                    "warning",
+                    "a higher-priority search path already provides this skill name".to_owned(),
+                    Some(source_short.clone()),
+                    Some(name.clone()),
+                ));
+            }
+            let metadata = parse_skill_frontmatter(&metadata_path, validates_frontmatter);
+            if let Some(message) = metadata.invalid_reason.clone() {
+                finding_issues.push(skill_issue(
+                    "invalid_frontmatter",
+                    "error",
+                    message,
+                    Some(shorten_path(&metadata_path, home.as_deref())),
+                    Some(name.clone()),
+                ));
+            }
+            issues.extend(finding_issues.iter().cloned());
+            skills.push(RuntimeSkillFinding {
+                skill: RuntimeSkill {
+                    display_name: metadata.name.unwrap_or_else(|| name.clone()),
+                    name,
+                    description: metadata.description.unwrap_or_default(),
+                    user_invocable: metadata.user_invocable,
+                    skill_type: scope.to_owned(),
+                    path: shorten_path(&metadata_path, home.as_deref()),
+                    install_path,
+                },
+                runtime: runtime.to_owned(),
+                scope: scope.to_owned(),
+                source_path: source_short,
+                resolved_path: Some(resolved_short),
+                presence: "discovered".to_owned(),
+                evidence: evidence.clone(),
+                enabled: None,
+                valid: metadata.valid,
+                duplicate: duplicate_target || shadowed,
+                shadowed,
+                issues: finding_issues,
             });
         }
     }
-    Ok(skills)
+    Ok(RuntimeSkillInspection {
+        runtime: runtime.to_owned(),
+        compatibility,
+        evidence,
+        search_paths,
+        skills,
+        issues,
+    })
+}
+
+fn merge_native_probe(
+    inspection: &mut RuntimeSkillInspection,
+    probe: NativeSkillProbe,
+    workspace: &Path,
+) {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let evidence = RuntimeSkillEvidence {
+        source: probe.evidence.source.to_owned(),
+        detail: probe.evidence.detail.to_owned(),
+        proves_session_visibility: probe.evidence.proves_session_visibility,
+    };
+    inspection.evidence = evidence.clone();
+
+    let native_skills: Vec<(Option<PathBuf>, NativeSkill)> = probe
+        .skills
+        .into_iter()
+        .map(|skill| {
+            let path = skill.path.as_deref().map(comparable_path);
+            (path, skill)
+        })
+        .collect();
+    let mut matched = HashSet::new();
+    for finding in &mut inspection.skills {
+        let reported_path = expand_short_path(&finding.skill.path, home.as_deref());
+        let comparable = comparable_path(&reported_path);
+        if let Some((index, (_, native))) =
+            native_skills.iter().enumerate().find(|(index, (path, _))| {
+                !matched.contains(index) && path.as_ref() == Some(&comparable)
+            })
+        {
+            matched.insert(index);
+            "discovered".clone_into(&mut finding.presence);
+            finding.evidence = evidence.clone();
+            finding.enabled = native.enabled;
+            if let Some(user_invocable) = native.user_invocable {
+                finding.skill.user_invocable = user_invocable;
+            }
+            if finding.skill.description.is_empty() {
+                finding.skill.description.clone_from(&native.description);
+            }
+        } else {
+            "installed".clone_into(&mut finding.presence);
+            let issue = skill_issue(
+                "not_runtime_discovered",
+                "warning",
+                "filesystem candidate was not returned by the native runtime probe".to_owned(),
+                Some(finding.source_path.clone()),
+                Some(finding.skill.name.clone()),
+            );
+            finding.issues.push(issue.clone());
+            inspection.issues.push(issue);
+        }
+    }
+
+    for (index, (_, native)) in native_skills.into_iter().enumerate() {
+        if matched.contains(&index) {
+            continue;
+        }
+        inspection.skills.push(native_skill_finding(
+            &inspection.runtime,
+            native,
+            &evidence,
+            workspace,
+            home.as_deref(),
+        ));
+    }
+    inspection
+        .issues
+        .extend(probe.issues.into_iter().map(|issue| {
+            skill_issue(
+                "native_probe_error",
+                "error",
+                issue.message,
+                issue.path.map(|path| shorten_path(&path, home.as_deref())),
+                None,
+            )
+        }));
+}
+
+fn native_skill_finding(
+    runtime: &str,
+    native: NativeSkill,
+    evidence: &RuntimeSkillEvidence,
+    workspace: &Path,
+    home: Option<&Path>,
+) -> RuntimeSkillFinding {
+    let scope = normalize_native_scope(&native.scope);
+    let (path, source_path, resolved_path, install_path) = match native.path {
+        Some(metadata_path) => {
+            let source_path = metadata_path.parent().unwrap_or(&metadata_path);
+            (
+                shorten_path(&metadata_path, home),
+                shorten_path(source_path, home),
+                Some(shorten_path(&comparable_path(source_path), home)),
+                relative_to_workspace_optional(workspace, source_path),
+            )
+        }
+        None => {
+            let source = format!("runtime:{}", native.source);
+            (source.clone(), source, None, None)
+        }
+    };
+    RuntimeSkillFinding {
+        skill: RuntimeSkill {
+            display_name: native.name.clone(),
+            name: native.name,
+            description: native.description,
+            user_invocable: native.user_invocable.unwrap_or(false),
+            skill_type: scope.to_owned(),
+            path,
+            install_path,
+        },
+        runtime: runtime.to_owned(),
+        scope: scope.to_owned(),
+        source_path,
+        resolved_path,
+        presence: "discovered".to_owned(),
+        evidence: evidence.clone(),
+        enabled: native.enabled,
+        valid: None,
+        duplicate: false,
+        shadowed: false,
+        issues: Vec::new(),
+    }
+}
+
+fn normalize_native_scope(scope: &str) -> &str {
+    match scope {
+        "repo" | "workspace" => "workspace",
+        "system" | "admin" | "global" => "global",
+        _ => "user",
+    }
+}
+
+fn comparable_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn expand_short_path(path: &str, home: Option<&Path>) -> PathBuf {
+    match (path.strip_prefix("~/"), home) {
+        (Some(relative), Some(home)) => home.join(relative),
+        _ => PathBuf::from(path),
+    }
+}
+
+fn skill_issue(
+    code: &str,
+    severity: &str,
+    message: String,
+    path: Option<String>,
+    skill_name: Option<String>,
+) -> RuntimeSkillIssue {
+    RuntimeSkillIssue {
+        code: code.to_owned(),
+        severity: severity.to_owned(),
+        message,
+        path,
+        skill_name,
+    }
 }
 
 #[derive(Default)]
@@ -320,23 +770,42 @@ struct SkillFrontmatter {
     name: Option<String>,
     description: Option<String>,
     user_invocable: bool,
+    valid: Option<bool>,
+    invalid_reason: Option<String>,
 }
 
-fn parse_skill_frontmatter(path: &Path) -> SkillFrontmatter {
+fn parse_skill_frontmatter(path: &Path, validate: bool) -> SkillFrontmatter {
     let Ok(content) = fs::read_to_string(path) else {
-        return SkillFrontmatter::default();
+        return SkillFrontmatter {
+            valid: validate.then_some(false),
+            invalid_reason: validate.then(|| "SKILL.md is not readable UTF-8".to_owned()),
+            ..SkillFrontmatter::default()
+        };
     };
     let mut lines = content.lines();
     if lines.next().map(str::trim) != Some("---") {
-        return SkillFrontmatter::default();
+        return SkillFrontmatter {
+            valid: validate.then_some(false),
+            invalid_reason: validate.then(|| "SKILL.md has no YAML frontmatter".to_owned()),
+            ..SkillFrontmatter::default()
+        };
     }
-    let mut metadata = SkillFrontmatter::default();
+    let mut metadata = SkillFrontmatter {
+        valid: validate.then_some(true),
+        ..SkillFrontmatter::default()
+    };
+    let mut closed = false;
     for line in lines {
         let line = line.trim();
         if line == "---" {
+            closed = true;
             break;
         }
         let Some((key, value)) = line.split_once(':') else {
+            if validate && !line.is_empty() && !line.starts_with('#') {
+                metadata.valid = Some(false);
+                metadata.invalid_reason = Some("frontmatter contains a malformed field".to_owned());
+            }
             continue;
         };
         let value = value.trim().trim_matches('"').trim_matches('\'').to_owned();
@@ -344,10 +813,27 @@ fn parse_skill_frontmatter(path: &Path) -> SkillFrontmatter {
             "name" | "display-name" | "display_name" => metadata.name = Some(value),
             "description" => metadata.description = Some(value),
             "user-invocable" | "user_invocable" => {
-                metadata.user_invocable = value.eq_ignore_ascii_case("true");
+                if value.eq_ignore_ascii_case("true") {
+                    metadata.user_invocable = true;
+                } else if !value.eq_ignore_ascii_case("false") && validate {
+                    metadata.valid = Some(false);
+                    metadata.invalid_reason =
+                        Some("user-invocable must be true or false".to_owned());
+                }
             }
             _ => {}
         }
+    }
+    if validate && !closed {
+        metadata.valid = Some(false);
+        metadata.invalid_reason = Some("frontmatter has no closing delimiter".to_owned());
+    } else if validate
+        && (matches!(metadata.name.as_deref(), None | Some(""))
+            || matches!(metadata.description.as_deref(), None | Some("")))
+    {
+        metadata.valid = Some(false);
+        metadata.invalid_reason =
+            Some("frontmatter requires non-empty name and description".to_owned());
     }
     metadata
 }
@@ -607,9 +1093,12 @@ mod tests {
         let scanned = list(&registry, &config, &agent)
             .await
             .expect("skills should scan");
-        assert_eq!(scanned.len(), 1);
-        assert_eq!(scanned[0].display_name, "Wiki Compiler");
-        assert!(scanned[0].user_invocable);
+        let installed = scanned
+            .iter()
+            .find(|skill| skill.name == "wikic")
+            .expect("installed skill should scan");
+        assert_eq!(installed.display_name, "Wiki Compiler");
+        assert!(installed.user_invocable);
         let entries = list_files(&registry, &config, &agent, &install_path)
             .await
             .expect("skill files should list");
@@ -638,10 +1127,11 @@ mod tests {
         uninstall(&registry, &config, &agent, &install_path)
             .await
             .expect("skill should uninstall");
-        assert!(list(&registry, &config, &agent)
+        assert!(!list(&registry, &config, &agent)
             .await
             .expect("skills should rescan")
-            .is_empty());
+            .iter()
+            .any(|skill| skill.install_path.as_deref() == Some(".claude/skills/wikic")));
     }
 
     #[tokio::test]
@@ -685,5 +1175,178 @@ mod tests {
             compatibility(&registry, "chatrs"),
             RuntimeSkillCompatibility::Unsupported
         );
+    }
+
+    #[test]
+    fn native_probe_distinguishes_runtime_discovery_from_filesystem_installation() {
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let root = workspace.join(".codex/skills");
+        let discovered = root.join("discovered");
+        let installed_only = root.join("installed-only");
+        let native_only = temp.path().join("native-only");
+        for path in [&discovered, &installed_only, &native_only] {
+            fs::create_dir_all(path).expect("skill directory");
+            fs::write(
+                path.join("SKILL.md"),
+                "---\nname: Test\ndescription: Test skill.\n---\n",
+            )
+            .expect("skill manifest");
+        }
+
+        let mut report = scan_skill_paths(
+            "codex",
+            RuntimeSkillCompatibility::Supported,
+            SkillDiscoveryEvidence::FILESYSTEM,
+            &workspace,
+            &[root],
+        )
+        .expect("filesystem scan");
+        merge_native_probe(
+            &mut report,
+            NativeSkillProbe {
+                evidence: SkillDiscoveryEvidence {
+                    source: "codex_app_server",
+                    detail: "skills/list(forceReload)",
+                    proves_session_visibility: false,
+                },
+                skills: vec![
+                    NativeSkill {
+                        name: "discovered".to_owned(),
+                        description: "Native discovered".to_owned(),
+                        path: Some(discovered.join("SKILL.md")),
+                        source: "codex_app_server".to_owned(),
+                        scope: "repo".to_owned(),
+                        enabled: Some(false),
+                        user_invocable: None,
+                    },
+                    NativeSkill {
+                        name: "native-only".to_owned(),
+                        description: "Native only".to_owned(),
+                        path: Some(native_only.join("SKILL.md")),
+                        source: "codex_app_server".to_owned(),
+                        scope: "system".to_owned(),
+                        enabled: Some(true),
+                        user_invocable: None,
+                    },
+                    NativeSkill {
+                        name: "builtin".to_owned(),
+                        description: "Runtime builtin".to_owned(),
+                        path: None,
+                        source: "builtin".to_owned(),
+                        scope: "system".to_owned(),
+                        enabled: Some(true),
+                        user_invocable: Some(false),
+                    },
+                ],
+                issues: Vec::new(),
+            },
+            &workspace,
+        );
+
+        assert_eq!(report.evidence.source, "codex_app_server");
+        assert!(!report.evidence.proves_session_visibility);
+        let discovered = report
+            .skills
+            .iter()
+            .find(|skill| skill.skill.name == "discovered")
+            .expect("native-discovered skill");
+        assert_eq!(discovered.presence, "discovered");
+        assert_eq!(discovered.enabled, Some(false));
+        let installed_only = report
+            .skills
+            .iter()
+            .find(|skill| skill.skill.name == "installed-only")
+            .expect("filesystem-only skill");
+        assert_eq!(installed_only.presence, "installed");
+        assert!(installed_only
+            .issues
+            .iter()
+            .any(|issue| issue.code == "not_runtime_discovered"));
+        let native_only = report
+            .skills
+            .iter()
+            .find(|skill| skill.skill.name == "native-only")
+            .expect("native-only skill");
+        assert_eq!(native_only.scope, "global");
+        assert_eq!(native_only.evidence.source, "codex_app_server");
+        let builtin = report
+            .skills
+            .iter()
+            .find(|skill| skill.skill.name == "builtin")
+            .expect("pathless runtime builtin");
+        assert_eq!(builtin.source_path, "runtime:builtin");
+        assert_eq!(builtin.resolved_path, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scan_follows_skill_symlinks_and_reports_shadowing_invalid_and_broken_entries() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let primary = workspace.join(".cursor/skills");
+        let shared = workspace.join(".agents/skills");
+        let target = temp.path().join("targets/reviewer");
+        fs::create_dir_all(&primary).expect("primary search path");
+        fs::create_dir_all(&shared).expect("shared search path");
+        fs::create_dir_all(&target).expect("symlink target");
+        fs::write(
+            target.join("SKILL.md"),
+            "---\nname: Reviewer\ndescription: Reviews changes.\n---\n",
+        )
+        .expect("valid skill");
+        symlink(&target, primary.join("reviewer")).expect("skill directory symlink");
+
+        let shadowed = shared.join("reviewer");
+        fs::create_dir_all(&shadowed).expect("shadowed skill");
+        fs::write(
+            shadowed.join("SKILL.md"),
+            "---\nname: Other reviewer\ndescription: Lower priority.\n---\n",
+        )
+        .expect("shadowed manifest");
+        let invalid = shared.join("invalid");
+        fs::create_dir_all(&invalid).expect("invalid skill");
+        fs::write(invalid.join("SKILL.md"), "---\nname: Invalid\n---\n").expect("invalid manifest");
+        symlink(temp.path().join("missing"), shared.join("broken")).expect("broken skill symlink");
+
+        let report = scan_skill_paths(
+            "cursor",
+            RuntimeSkillCompatibility::Uncertain,
+            SkillDiscoveryEvidence::FILESYSTEM,
+            &workspace,
+            &[primary, shared],
+        )
+        .expect("skill scan");
+
+        assert_eq!(report.skills.len(), 3);
+        let linked = report
+            .skills
+            .iter()
+            .find(|finding| finding.skill.name == "reviewer" && !finding.shadowed)
+            .expect("linked skill");
+        assert_eq!(linked.valid, Some(true));
+        assert!(linked
+            .resolved_path
+            .as_deref()
+            .is_some_and(|path| { path.ends_with("targets/reviewer") }));
+        assert!(!linked.evidence.proves_session_visibility);
+        assert!(report
+            .skills
+            .iter()
+            .any(|finding| finding.skill.name == "reviewer" && finding.shadowed));
+        assert!(report.skills.iter().any(|finding| {
+            finding.skill.name == "invalid"
+                && finding.valid == Some(false)
+                && finding
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "invalid_frontmatter")
+        }));
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "broken_symlink"));
     }
 }

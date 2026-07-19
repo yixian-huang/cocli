@@ -26,6 +26,29 @@ cross-platform release evidence.
 | A5 — Recovery and portability | Restore/import, schema compatibility checks, migration safety, and documented cross-machine rebinding | in progress |
 | A6 — Installable public alpha | Signed/checksummed binaries, installer, release workflow, green cross-platform CI, accurate onboarding and support matrix | planned |
 
+### Supporting capability track — Skill governance
+
+- **Phase 1 — inventory and doctor (complete):** reuse the Skill Library,
+  `agent_skill_installs`, Runtime drivers, local API, and desktop Skills
+  workspace to show filesystem-discovered candidates, ordered search paths,
+  Runtime compatibility, managed/external/broken state, scope and provenance,
+  invalid frontmatter, broken symlinks, duplicate targets, and shadowing.
+  Filesystem evidence is explicitly not treated as proof of Session visibility
+  or activation, and no user-global Skill directory is mutated by discovery.
+- **Phase 2A — native discovery evidence (complete):** the driver contract now
+  supports read-only native Skill probes. Codex app-server `skills/list` and
+  `grok inspect --json` are merged with filesystem inventory, including native
+  source evidence, Runtime-reported disabled state, filesystem fallback, and
+  probe-failure diagnostics. Native discovery still does not claim active
+  Session visibility or activation.
+- **Phase 2B — remaining probes and governed changes (planned):** add a stable
+  Cursor native probe, explicit plan/apply/verify operations, and lockfile plus
+  drift governance.
+
+This track remains subordinate to cocli's persistent Agent and Channel model;
+it is Runtime governance for multi-Agent desktop work, not a standalone Skill
+package-manager direction.
+
 ## Beta milestones
 
 | Milestone | Outcome |

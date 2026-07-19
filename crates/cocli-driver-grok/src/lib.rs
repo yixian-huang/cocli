@@ -9,6 +9,7 @@ pub mod conv;
 pub mod driver;
 pub mod errors;
 pub mod events;
+mod skill_probe;
 pub mod spawn;
 pub mod stdin;
 pub mod usage;

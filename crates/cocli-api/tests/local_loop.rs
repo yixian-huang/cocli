@@ -851,6 +851,64 @@ async fn skills_routes_complete_the_local_import_install_and_refresh_loop() {
     assert_eq!(skills_status, StatusCode::OK);
     assert_eq!(skills["skills"][0]["state"], "managed");
     assert_eq!(skills["skills"][0]["libraryId"], library_id);
+    assert_eq!(skills["skills"][0]["presence"], "installed");
+    assert_eq!(skills["skills"][0]["runtime"], "fake");
+    assert_eq!(skills["skills"][0]["evidence"]["source"], "filesystem");
+    assert_eq!(
+        skills["skills"][0]["evidence"]["provesSessionVisibility"],
+        false
+    );
+
+    let (inventory_status, inventory) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/skills/inventory"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(inventory_status, StatusCode::OK);
+    assert_eq!(inventory["agentId"], agent_id);
+    assert_eq!(inventory["runtime"], "fake");
+    assert_eq!(inventory["compatibility"], "supported");
+    assert_eq!(inventory["skills"][0]["state"], "managed");
+
+    let (machine_inventory_status, machine_inventory) = json_request(
+        app.clone(),
+        "GET",
+        "/api/runtimes/skills/inventory",
+        json!({}),
+    )
+    .await;
+    assert_eq!(machine_inventory_status, StatusCode::OK);
+    assert_eq!(machine_inventory["agents"][0]["agentId"], agent_id);
+
+    let (agent_doctor_status, agent_doctor) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/agents/{agent_id}/skills/doctor"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(agent_doctor_status, StatusCode::OK);
+    assert_eq!(agent_doctor["summary"]["status"], "ok");
+    assert_eq!(
+        agent_doctor["inventory"]["skills"][0]["presence"],
+        "installed"
+    );
+
+    let (doctor_status, doctor) =
+        json_request(app.clone(), "GET", "/api/runtimes/skills/doctor", json!({})).await;
+    assert_eq!(doctor_status, StatusCode::OK);
+    assert_eq!(doctor["summary"]["status"], "ok");
+    assert_eq!(doctor["summary"]["agentCount"], 1);
+    assert_eq!(doctor["summary"]["skillCount"], 1);
+    assert!(doctor["runtimes"]
+        .as_array()
+        .is_some_and(|runtimes| runtimes.iter().any(|runtime| {
+            runtime["runtime"] == "fake"
+                && runtime["agentCount"] == 1
+                && runtime["evidenceSources"][0] == "filesystem"
+        })));
 
     let (files_status, files) = json_request(
         app.clone(),

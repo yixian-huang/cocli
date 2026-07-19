@@ -23,5 +23,6 @@ pub use subtraits::{
 };
 pub use types::{
     normalize_turn_status, BusyDeliveryMode, DriverAgentConfig, EnvPropagation, ExitCodeClass,
-    GcStats, MessageMode, PlatformActionTransport, SkillCompatibility, SpawnConfig, TurnStatus,
+    GcStats, MessageMode, NativeSkill, NativeSkillIssue, NativeSkillProbe, PlatformActionTransport,
+    SkillCompatibility, SkillDiscoveryEvidence, SpawnConfig, TurnStatus,
 };

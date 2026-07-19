@@ -39,6 +39,7 @@ use cocli_driver_core::{Driver, DriverError, DriverEvent};
 use tokio::io::AsyncWriteExt;
 
 use crate::events::parse_line;
+use crate::skill_probe;
 use crate::spawn::{spawn_codex, SpawnContext};
 use crate::stdin::{
     encode_initialize, encode_thread_fork, encode_thread_resume, encode_thread_start,
@@ -170,6 +171,15 @@ impl Driver for CodexDriver {
 
     fn skill_search_paths(&self, workspace: &Path) -> Vec<PathBuf> {
         skill_paths_for(workspace)
+    }
+
+    async fn probe_skills(
+        &self,
+        workspace: &Path,
+    ) -> Result<Option<cocli_driver_core::NativeSkillProbe>, DriverError> {
+        skill_probe::probe_skills(&self.codex_binary, workspace)
+            .await
+            .map(Some)
     }
 
     fn as_process_factory(&self) -> Option<&dyn ProcessFactory> {
@@ -1206,6 +1216,15 @@ impl Driver for CodexProcessDriver {
 
     fn skill_search_paths(&self, workspace: &Path) -> Vec<PathBuf> {
         skill_paths_for(workspace)
+    }
+
+    async fn probe_skills(
+        &self,
+        workspace: &Path,
+    ) -> Result<Option<cocli_driver_core::NativeSkillProbe>, DriverError> {
+        skill_probe::probe_skills(&self.codex_binary, workspace)
+            .await
+            .map(Some)
     }
 
     fn as_process_initializer(&self) -> Option<&dyn ProcessInitializer> {

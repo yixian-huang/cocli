@@ -11,8 +11,8 @@ use crate::subtraits::{
     TurnInterruptor,
 };
 use crate::types::{
-    BusyDeliveryMode, DriverAgentConfig, EnvPropagation, MessageMode, PlatformActionTransport,
-    SkillCompatibility, SpawnConfig,
+    BusyDeliveryMode, DriverAgentConfig, EnvPropagation, MessageMode, NativeSkillProbe,
+    PlatformActionTransport, SkillCompatibility, SkillDiscoveryEvidence, SpawnConfig,
 };
 
 #[async_trait]
@@ -119,6 +119,23 @@ pub trait Driver: Send + Sync {
 
     /// Directories scanned for installed skills, in priority order.
     fn skill_search_paths(&self, workspace: &Path) -> Vec<PathBuf>;
+
+    /// Evidence used by skill inventory and diagnostics.
+    ///
+    /// Drivers can override this when a native runtime probe is available.
+    fn skill_discovery_evidence(&self) -> SkillDiscoveryEvidence {
+        SkillDiscoveryEvidence::FILESYSTEM
+    }
+
+    /// Ask the runtime itself which skills it currently discovers for a
+    /// workspace. `Ok(None)` means the driver has no reliable native probe and
+    /// callers should retain filesystem evidence.
+    async fn probe_skills(
+        &self,
+        _workspace: &Path,
+    ) -> Result<Option<NativeSkillProbe>, DriverError> {
+        Ok(None)
+    }
 
     /// Convert a stderr line into a semantic event when the runtime reports
     /// structured failures outside stdout.

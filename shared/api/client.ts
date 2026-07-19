@@ -11,6 +11,7 @@ import type {
   HistoryQuery,
   HistoryResult,
   Invite,
+  MachineSkillDoctor,
   Machine,
   Message,
   OverflowStatsEntry,
@@ -565,6 +566,17 @@ export const agentSkills = {
   list: (agentId: string) =>
     request<{ skills: SkillView[] }>(`/api/agents/${agentId}/skills`),
 
+  inventory: (agentId: string) =>
+    request<import('@shared/types').AgentSkillInventory>(
+      `/api/agents/${agentId}/skills/inventory`
+    ),
+
+  doctor: (agentId: string) =>
+    request<{
+      summary: import('@shared/types').SkillDoctorSummary
+      inventory: import('@shared/types').AgentSkillInventory
+    }>(`/api/agents/${agentId}/skills/doctor`),
+
   install: (agentId: string, libraryId: string) =>
     request<{ installId: string; installPath: string }>(
       `/api/agents/${agentId}/skills`,
@@ -594,6 +606,13 @@ export const runtimes = {
     request<Record<string, 'supported' | 'uncertain' | 'unsupported' | 'unknown'>>(
       `/api/runtimes/compatibility`
     ),
+  skillInventory: () =>
+    request<{
+      runtimes: import('@shared/types').RuntimeSkillInventorySummary[]
+      agents: import('@shared/types').AgentSkillInventory[]
+    }>(`/api/runtimes/skills/inventory`),
+  skillDoctor: () =>
+    request<MachineSkillDoctor>(`/api/runtimes/skills/doctor`),
 }
 
 // Unified Memory (L1/L2 read API — Tasks 6.1/6.2)

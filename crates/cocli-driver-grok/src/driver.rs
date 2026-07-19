@@ -19,6 +19,7 @@ use crate::errors::{
     classify_grok_error_message, classify_grok_exit_code, classify_grok_stderr_line, GrokErrorClass,
 };
 use crate::events::parse_line;
+use crate::skill_probe;
 use crate::spawn::{spawn_grok, SpawnContext};
 use crate::usage::{grok_home_dir, GrokUsageContext};
 
@@ -155,6 +156,15 @@ macro_rules! impl_grok_driver_caps {
 impl Driver for GrokDriver {
     impl_grok_driver_caps!();
 
+    async fn probe_skills(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<Option<cocli_driver_core::NativeSkillProbe>, DriverError> {
+        skill_probe::probe_skills(&self.grok_binary, workspace)
+            .await
+            .map(Some)
+    }
+
     fn context_window_tokens(&self) -> Option<u32> {
         caps::registry_context_window_tokens()
     }
@@ -185,6 +195,15 @@ impl ProcessFactory for GrokDriver {
 #[async_trait]
 impl Driver for GrokProcessDriver {
     impl_grok_driver_caps!();
+
+    async fn probe_skills(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<Option<cocli_driver_core::NativeSkillProbe>, DriverError> {
+        skill_probe::probe_skills(&self.grok_binary, workspace)
+            .await
+            .map(Some)
+    }
 
     fn context_window_tokens(&self) -> Option<u32> {
         Some(self.context_window_tokens)

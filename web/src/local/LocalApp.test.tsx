@@ -105,6 +105,48 @@ describe('LocalApp', () => {
       if (path === '/api/runtimes/compatibility') {
         return jsonResponse({ fake: 'supported' })
       }
+      if (path === '/api/runtimes/skills/doctor') {
+        const evidence = {
+          source: 'filesystem',
+          detail: 'runtime driver search paths',
+          provesSessionVisibility: false,
+        }
+        return jsonResponse({
+          summary: {
+            status: 'ok',
+            runtimeCount: 1,
+            agentCount: agentCreated ? 1 : 0,
+            skillCount: skillInstalled ? 2 : 0,
+            issueCount: 0,
+            errorCount: 0,
+            warningCount: 0,
+          },
+          runtimes: [{
+            runtime: 'fake',
+            compatibility: 'supported',
+            agentCount: agentCreated ? 1 : 0,
+            skillCount: skillInstalled ? 2 : 0,
+            issueCount: 0,
+            evidenceSources: agentCreated ? ['filesystem'] : [],
+          }],
+          agents: agentCreated ? [{
+            agentId: 'agent-1',
+            agentName: 'builder',
+            runtime: 'fake',
+            compatibility: 'supported',
+            evidence,
+            searchPaths: [{
+              path: '.fake/skills',
+              scope: 'workspace',
+              exists: true,
+              readable: true,
+              symlink: false,
+            }],
+            skills: [],
+            issues: [],
+          }] : [],
+        })
+      }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
       if (path === '/api/agents' && !init?.method) {
         return jsonResponse(agentCreated ? [createdAgent] : [])
@@ -211,6 +253,20 @@ describe('LocalApp', () => {
             path: '.fake/skills/reviewer/SKILL.md',
             installPath: '.fake/skills/reviewer',
             state: 'managed',
+            presence: 'installed',
+            runtime: 'fake',
+            scope: 'workspace',
+            sourcePath: '.fake/skills/reviewer',
+            evidence: {
+              source: 'codex_app_server',
+              detail: 'skills/list(forceReload)',
+              provesSessionVisibility: false,
+            },
+            enabled: false,
+            valid: true,
+            duplicate: false,
+            shadowed: false,
+            issues: [],
             installId: 'install-1',
             libraryId: 'library-1',
             sourceUrl: '/tmp/reviewer',
@@ -223,6 +279,19 @@ describe('LocalApp', () => {
             path: '~/.fake/skills/shell-helper/SKILL.md',
             installPath: '~/.fake/skills/shell-helper',
             state: 'external',
+            presence: 'discovered',
+            runtime: 'fake',
+            scope: 'user',
+            sourcePath: '~/.fake/skills/shell-helper',
+            evidence: {
+              source: 'filesystem',
+              detail: 'runtime driver search paths',
+              provesSessionVisibility: false,
+            },
+            valid: true,
+            duplicate: false,
+            shadowed: false,
+            issues: [],
             installId: null,
             libraryId: null,
             sourceUrl: null,
@@ -615,6 +684,9 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     fireEvent.click(screen.getByRole('button', { name: 'Skills' }))
     expect(await screen.findByRole('heading', { name: 'Skills workspace' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Runtime × Skill inventory' })).toBeInTheDocument()
+    expect(screen.getByText(/Neither proves that a running session loaded or activated/)).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /fake supported/ })).toBeInTheDocument()
     expect(await screen.findByText('Review local changes')).toBeInTheDocument()
 
     const installButtons = await screen.findAllByRole('button', { name: 'Install' })
@@ -622,6 +694,7 @@ describe('LocalApp', () => {
 
     expect(await screen.findByText('managed')).toBeInTheDocument()
     expect(screen.getByText('Shell helper')).toBeInTheDocument()
+    expect(screen.getByText('disabled by runtime')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Filter Agent skills'), {
       target: { value: 'managed' },

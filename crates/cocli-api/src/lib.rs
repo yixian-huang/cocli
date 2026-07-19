@@ -209,6 +209,87 @@ pub struct RuntimeSkill {
     pub install_path: Option<String>,
 }
 
+/// Evidence behind one inventory or doctor result.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSkillEvidence {
+    pub source: String,
+    pub detail: String,
+    pub proves_session_visibility: bool,
+}
+
+impl Default for RuntimeSkillEvidence {
+    fn default() -> Self {
+        Self {
+            source: "filesystem".to_owned(),
+            detail: "runtime-reported skill candidates".to_owned(),
+            proves_session_visibility: false,
+        }
+    }
+}
+
+/// One runtime search root and its filesystem health.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSkillSearchPath {
+    pub path: String,
+    pub scope: String,
+    pub exists: bool,
+    pub readable: bool,
+    pub symlink: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue: Option<String>,
+}
+
+/// Actionable inventory or doctor finding.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSkillIssue {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skill_name: Option<String>,
+}
+
+/// One discovered candidate plus the evidence needed to interpret it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSkillFinding {
+    #[serde(flatten)]
+    pub skill: RuntimeSkill,
+    pub runtime: String,
+    pub scope: String,
+    pub source_path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_path: Option<String>,
+    pub presence: String,
+    pub evidence: RuntimeSkillEvidence,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    pub duplicate: bool,
+    pub shadowed: bool,
+    pub issues: Vec<RuntimeSkillIssue>,
+}
+
+/// Filesystem/native-probe report returned by the runtime boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeSkillInspection {
+    pub runtime: String,
+    pub compatibility: RuntimeSkillCompatibility,
+    pub evidence: RuntimeSkillEvidence,
+    pub search_paths: Vec<RuntimeSkillSearchPath>,
+    pub skills: Vec<RuntimeSkillFinding>,
+    pub issues: Vec<RuntimeSkillIssue>,
+}
+
 /// One file entry exposed by the installed-skill browser.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -672,6 +753,41 @@ pub trait RuntimeService: Send + Sync {
     /// Scans runtime-specific global and workspace skill roots.
     async fn list_skills(&self, _agent: &Agent) -> Result<Vec<RuntimeSkill>, RuntimeError> {
         Ok(Vec::new())
+    }
+
+    /// Inspects skill candidates and explains the evidence behind discovery.
+    /// The default preserves compatibility for runtime implementations that
+    /// have not yet added a native or filesystem doctor.
+    async fn inspect_skills(&self, agent: &Agent) -> Result<RuntimeSkillInspection, RuntimeError> {
+        let evidence = RuntimeSkillEvidence::default();
+        let runtime = agent.runtime.clone();
+        let skills = self
+            .list_skills(agent)
+            .await?
+            .into_iter()
+            .map(|skill| RuntimeSkillFinding {
+                scope: skill.skill_type.clone(),
+                source_path: skill.path.clone(),
+                resolved_path: None,
+                presence: "discovered".to_owned(),
+                runtime: runtime.clone(),
+                evidence: evidence.clone(),
+                enabled: None,
+                valid: None,
+                duplicate: false,
+                shadowed: false,
+                issues: Vec::new(),
+                skill,
+            })
+            .collect();
+        Ok(RuntimeSkillInspection {
+            runtime,
+            compatibility: self.skill_compatibility(&agent.runtime),
+            evidence,
+            search_paths: Vec::new(),
+            skills,
+            issues: Vec::new(),
+        })
     }
 
     /// Atomically installs or refreshes one library skill in the agent workspace.

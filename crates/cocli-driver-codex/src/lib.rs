@@ -10,6 +10,7 @@ pub mod conv;
 pub mod driver;
 pub mod events;
 mod known_silent;
+mod skill_probe;
 pub mod spawn;
 pub mod stdin;
 pub mod types;

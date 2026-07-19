@@ -100,6 +100,14 @@ impl Driver for CursorDriver {
     }
 
     fn skill_search_paths(&self, workspace: &Path) -> Vec<PathBuf> {
-        vec![workspace.join(".cursor").join("rules")]
+        let mut paths = vec![
+            workspace.join(".cursor").join("skills"),
+            workspace.join(".agents").join("skills"),
+        ];
+        if let Some(home) = dirs::home_dir() {
+            paths.push(home.join(".cursor").join("skills"));
+            paths.push(home.join(".agents").join("skills"));
+        }
+        paths
     }
 }

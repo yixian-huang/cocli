@@ -504,10 +504,83 @@ export interface SkillView {
   path?: string
   installPath?: string
   state: 'managed' | 'external' | 'broken'
+  presence?: 'installed' | 'discovered'
+  runtime?: string
+  scope?: 'workspace' | 'user' | 'global'
+  sourcePath?: string
+  resolvedPath?: string
+  evidence?: RuntimeSkillEvidence
+  enabled?: boolean
+  valid?: boolean
+  duplicate?: boolean
+  shadowed?: boolean
+  issues?: RuntimeSkillIssue[]
   installId?: string
   libraryId?: string
   sourceUrl?: string
   sourceRef?: string
+}
+
+export type RuntimeSkillCompatibility = 'supported' | 'uncertain' | 'unsupported' | 'unknown'
+
+export interface RuntimeSkillEvidence {
+  source: string
+  detail: string
+  provesSessionVisibility: boolean
+}
+
+export interface RuntimeSkillIssue {
+  code: string
+  severity: 'warning' | 'error'
+  message: string
+  path?: string
+  skillName?: string
+}
+
+export interface RuntimeSkillSearchPath {
+  path: string
+  scope: string
+  exists: boolean
+  readable: boolean
+  symlink: boolean
+  resolvedPath?: string
+  issue?: string
+}
+
+export interface AgentSkillInventory {
+  agentId: string
+  agentName: string
+  runtime: string
+  compatibility: RuntimeSkillCompatibility
+  evidence: RuntimeSkillEvidence
+  searchPaths: RuntimeSkillSearchPath[]
+  skills: SkillView[]
+  issues: RuntimeSkillIssue[]
+}
+
+export interface RuntimeSkillInventorySummary {
+  runtime: string
+  compatibility: RuntimeSkillCompatibility
+  agentCount: number
+  skillCount: number
+  issueCount: number
+  evidenceSources: string[]
+}
+
+export interface SkillDoctorSummary {
+  status: 'ok' | 'warning' | 'error'
+  runtimeCount: number
+  agentCount: number
+  skillCount: number
+  issueCount: number
+  errorCount: number
+  warningCount: number
+}
+
+export interface MachineSkillDoctor {
+  summary: SkillDoctorSummary
+  runtimes: RuntimeSkillInventorySummary[]
+  agents: AgentSkillInventory[]
 }
 
 // SkillFileEntry matches protocol.FileTreeEntry returned by ListInstalledSkillFiles

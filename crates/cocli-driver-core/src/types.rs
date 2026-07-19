@@ -1,6 +1,7 @@
 //! Runtime-neutral supporting types used by the driver contract.
 
 use std::path::Path;
+use std::path::PathBuf;
 
 /// Per-spawn configuration passed to [`crate::Driver::spawn`] and
 /// [`crate::ProcessFactory::new_process`].
@@ -56,6 +57,57 @@ pub enum SkillCompatibility {
     Unsupported,
     Uncertain,
     Supported,
+}
+
+/// Evidence a driver can currently provide for skill discovery.
+///
+/// Filesystem discovery proves only that a candidate exists in a documented
+/// search path. It does not prove that an already-running runtime session has
+/// loaded or activated the skill.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SkillDiscoveryEvidence {
+    pub source: &'static str,
+    pub detail: &'static str,
+    pub proves_session_visibility: bool,
+}
+
+impl SkillDiscoveryEvidence {
+    pub const FILESYSTEM: Self = Self {
+        source: "filesystem",
+        detail: "runtime driver search paths",
+        proves_session_visibility: false,
+    };
+}
+
+/// One skill reported by a runtime's native, read-only discovery API.
+///
+/// Native discovery is stronger evidence than a filesystem candidate, but it
+/// still does not prove that an already-running session loaded or activated
+/// the skill.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSkill {
+    pub name: String,
+    pub description: String,
+    pub path: Option<PathBuf>,
+    pub source: String,
+    pub scope: String,
+    pub enabled: Option<bool>,
+    pub user_invocable: Option<bool>,
+}
+
+/// A diagnostic emitted by a runtime's native skill discovery API.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSkillIssue {
+    pub message: String,
+    pub path: Option<PathBuf>,
+}
+
+/// Result of a one-shot, read-only native skill probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeSkillProbe {
+    pub evidence: SkillDiscoveryEvidence,
+    pub skills: Vec<NativeSkill>,
+    pub issues: Vec<NativeSkillIssue>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

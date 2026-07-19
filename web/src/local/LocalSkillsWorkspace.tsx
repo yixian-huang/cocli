@@ -17,6 +17,7 @@ import {
   localApi,
   type Agent,
   type AgentSkill,
+  type MachineSkillDoctor,
   type RuntimeSkillCompatibility,
   type SkillFileEntry,
   type SkillLibraryEntry,
@@ -54,6 +55,7 @@ function compatibilityLabel(
 export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const [catalog, setCatalog] = useState<SkillLibraryEntry[]>([])
   const [compatibility, setCompatibility] = useState<Record<string, RuntimeSkillCompatibility>>({})
+  const [doctor, setDoctor] = useState<MachineSkillDoctor | null>(null)
   const [selectedAgentId, setSelectedAgentId] = useState('')
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([])
   const [selectedLibraryId, setSelectedLibraryId] = useState('')
@@ -113,6 +115,10 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     ))
   }, [])
 
+  const refreshDoctor = useCallback(async () => {
+    setDoctor(await localApi.inspectMachineSkills())
+  }, [])
+
   const refreshAgentSkills = useCallback(async (agentId: string) => {
     if (!agentId) {
       setAgentSkills([])
@@ -138,12 +144,14 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     Promise.all([
       localApi.listSkillLibrary(),
       localApi.listSkillCompatibility(),
+      localApi.inspectMachineSkills(),
     ])
-      .then(([library, nextCompatibility]) => {
+      .then(([library, nextCompatibility, nextDoctor]) => {
         if (cancelled) return
         setCatalog(library.entries)
         setSelectedLibraryId((current) => current || library.entries[0]?.id || '')
         setCompatibility(nextCompatibility)
+        setDoctor(nextDoctor)
       })
       .catch((nextError: unknown) => {
         if (!cancelled) {
@@ -218,6 +226,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         refreshAgentSkills(selectedAgentId),
+        refreshDoctor(),
       ])
     })
   }
@@ -230,6 +239,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         refreshAgentSkills(selectedAgentId),
+        refreshDoctor(),
       ])
     })
   }
@@ -240,6 +250,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         selectedAgentId ? refreshAgentSkills(selectedAgentId) : Promise.resolve(),
+        refreshDoctor(),
       ])
     })
   }
@@ -253,6 +264,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         selectedAgentId ? refreshAgentSkills(selectedAgentId) : Promise.resolve(),
+        refreshDoctor(),
       ])
     })
   }
@@ -300,6 +312,9 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     ? compatibility[selectedAgent.runtime]
     : undefined
   const installDisabled = !selectedAgent || selectedCompatibility === 'unsupported'
+  const selectedInventory = doctor?.agents.find((inventory) => (
+    inventory.agentId === selectedAgentId
+  )) ?? null
 
   return (
     <section className="local-skills-workspace" aria-label={t('skillsWorkspace')}>
@@ -317,6 +332,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
             await Promise.all([
               refreshCatalog(),
               selectedAgentId ? refreshAgentSkills(selectedAgentId) : Promise.resolve(),
+              refreshDoctor(),
             ])
           })}
           disabled={action === 'refresh'}
@@ -332,6 +348,88 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
           <button type="button" onClick={() => setError(null)}>{t('dismiss')}</button>
         </div>
       )}
+
+      <section className="skill-diagnostics" aria-labelledby="skill-inventory-title">
+        <div className="workspace-section-title">
+          <div>
+            <h2 id="skill-inventory-title">{t('skillsInventoryTitle')}</h2>
+            <p>{t('skillsInventoryDescription')}</p>
+          </div>
+          {doctor && (
+            <span className={`doctor-status ${doctor.summary.status}`}>
+              {doctor.summary.status === 'ok'
+                ? t('skillsDoctorOk')
+                : doctor.summary.status === 'warning'
+                  ? t('skillsDoctorWarning')
+                  : t('skillsDoctorError')}
+            </span>
+          )}
+        </div>
+        <p className="skill-evidence-note">{t('skillsEvidenceNotice')}</p>
+        {doctor && (
+          <div className="runtime-skill-matrix-wrap">
+            <table className="runtime-skill-matrix">
+              <thead>
+                <tr>
+                  <th>{t('skillsRuntime')}</th>
+                  <th>{t('skillsCompatibility')}</th>
+                  <th>{t('skillsAgents')}</th>
+                  <th>{t('skillsDiscovered')}</th>
+                  <th>{t('skillsIssues')}</th>
+                  <th>{t('skillsEvidence')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {doctor.runtimes.map((runtime) => (
+                  <tr key={runtime.runtime}>
+                    <th scope="row">{runtime.runtime}</th>
+                    <td>{compatibilityLabel(runtime.compatibility, t)}</td>
+                    <td>{runtime.agentCount}</td>
+                    <td>{runtime.skillCount}</td>
+                    <td>{runtime.issueCount}</td>
+                    <td>{runtime.evidenceSources.join(', ') || t('skillsNoEvidence')}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {selectedInventory && (
+          <details className="agent-skill-doctor" open={selectedInventory.issues.length > 0}>
+            <summary>{t('skillsAgentDoctor', { agent: selectedInventory.agentName })}</summary>
+            <div className="agent-skill-doctor-grid">
+              <div>
+                <h3>{t('skillsSearchPaths')}</h3>
+                <ul>
+                  {selectedInventory.searchPaths.map((path) => (
+                    <li key={`${path.scope}:${path.path}`}>
+                      <code>{path.path}</code>
+                      <span>{path.scope} · {path.exists && path.readable ? t('skillsPathReady') : t('skillsPathUnavailable')}</span>
+                      {path.symlink && <span>{t('skillsSymlink')}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div>
+                <h3>{t('skillsIssues')}</h3>
+                {selectedInventory.issues.length === 0
+                  ? <p>{t('skillsNoIssues')}</p>
+                  : (
+                    <ul>
+                      {selectedInventory.issues.map((issue, index) => (
+                        <li key={`${issue.code}:${issue.path ?? index}`} className={issue.severity}>
+                          <strong>{issue.code}</strong>
+                          <span>{issue.message}</span>
+                          {issue.path && <code>{issue.path}</code>}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+              </div>
+            </div>
+          </details>
+        )}
+      </section>
 
       <div className="skills-layout">
         <section className="skills-catalog-pane">
@@ -576,6 +674,18 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
                 </div>
                 {skill.description && <p>{skill.description}</p>}
                 <small>{skill.state === 'broken' ? skill.installPath : skill.path}</small>
+                <div className="skill-evidence-row">
+                  <span>{skill.presence}</span>
+                  <span>{skill.runtime} · {skill.scope}</span>
+                  <span>{skill.evidence.source}</span>
+                  {skill.resolvedPath && skill.resolvedPath !== skill.sourcePath && (
+                    <span title={skill.resolvedPath}>{t('skillsSymlink')}</span>
+                  )}
+                  {skill.valid === false && <span className="error">invalid</span>}
+                  {skill.enabled === false && <span className="warning">{t('skillsDisabled')}</span>}
+                  {skill.shadowed && <span className="warning">shadowed</span>}
+                  {skill.duplicate && !skill.shadowed && <span className="warning">duplicate</span>}
+                </div>
                 <div className="agent-skill-actions">
                   {skill.installId && skill.state !== 'broken' && (
                     <button

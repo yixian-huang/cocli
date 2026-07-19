@@ -82,6 +82,33 @@ Chatrs, and OpenCode. Availability and capabilities are discovered locally;
 not every Runtime exposes the same model, skill, cancellation, steering, or
 session-resume features.
 
+## Desktop Skill governance
+
+The first Skill governance phase is available as a supporting Agent/Runtime
+diagnostic surface. The desktop Skills workspace keeps the existing local
+library and per-Agent install/uninstall flow, and adds a read-only
+Runtime × Skill inventory plus doctor details. The HTTP API exposes matching
+machine-level endpoints at `/api/runtimes/skills/{inventory,doctor}` and
+Agent-level endpoints at `/api/agents/:agent_id/skills/{inventory,doctor}`.
+
+Discovery reports runtime compatibility, ordered search paths, scope, source
+and resolved paths, managed/external/broken state, invalid frontmatter,
+broken symbolic links, duplicate targets, and shadowed names. Cursor Agent
+Skills are discovered from `.cursor/skills` and `.agents/skills` at workspace
+and user scope; `.cursor/rules` remains a separate Rules surface. Claude,
+Codex, and Grok retain their existing search-path behavior.
+
+The Codex and Grok drivers now augment that filesystem scan with read-only
+native evidence from app-server `skills/list` and `grok inspect --json`.
+Inventory distinguishes a filesystem-only installed candidate from a Skill
+returned by the Runtime, exposes Runtime-reported disabled state when present,
+and falls back to filesystem evidence with a doctor warning when a native probe
+fails. A native discovery response is still not proof that an already-running
+Runtime Session loaded or activated the Skill. The doctor UI and API expose the
+evidence source explicitly, and discovery does not write to user-global Skill
+directories. Planned follow-up work adds a Cursor native probe,
+plan/apply/verify changes, and lockfile/drift governance.
+
 ## Repository layout
 
 - `bin/cocli/` — local server binary
