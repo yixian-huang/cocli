@@ -1,5 +1,6 @@
 //! Local server assembly for cocli.
 
+mod mcp;
 mod runtime;
 mod skills;
 

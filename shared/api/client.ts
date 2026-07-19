@@ -12,6 +12,8 @@ import type {
   HistoryResult,
   Invite,
   MachineSkillDoctor,
+  McpDoctorReport,
+  McpInventory,
   Machine,
   Message,
   OverflowStatsEntry,
@@ -613,6 +615,10 @@ export const runtimes = {
     }>(`/api/runtimes/skills/inventory`),
   skillDoctor: () =>
     request<MachineSkillDoctor>(`/api/runtimes/skills/doctor`),
+  mcpInventory: () =>
+    request<McpInventory>(`/api/runtimes/mcp/inventory`),
+  mcpDoctor: () =>
+    request<McpDoctorReport>(`/api/runtimes/mcp/doctor`),
 }
 
 // Unified Memory (L1/L2 read API — Tasks 6.1/6.2)

@@ -24,6 +24,13 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex, Notify};
 use uuid::Uuid;
 
+pub use cocli_driver_core::{
+    McpBinding, McpCanonicalDefinition, McpDiagnostic, McpDiagnosticSeverity, McpDoctorReport,
+    McpDoctorSummary, McpEvidence, McpInventory, McpSecretRef, McpServer, McpStartupState,
+    McpTransport, ObservedMcpInstance,
+};
+
+mod mcp_http;
 mod skill_http;
 mod skill_import;
 
@@ -745,6 +752,13 @@ pub trait RuntimeService: Send + Sync {
         RuntimeMetricsSnapshot::default()
     }
 
+    /// Returns a best-effort, read-only MCP inventory across local Runtimes.
+    /// Individual adapter failures are represented as diagnostics in the
+    /// inventory instead of failing the aggregate request.
+    async fn inspect_mcp(&self) -> Result<cocli_driver_core::McpInventory, RuntimeError> {
+        Ok(cocli_driver_core::McpInventory::default())
+    }
+
     /// Returns skill compatibility for one runtime name.
     fn skill_compatibility(&self, _runtime: &str) -> RuntimeSkillCompatibility {
         RuntimeSkillCompatibility::Unknown
@@ -1268,6 +1282,7 @@ fn router_with_delivery_config_and_live_events(
             authorize_bridge_request,
         ));
     Router::new()
+        .merge(mcp_http::router())
         .merge(skill_http::router())
         .merge(bridge_router)
         .route("/healthz", get(health))

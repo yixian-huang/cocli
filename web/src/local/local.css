@@ -1289,6 +1289,82 @@ textarea::placeholder {
     color-mix(in srgb, var(--canvas) 82%, transparent);
 }
 
+.local-mcp-workspace {
+  min-height: calc(100vh - 60px);
+  padding: var(--space-6);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 36%, transparent), transparent 42%),
+    color-mix(in srgb, var(--canvas) 82%, transparent);
+}
+
+.mcp-summary-grid {
+  display: grid;
+  max-width: 1480px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin: 0 auto var(--space-4);
+}
+
+.mcp-summary-grid article,
+.mcp-panel {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  background: var(--panel-translucent);
+  box-shadow: var(--shadow-control);
+}
+
+.mcp-summary-grid article {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-4);
+}
+
+.mcp-summary-grid span,
+.mcp-observation-list small,
+.mcp-observation-list time,
+.mcp-finding-list time {
+  color: var(--muted);
+  font-family: var(--font-signal);
+  font-size: 9px;
+}
+
+.mcp-summary-grid strong { font-size: 20px; }
+.mcp-summary-grid article.error strong { color: var(--danger); }
+.mcp-summary-grid article.warning strong { color: var(--warning); }
+
+.mcp-panel {
+  max-width: 1480px;
+  margin: 0 auto var(--space-4);
+  padding: var(--space-5);
+}
+
+.mcp-matrix th,
+.mcp-matrix td { white-space: nowrap; }
+.mcp-state { font-family: var(--font-signal); font-size: 9px; }
+.mcp-state.error { color: var(--danger); }
+.mcp-state.warning { color: var(--warning); }
+.mcp-state.ok { color: var(--success); }
+
+.mcp-observation-list { display: grid; gap: var(--space-2); }
+.mcp-observation-list article {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+}
+.mcp-observation-list header { display: flex; justify-content: space-between; gap: var(--space-3); }
+.mcp-observation-list p { margin: var(--space-2) 0; color: var(--muted); font-size: 11px; }
+
+.mcp-finding-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.mcp-finding-list li { display: grid; grid-template-columns: minmax(180px, .35fr) 1fr auto; gap: var(--space-3); align-items: center; font-size: 11px; }
+.mcp-finding-list li.error strong { color: var(--danger); }
+.mcp-finding-list li.warning strong { color: var(--warning); }
+
+@media (max-width: 800px) {
+  .mcp-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .mcp-finding-list li { grid-template-columns: 1fr; gap: var(--space-1); }
+}
+
 .workspace-heading {
   display: flex;
   align-items: flex-start;

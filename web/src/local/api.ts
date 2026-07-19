@@ -237,6 +237,94 @@ export interface MachineSkillDoctor {
   agents: AgentSkillInventory[]
 }
 
+export type McpTransport = 'stdio' | 'sse' | 'streamableHttp' | 'http' | 'unknown'
+export type McpDiagnosticSeverity = 'info' | 'warning' | 'error'
+
+export interface McpEvidence {
+  source: string
+  detail: string
+  sourcePath?: string
+  provesRuntimeLoaded: boolean
+  provesCurrentSessionVisibility: boolean
+}
+
+export interface McpServer {
+  id: string
+  canonicalName: string
+  definition: {
+    transport: McpTransport
+    command?: string
+    args?: string[]
+    endpoint?: string
+  }
+  endpointFingerprint: string
+  aliases: string[]
+  provenance: McpEvidence[]
+  secretRefs: { location: string; kind: string; reference: string }[]
+}
+
+export interface McpBinding {
+  serverId: string
+  runtime: string
+  agentId?: string
+  workspace?: string
+  profile?: string
+  desiredEnabled?: boolean
+  policy?: string
+}
+
+export interface ObservedMcpInstance {
+  runtime: string
+  serverId: string
+  alias: string
+  sourcePath?: string
+  discoverable: boolean
+  configured: boolean
+  loaded?: boolean
+  enabled?: boolean
+  approved?: boolean
+  authenticated?: boolean
+  healthy?: boolean
+  startup?: 'not_attempted' | 'starting' | 'ready' | 'failed' | 'unknown'
+  currentSessionVisible?: boolean
+  invoked?: boolean
+  toolCount?: number
+  schemaHash?: string
+  evidence: McpEvidence[]
+  observedAt: string
+}
+
+export interface McpDiagnostic {
+  code: string
+  severity: McpDiagnosticSeverity
+  runtime: string
+  serverId?: string
+  message: string
+  evidence: McpEvidence[]
+  observedAt: string
+}
+
+export interface McpInventory {
+  servers: McpServer[]
+  bindings: McpBinding[]
+  observations: ObservedMcpInstance[]
+  diagnostics: McpDiagnostic[]
+  observedAt: string
+}
+
+export interface McpDoctorReport {
+  summary: {
+    status: 'ok' | 'warning' | 'error'
+    runtimeCount: number
+    serverCount: number
+    observationCount: number
+    diagnosticCount: number
+    errorCount: number
+    warningCount: number
+  }
+  inventory: McpInventory
+}
+
 export interface SkillFileEntry {
   name: string
   isDir: boolean
@@ -494,6 +582,10 @@ export const localApi = {
     request<Record<string, RuntimeSkillCompatibility>>('/api/runtimes/compatibility'),
   inspectMachineSkills: () =>
     request<MachineSkillDoctor>('/api/runtimes/skills/doctor'),
+  inspectMachineMcp: () =>
+    request<McpDoctorReport>('/api/runtimes/mcp/doctor'),
+  listMachineMcp: () =>
+    request<McpInventory>('/api/runtimes/mcp/inventory'),
   inspectAgentSkills: (agentId: string) =>
     request<{ summary: SkillDoctorSummary; inventory: AgentSkillInventory }>(
       `/api/agents/${agentId}/skills/doctor`,

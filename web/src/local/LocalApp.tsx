@@ -17,6 +17,7 @@ import {
   ListTodo,
   MessageSquare,
   Moon,
+  Network,
   PackageOpen,
   Search,
   Sun,
@@ -42,6 +43,7 @@ import { LocalSelect } from './LocalSelect'
 import { LocalHistoryWorkspace } from './LocalHistoryWorkspace'
 import { LocalKnowledgeWorkspace } from './LocalKnowledgeWorkspace'
 import { LocalSkillsWorkspace } from './LocalSkillsWorkspace'
+import { LocalMcpWorkspace } from './LocalMcpWorkspace'
 import { LocalTasksWorkspace } from './LocalTasksWorkspace'
 import {
   LANGUAGE_OPTIONS,
@@ -60,6 +62,7 @@ type WorkspaceView =
   | 'agent-memory'
   | 'history'
   | 'skills'
+  | 'mcp'
   | 'settings'
 
 interface LiveTurn {
@@ -690,6 +693,7 @@ export function LocalApp() {
           || workspaceView === 'agent-memory'
           || workspaceView === 'history'
           || workspaceView === 'skills'
+          || workspaceView === 'mcp'
         ? 'agents'
         : 'channels'
 
@@ -845,6 +849,14 @@ export function LocalApp() {
           >
             <PackageOpen size={14} aria-hidden="true" />
             {t('skillsWorkspace')}
+          </button>
+          <button
+            type="button"
+            className={workspaceView === 'mcp' ? 'active' : ''}
+            onClick={() => setWorkspaceView('mcp')}
+          >
+            <Network size={14} aria-hidden="true" />
+            {t('mcpWorkspace')}
           </button>
         </nav>
       )}
@@ -1508,6 +1520,8 @@ export function LocalApp() {
           }}
           t={t}
         />
+      ) : workspaceView === 'mcp' ? (
+        <LocalMcpWorkspace t={t} />
       ) : (
         workspaceView === 'settings' ? (
           <section className="local-settings-workspace" aria-label={t('settings')}>

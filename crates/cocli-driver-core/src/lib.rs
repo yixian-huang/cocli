@@ -10,6 +10,7 @@ pub mod driver;
 pub mod error;
 pub mod event;
 pub mod headless;
+pub mod mcp;
 pub mod subtraits;
 pub mod types;
 
@@ -17,6 +18,12 @@ pub use driver::Driver;
 pub use error::DriverError;
 pub use event::{DriverEvent, ErrorSeverity, SignalType};
 pub use headless::{encode_stdin_turn_exit, prompt_arg};
+pub use mcp::{
+    McpBinding, McpCanonicalDefinition, McpConfigAdapter, McpConfigContext, McpConfigSnapshot,
+    McpDiagnostic, McpDiagnosticSeverity, McpDoctorReport, McpDoctorSummary, McpEvidence,
+    McpInventory, McpProbeRequest, McpProbeSnapshot, McpRuntimeProbe, McpSecretRef, McpServer,
+    McpStartupState, McpTransport, ObservedMcpInstance,
+};
 pub use subtraits::{
     ExitCodeClassifier, ProcessFactory, ProcessInitializer, SessionFileGC, StdinBinder,
     TurnInterruptor,

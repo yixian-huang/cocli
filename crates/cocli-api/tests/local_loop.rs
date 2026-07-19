@@ -9,9 +9,9 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
-    reconcile_skill_state, router, router_with_delivery_config, DeliveryConfig, RuntimeError,
-    RuntimeInfo, RuntimeService, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent,
-    RuntimeSkillFileEntry,
+    reconcile_skill_state, router, router_with_delivery_config, DeliveryConfig, McpDiagnostic,
+    McpDiagnosticSeverity, McpEvidence, McpInventory, RuntimeError, RuntimeInfo, RuntimeService,
+    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
 };
 use cocli_store::{
     Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillLibrary, SkillLibraryFile,
@@ -43,6 +43,28 @@ impl RuntimeService for FakeRuntime {
 
     async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
         Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        Ok(McpInventory {
+            diagnostics: vec![McpDiagnostic {
+                code: "cli_missing".to_owned(),
+                severity: McpDiagnosticSeverity::Warning,
+                runtime: "cursor".to_owned(),
+                server_id: None,
+                message: "cursor MCP probe is unavailable".to_owned(),
+                evidence: vec![McpEvidence {
+                    source: "cursor_cli".to_owned(),
+                    detail: "binary was not discovered".to_owned(),
+                    source_path: None,
+                    proves_runtime_loaded: false,
+                    proves_current_session_visibility: false,
+                }],
+                observed_at: "2026-07-19T00:00:00Z".to_owned(),
+            }],
+            observed_at: "2026-07-19T00:00:00Z".to_owned(),
+            ..McpInventory::default()
+        })
     }
 }
 
@@ -217,6 +239,27 @@ impl RuntimeService for FakeSkillRuntime {
             }),
         }
     }
+}
+
+#[tokio::test]
+async fn exposes_read_only_mcp_inventory_and_doctor() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+
+    let (inventory_status, inventory) =
+        json_request(app.clone(), "GET", "/api/runtimes/mcp/inventory", json!({})).await;
+    assert_eq!(inventory_status, StatusCode::OK);
+    assert_eq!(inventory["diagnostics"][0]["code"], "cli_missing");
+    assert_eq!(inventory["diagnostics"][0]["runtime"], "cursor");
+    assert_eq!(inventory["observedAt"], "2026-07-19T00:00:00Z");
+
+    let (doctor_status, doctor) =
+        json_request(app, "GET", "/api/runtimes/mcp/doctor", json!({})).await;
+    assert_eq!(doctor_status, StatusCode::OK);
+    assert_eq!(doctor["summary"]["status"], "warning");
+    assert_eq!(doctor["summary"]["runtimeCount"], 1);
+    assert_eq!(doctor["summary"]["warningCount"], 1);
+    assert_eq!(doctor["inventory"]["diagnostics"][0]["code"], "cli_missing");
 }
 
 #[tokio::test]

@@ -109,6 +109,24 @@ evidence source explicitly, and discovery does not write to user-global Skill
 directories. Planned follow-up work adds a Cursor native probe,
 plan/apply/verify changes, and lockfile/drift governance.
 
+## Desktop MCP governance
+
+MCP governance Phase 1 is read-only. The local API exposes cross-Runtime
+inventory and doctor results at `/api/runtimes/mcp/inventory` and
+`/api/runtimes/mcp/doctor`, and the desktop MCP workspace renders the same
+Runtime × Server evidence matrix. Configuration discovery and Runtime-native
+probing are separate adapters: a discovered or configured server is not
+reported as loaded, approved, authenticated, healthy, visible to a current
+session, or invoked unless the corresponding evidence exists.
+
+The inventory stores endpoint fingerprints and redacted canonical definitions;
+secret values are never returned. Missing CLIs, unsupported commands, timeouts,
+invalid output, approval/authentication gaps, startup failures, duplicate
+endpoints/aliases, and configuration drift are structured diagnostics. One
+Runtime probe failing does not fail the aggregate request. See
+[docs/mcp-governance-phase-1.md](docs/mcp-governance-phase-1.md) for the API
+contract and the explicit Phase 2 boundary.
+
 ## Repository layout
 
 - `bin/cocli/` — local server binary

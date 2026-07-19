@@ -557,6 +557,10 @@ impl RuntimeService for LocalRuntimeService {
         }
     }
 
+    async fn inspect_mcp(&self) -> Result<cocli_driver_core::McpInventory, RuntimeError> {
+        Ok(crate::mcp::inspect(&self.catalog, &self.config).await)
+    }
+
     fn skill_compatibility(&self, runtime: &str) -> RuntimeSkillCompatibility {
         crate::skills::compatibility(&self.registry, runtime)
     }

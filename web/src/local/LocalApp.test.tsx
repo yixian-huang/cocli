@@ -147,6 +147,62 @@ describe('LocalApp', () => {
           }] : [],
         })
       }
+      if (path === '/api/runtimes/mcp/doctor') {
+        const evidence = {
+          source: 'cursor_cli',
+          detail: 'cursor-agent mcp list-tools',
+          provesRuntimeLoaded: true,
+          provesCurrentSessionVisibility: false,
+        }
+        return jsonResponse({
+          summary: {
+            status: 'warning',
+            runtimeCount: 1,
+            serverCount: 1,
+            observationCount: 1,
+            diagnosticCount: 1,
+            errorCount: 0,
+            warningCount: 1,
+          },
+          inventory: {
+            servers: [{
+              id: 'srv-docs',
+              canonicalName: 'docs',
+              definition: { transport: 'stdio', command: 'docs-server' },
+              endpointFingerprint: 'sha256:test',
+              aliases: ['docs'],
+              provenance: [evidence],
+              secretRefs: [],
+            }],
+            bindings: [{ serverId: 'srv-docs', runtime: 'cursor', desiredEnabled: true }],
+            observations: [{
+              runtime: 'cursor',
+              serverId: 'srv-docs',
+              alias: 'docs',
+              discoverable: true,
+              configured: true,
+              loaded: true,
+              enabled: true,
+              approved: false,
+              healthy: false,
+              startup: 'failed',
+              toolCount: 0,
+              evidence: [evidence],
+              observedAt: '2026-07-19T09:00:00Z',
+            }],
+            diagnostics: [{
+              code: 'approval_missing',
+              severity: 'warning',
+              runtime: 'cursor',
+              serverId: 'srv-docs',
+              message: 'MCP server is configured but not approved',
+              evidence: [evidence],
+              observedAt: '2026-07-19T09:00:00Z',
+            }],
+            observedAt: '2026-07-19T09:00:00Z',
+          },
+        })
+      }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
       if (path === '/api/agents' && !init?.method) {
         return jsonResponse(agentCreated ? [createdAgent] : [])
@@ -705,6 +761,20 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'View files' }))
     expect(await screen.findByRole('heading', { name: 'Reviewer' })).toBeInTheDocument()
     expect(await screen.findByText(/Review local changes\./)).toBeInTheDocument()
+  })
+
+  it('shows the read-only MCP runtime matrix and evidence', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
+    fireEvent.click(screen.getByRole('button', { name: 'MCP' }))
+
+    expect(await screen.findByRole('heading', { name: 'MCP inventory and doctor' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Runtime × Server matrix' })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /cursor D✓ C✓ L✓ E✓ P× A· H× S· I·/ })).toBeInTheDocument()
+    expect(screen.getByText(/cursor-agent mcp list-tools/)).toBeInTheDocument()
+    expect(screen.getByText(/approval_missing/)).toBeInTheDocument()
   })
 
   it('creates, assigns, updates, and links local tasks', async () => {
