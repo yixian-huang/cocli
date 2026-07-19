@@ -275,6 +275,23 @@ export type SkillGovernanceUpdatePolicy = 'pinned' | 'manual' | 'track_revision'
 export type SkillGovernanceRiskPolicy = 'trusted' | 'allowlisted' | 'approval_required' | 'blocked'
 export type SkillGovernancePlanStatus = 'draft' | 'approved' | 'rejected' | 'stale'
 export type SkillGovernanceLockfileBoundary = 'workspace_candidate' | 'store_only'
+export type SkillGovernanceRunStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'recovery_required'
+  | 'rolled_back'
+export type SkillGovernanceRunPhase =
+  | 'preview'
+  | 'lock'
+  | 'backup'
+  | 'quarantine'
+  | 'apply'
+  | 'verify'
+  | 'rollback'
+  | 'recovery'
 export type SkillGovernanceDriftKind =
   | 'missing'
   | 'extra'
@@ -555,6 +572,100 @@ export interface SkillGovernancePlanDecisionResponse {
   applied: boolean
   dryRun: boolean
   staleReasons: string[]
+}
+
+export interface SkillGovernanceApplyConfirmation {
+  expectedVersion: number
+  idempotencyKey: string
+  confirmationNonce?: string
+  confirmHighRisk?: boolean
+}
+
+export interface SkillGovernanceRunEffect {
+  kind: 'lock' | 'backup' | 'quarantine' | 'verify' | 'rollback' | 'apply' | 'recovery'
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped'
+  label: string
+  detail?: string
+  createdId?: string
+}
+
+export interface SkillGovernanceApplyPreviewResponse {
+  plan: SkillGovernancePlan
+  dryRun: boolean
+  applied: false
+  highRisk: boolean
+  confirmationRequired: boolean
+  nonceRequired: boolean
+  confirmationNonce?: string
+  idempotencyKey?: string
+  recoveryRequired: boolean
+  recoveryReasons: string[]
+  lockSnapshotId?: string
+  backupId?: string
+  quarantineId?: string
+  effects: SkillGovernanceRunEffect[]
+  actions: SkillGovernancePlanAction[]
+  staleReasons: string[]
+}
+
+export interface SkillGovernanceRun {
+  id: string
+  planId?: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  status: SkillGovernanceRunStatus
+  phase: SkillGovernanceRunPhase
+  progress: number
+  message?: string
+  dryRun: boolean
+  applied: boolean
+  highRisk: boolean
+  recoveryRequired: boolean
+  recoveryReasons: string[]
+  lockSnapshotId?: string
+  backupId?: string
+  quarantineId?: string
+  effects: SkillGovernanceRunEffect[]
+  actions: SkillGovernancePlanAction[]
+  startedAt?: string
+  updatedAt: string
+  completedAt?: string
+}
+
+export interface SkillGovernanceApplyResponse {
+  run: SkillGovernanceRun
+  applied: boolean
+  recoveryRequired: boolean
+}
+
+export interface SkillGovernanceVerifyResponse {
+  run: SkillGovernanceRun
+  verified: boolean
+  recoveryRequired: boolean
+  reasons: string[]
+}
+
+export interface SkillGovernanceRollbackPreviewResponse {
+  run: SkillGovernanceRun
+  dryRun: boolean
+  rollbackRequired: boolean
+  confirmationRequired: boolean
+  confirmationNonce: string
+  idempotencyKey: string
+  effects: SkillGovernanceRunEffect[]
+  actions: SkillGovernancePlanAction[]
+}
+
+export interface SkillGovernanceRollbackConfirmation {
+  idempotencyKey: string
+  confirmationNonce?: string
+  confirmRollback?: boolean
+}
+
+export interface SkillGovernanceRollbackResponse {
+  run: SkillGovernanceRun
+  rolledBack: boolean
+  recoveryRequired: boolean
 }
 
 export interface SkillFileEntry {
@@ -947,6 +1058,48 @@ export const localApi = {
       {
         method: 'POST',
         body: JSON.stringify({ expectedVersion }),
+      },
+    ),
+  previewGovernanceApply: (planId: string) =>
+    request<SkillGovernanceApplyPreviewResponse>(
+      `/api/skills/governance/plans/${planId}/apply/preview`,
+      { method: 'POST' },
+    ),
+  applyGovernancePlan: (planId: string, input: SkillGovernanceApplyConfirmation) =>
+    request<SkillGovernanceApplyResponse>(
+      `/api/skills/governance/plans/${planId}/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  listGovernanceRuns: (input?: { scope?: SkillGovernanceScope; scopeId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.scopeId) params.set('scopeId', input.scopeId)
+    const query = params.toString()
+    return request<SkillGovernanceRun[]>(
+      `/api/skills/governance/runs${query ? `?${query}` : ''}`,
+    )
+  },
+  getGovernanceRun: (runId: string) =>
+    request<SkillGovernanceRun>(`/api/skills/governance/runs/${runId}`),
+  verifyGovernanceRun: (runId: string) =>
+    request<SkillGovernanceVerifyResponse>(
+      `/api/skills/governance/runs/${runId}/verify`,
+      { method: 'POST' },
+    ),
+  previewGovernanceRollback: (runId: string) =>
+    request<SkillGovernanceRollbackPreviewResponse>(
+      `/api/skills/governance/runs/${runId}/rollback/preview`,
+      { method: 'POST' },
+    ),
+  rollbackGovernanceRun: (runId: string, input: SkillGovernanceRollbackConfirmation) =>
+    request<SkillGovernanceRollbackResponse>(
+      `/api/skills/governance/runs/${runId}/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
       },
     ),
   listTasks: (channelId: string, status?: TaskStatus) =>

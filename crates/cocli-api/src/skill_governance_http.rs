@@ -231,9 +231,9 @@ async fn unbind_profile(
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DesiredTarget {
-    workspace_id: Option<String>,
-    agent_id: Option<String>,
+pub(super) struct DesiredTarget {
+    pub workspace_id: Option<String>,
+    pub agent_id: Option<String>,
 }
 
 async fn effective_desired(
@@ -260,19 +260,19 @@ async fn evidence(
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct GovernancePreviewRequest {
-    scope: GovernanceScope,
-    scope_id: String,
+pub(super) struct GovernancePreviewRequest {
+    pub scope: GovernanceScope,
+    pub scope_id: String,
     #[serde(default)]
-    workspace_id: Option<String>,
+    pub workspace_id: Option<String>,
     #[serde(default)]
-    agent_id: Option<String>,
+    pub agent_id: Option<String>,
     #[serde(default)]
-    force: bool,
+    pub force: bool,
 }
 
 impl GovernancePreviewRequest {
-    fn desired_target(&self) -> DesiredTarget {
+    pub(super) fn desired_target(&self) -> DesiredTarget {
         DesiredTarget {
             workspace_id: self.workspace_id.clone().or_else(|| {
                 (self.scope == GovernanceScope::Workspace).then(|| self.scope_id.clone())
@@ -284,22 +284,22 @@ impl GovernancePreviewRequest {
         }
     }
 
-    fn normalized_scope_id(&self) -> Result<String, ApiError> {
+    pub(super) fn normalized_scope_id(&self) -> Result<String, ApiError> {
         normalized_scope_id(self.scope, &self.scope_id)
     }
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct LockPreviewResponse {
-    snapshot: SkillLockSnapshot,
-    preview: SkillLockfilePreview,
-    drift: Vec<SkillDrift>,
+pub(super) struct LockPreviewResponse {
+    pub snapshot: SkillLockSnapshot,
+    pub preview: SkillLockfilePreview,
+    pub drift: Vec<SkillDrift>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    previous_lock_hash: Option<String>,
-    lockfile_changed: bool,
-    lockfile_boundary: &'static str,
-    writes_real_directories: bool,
+    pub previous_lock_hash: Option<String>,
+    pub lockfile_changed: bool,
+    pub lockfile_boundary: &'static str,
+    pub writes_real_directories: bool,
 }
 
 async fn lockfile_preview(
@@ -522,7 +522,7 @@ async fn reject_plan(
     }))
 }
 
-async fn generate_lock_preview(
+pub(super) async fn generate_lock_preview(
     state: &AppState,
     request: &GovernancePreviewRequest,
 ) -> Result<LockPreviewResponse, ApiError> {
@@ -601,7 +601,7 @@ fn observation_matches_scope(
     skill.scope == scope && skill.scope_id.as_deref() == Some(scope_id)
 }
 
-async fn load_effective_desired(
+pub(super) async fn load_effective_desired(
     state: &AppState,
     target: &DesiredTarget,
 ) -> Result<EffectiveDesiredState, ApiError> {
@@ -636,7 +636,10 @@ async fn require_profile(state: &AppState, profile_id: Uuid) -> Result<SkillProf
         .ok_or_else(|| ApiError::not_found("SkillProfile not found"))
 }
 
-async fn require_plan(state: &AppState, plan_id: Uuid) -> Result<SkillGovernancePlan, ApiError> {
+pub(super) async fn require_plan(
+    state: &AppState,
+    plan_id: Uuid,
+) -> Result<SkillGovernancePlan, ApiError> {
     state
         .store
         .get_skill_governance_plan(plan_id)
@@ -656,7 +659,7 @@ fn parse_plan_context(value: &Value) -> Result<StoredPlanContext, ApiError> {
         .map_err(|_| ApiError::bad_request("stored governance plan context is invalid"))
 }
 
-fn parse_plan_preview(value: &Value) -> Result<DryRunPlanPreview, ApiError> {
+pub(super) fn parse_plan_preview(value: &Value) -> Result<DryRunPlanPreview, ApiError> {
     serde_json::from_value(
         value
             .get("preview")
@@ -666,7 +669,7 @@ fn parse_plan_preview(value: &Value) -> Result<DryRunPlanPreview, ApiError> {
     .map_err(|_| ApiError::bad_request("stored governance plan preview is invalid"))
 }
 
-fn normalized_scope_id(scope: GovernanceScope, value: &str) -> Result<String, ApiError> {
+pub(super) fn normalized_scope_id(scope: GovernanceScope, value: &str) -> Result<String, ApiError> {
     if scope == GovernanceScope::Machine {
         return Ok("machine".to_owned());
     }

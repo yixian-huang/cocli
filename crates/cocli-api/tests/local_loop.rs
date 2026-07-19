@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -9,14 +10,16 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
-    reconcile_skill_state, router, router_with_delivery_config, DeliveryConfig, RuntimeError,
-    RuntimeInfo, RuntimeService, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence,
-    RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection,
-    RuntimeSkillSearchPath,
+    governance_artifact_digests, reconcile_skill_state, router, router_with_delivery_config,
+    DeliveryConfig, GovernanceSkillTarget, RuntimeError, RuntimeInfo, RuntimeService, RuntimeSkill,
+    RuntimeSkillCompatibility, RuntimeSkillEvidence, RuntimeSkillFileContent,
+    RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection, RuntimeSkillSearchPath,
 };
 use cocli_store::{
-    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillLibrary, SkillLibraryFile,
-    Store,
+    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillGovernanceApplyAction,
+    NewSkillGovernanceApplyRun, NewSkillLibrary, SkillGovernanceApplyActionStatus,
+    SkillGovernanceApplyRunStatus, SkillGovernanceRecoveryStatus, SkillGovernanceScope,
+    SkillLibraryFile, Store,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -24,6 +27,11 @@ use tower::ServiceExt;
 
 #[derive(Debug)]
 struct FakeRuntime;
+
+#[derive(Debug)]
+struct GovernanceApplyRuntime {
+    workspace_root: PathBuf,
+}
 
 #[derive(Debug)]
 struct FailingStartRuntime;
@@ -82,6 +90,133 @@ impl SnapshotSkillRuntime {
             }],
             issues: Vec::new(),
         }
+    }
+}
+
+impl GovernanceApplyRuntime {
+    fn target(&self, agent: &Agent, name: &str) -> GovernanceSkillTarget {
+        let scope_root = self.workspace_root.join(agent.id.to_string());
+        let search_root = scope_root.join(".fake/skills");
+        GovernanceSkillTarget {
+            entry_path: search_root.join(name),
+            search_root,
+            scope_root,
+        }
+    }
+
+    fn inspection(&self, agent: &Agent) -> RuntimeSkillInspection {
+        let evidence = RuntimeSkillEvidence {
+            source: "filesystem".to_owned(),
+            detail: "isolated governance apply fixture".to_owned(),
+            proves_session_visibility: false,
+        };
+        let target = self.target(agent, "reviewer");
+        let skills = target
+            .entry_path
+            .join("SKILL.md")
+            .is_file()
+            .then(|| RuntimeSkillFinding {
+                skill: RuntimeSkill {
+                    name: "reviewer".to_owned(),
+                    display_name: "Reviewer".to_owned(),
+                    description: "isolated fixture".to_owned(),
+                    user_invocable: true,
+                    skill_type: "workspace".to_owned(),
+                    path: target
+                        .entry_path
+                        .join("SKILL.md")
+                        .to_string_lossy()
+                        .into_owned(),
+                    install_path: Some(".fake/skills/reviewer".to_owned()),
+                },
+                runtime: "fake".to_owned(),
+                fingerprint: "fixture-reviewer".to_owned(),
+                scope: "workspace".to_owned(),
+                source_path: target.entry_path.to_string_lossy().into_owned(),
+                resolved_path: target
+                    .entry_path
+                    .canonicalize()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                presence: "installed".to_owned(),
+                evidence: evidence.clone(),
+                enabled: Some(true),
+                valid: Some(true),
+                duplicate: false,
+                shadowed: false,
+                issues: Vec::new(),
+            });
+        RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: "fake".to_owned(),
+            compatibility: RuntimeSkillCompatibility::Supported,
+            evidence,
+            search_paths: vec![RuntimeSkillSearchPath {
+                path: target.search_root.to_string_lossy().into_owned(),
+                scope: "workspace".to_owned(),
+                exists: target.search_root.exists(),
+                readable: target.search_root.exists(),
+                symlink: false,
+                resolved_path: target
+                    .search_root
+                    .canonicalize()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                issue: None,
+            }],
+            skills: skills.into_iter().collect(),
+            issues: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeService for GovernanceApplyRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        vec![RuntimeInfo {
+            name: "fake".to_owned(),
+            installed: true,
+            binary: None,
+            version: Some("governance-test".to_owned()),
+            models: Vec::new(),
+            capabilities: vec!["skills:supported".to_owned()],
+            unavailable_reason: None,
+        }]
+    }
+
+    async fn reply(&self, _agent: &Agent, _message: &Message) -> Result<String, RuntimeError> {
+        Ok(String::new())
+    }
+
+    fn skill_compatibility(&self, _runtime: &str) -> RuntimeSkillCompatibility {
+        RuntimeSkillCompatibility::Supported
+    }
+
+    async fn inspect_skills(&self, agent: &Agent) -> Result<RuntimeSkillInspection, RuntimeError> {
+        Ok(self.inspection(agent))
+    }
+
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<RuntimeSkillInspection, RuntimeError> {
+        Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: RuntimeSkillCompatibility::Supported,
+            evidence: RuntimeSkillEvidence::default(),
+            search_paths: Vec::new(),
+            skills: Vec::new(),
+            issues: Vec::new(),
+        })
+    }
+
+    async fn governance_skill_target(
+        &self,
+        agent: &Agent,
+        skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Ok(self.target(agent, skill_name))
     }
 }
 
@@ -1442,6 +1577,388 @@ async fn skill_governance_profiles_lock_and_dry_run_plans_are_versioned_and_stal
     .await;
     assert_eq!(secret_status, StatusCode::BAD_REQUEST);
     assert!(!secret_error.to_string().contains("raw-secret"));
+}
+
+#[tokio::test]
+async fn approved_governance_apply_is_idempotent_verified_and_cas_rollback_safe() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: isolated apply fixture\n---\n",
+    )
+    .expect("source manifest");
+    let digests = governance_artifact_digests(&source).expect("artifact digests");
+    let workspace_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: workspace_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("governed-apply")
+        .await
+        .expect("channel");
+    let agent = store
+        .create_agent(channel.id, "governed", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("agent");
+    let app = router(store.clone(), runtime);
+
+    let (profile_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        json!({
+            "schemaVersion": 1,
+            "name": "agent-trusted-local",
+            "skills": [{
+                "logicalIdentity": "reviewer",
+                "source": {"kind": "local", "location": source.to_string_lossy()},
+                "contentDigest": digests.content_digest,
+                "manifestDigest": digests.manifest_digest,
+                "targetRuntime": "fake",
+                "installScope": "agent",
+                "installationMode": "copy",
+                "enabled": true,
+                "updatePolicy": "pinned",
+                "allowedSources": ["local"],
+                "riskPolicy": "trusted"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(profile_status, StatusCode::CREATED);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let (binding_status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({"profileId": profile_id, "scope": "agent", "scopeId": agent.id}),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+    let plan_request = json!({
+        "scope": "agent",
+        "scopeId": agent.id,
+        "agentId": agent.id,
+        "force": true
+    });
+    let (plan_status, plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        plan_request,
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::CREATED, "{plan}");
+    assert!(plan["preview"]["content"]["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().any(|action| action["action"] == "install")));
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "{approved}");
+    let approved_version = approved["plan"]["version"]
+        .as_i64()
+        .expect("approved version");
+
+    let (_, evidence_before_preview) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/evidence?force=true",
+        json!({}),
+    )
+    .await;
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert!(preview["staleReasons"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let (_, evidence_after_preview) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/evidence?force=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        evidence_before_preview["snapshotHash"],
+        evidence_after_preview["snapshotHash"]
+    );
+    let idempotency_key = preview["idempotencyKey"].as_str().expect("idempotency");
+    let nonce = preview["confirmationNonce"].as_str().expect("nonce");
+    let installed = workspace_root
+        .join(agent.id.to_string())
+        .join(".fake/skills/reviewer/SKILL.md");
+    assert!(!installed.exists());
+    let request = json!({
+        "expectedVersion": approved_version,
+        "idempotencyKey": idempotency_key,
+        "confirmationNonce": nonce,
+        "confirmHighRisk": preview["highRisk"].as_bool().unwrap_or(false)
+    });
+    let (apply_status, applied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        request.clone(),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["run"]["status"], "succeeded");
+    let run_id = applied["run"]["id"].as_str().expect("run id");
+    assert!(installed.exists());
+
+    let (retry_status, retried) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        request,
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["run"]["id"], run_id);
+
+    let (verify_status, verified) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/verify"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(verify_status, StatusCode::OK, "{verified}");
+    assert_eq!(verified["verified"], true);
+
+    let (rollback_preview_status, rollback_preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        rollback_preview_status,
+        StatusCode::OK,
+        "{rollback_preview}"
+    );
+    let rollback_key = rollback_preview["idempotencyKey"]
+        .as_str()
+        .expect("rollback idempotency");
+    let rollback_nonce = rollback_preview["confirmationNonce"]
+        .as_str()
+        .expect("rollback nonce");
+    let (rollback_status, rolled_back) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback"),
+        json!({
+            "idempotencyKey": rollback_key,
+            "confirmationNonce": rollback_nonce,
+            "confirmRollback": true
+        }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK, "{rolled_back}");
+    assert_eq!(rolled_back["rolledBack"], true);
+    assert!(!installed.exists());
+    let runs = store
+        .list_skill_governance_apply_runs(
+            cocli_store::SkillGovernanceScope::Agent,
+            &agent.id.to_string(),
+        )
+        .await
+        .expect("persisted runs");
+    assert_eq!(runs.len(), 1);
+    let persisted_run = &runs[0];
+    let persisted_lock = store
+        .get_skill_governance_lock(persisted_run.lock_id.expect("run lock id"))
+        .await
+        .expect("lock lookup")
+        .expect("persisted lock");
+    assert_eq!(persisted_lock.run_id, Some(persisted_run.id));
+    assert!(persisted_lock.released_at.is_some());
+    assert!(
+        store
+            .list_skill_governance_apply_audit("lock", persisted_lock.id)
+            .await
+            .expect("lock audit")
+            .iter()
+            .filter(|audit| audit.action == "renew")
+            .count()
+            >= 4
+    );
+    let actions = store
+        .list_skill_governance_apply_actions(persisted_run.id)
+        .await
+        .expect("persisted actions");
+    let action_audit = store
+        .list_skill_governance_apply_audit("action", actions[0].id)
+        .await
+        .expect("action audit");
+    for expected in [
+        "preflight",
+        "locked",
+        "staged",
+        "written",
+        "refreshing",
+        "verified",
+        "rolling_back",
+        "rolled_back",
+    ] {
+        assert!(
+            action_audit
+                .iter()
+                .any(|audit| audit.to_status.as_deref() == Some(expected)),
+            "missing journal boundary {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn expired_interrupted_apply_is_recovered_as_persisted_manual_recovery() {
+    let temp = tempdir().expect("temp directory");
+    let database = temp.path().join("governance-recovery.sqlite3");
+    let store = Store::open(&database).await.expect("store should open");
+    let boundaries = [
+        SkillGovernanceApplyActionStatus::Preflight,
+        SkillGovernanceApplyActionStatus::Locked,
+        SkillGovernanceApplyActionStatus::BackedUp,
+        SkillGovernanceApplyActionStatus::Staged,
+        SkillGovernanceApplyActionStatus::Written,
+        SkillGovernanceApplyActionStatus::LockfileWritten,
+        SkillGovernanceApplyActionStatus::Refreshing,
+        SkillGovernanceApplyActionStatus::RollingBack,
+    ];
+    let mut run_ids = Vec::new();
+    for (index, boundary) in boundaries.into_iter().enumerate() {
+        let scope_id = format!("machine-{index}");
+        let lock = store
+            .acquire_skill_governance_lock(
+                SkillGovernanceScope::Machine,
+                &scope_id,
+                "interrupted-process",
+                Some(4242),
+                None,
+                &format!("expired-lease-{index}"),
+                Utc::now() - ChronoDuration::seconds(1),
+            )
+            .await
+            .expect("expired lease record")
+            .lock;
+        let run = store
+            .create_skill_governance_apply_run(NewSkillGovernanceApplyRun {
+                scope: SkillGovernanceScope::Machine,
+                scope_id,
+                plan_id: None,
+                lock_id: Some(lock.id),
+                idempotency_key: format!("restart-recovery-{index}"),
+                nonce: format!("restart-nonce-{index}"),
+                observation_hash: "observation".to_owned(),
+                desired_hash: "desired".to_owned(),
+                lock_hash: "lock".to_owned(),
+                backup_path: None,
+                quarantine_path: None,
+                evidence: json!({"phase": "preflight", "applied": false}),
+            })
+            .await
+            .expect("run should persist");
+        let run = store
+            .transition_skill_governance_apply_run(
+                run.id,
+                run.version,
+                if boundary == SkillGovernanceApplyActionStatus::RollingBack {
+                    SkillGovernanceApplyRunStatus::RollingBack
+                } else {
+                    SkillGovernanceApplyRunStatus::Running
+                },
+                SkillGovernanceRecoveryStatus::NotRequired,
+                None,
+                None,
+                json!({"phase": boundary.as_str(), "applied": false}),
+                None,
+            )
+            .await
+            .expect("run boundary should persist");
+        let action = store
+            .create_skill_governance_apply_action(NewSkillGovernanceApplyAction {
+                run_id: run.id,
+                sequence: 0,
+                action_key: format!("boundary-{index}"),
+                request_hash: format!("request-{index}"),
+                backup_path: None,
+                quarantine_path: None,
+                evidence: json!({"phase": "pending"}),
+            })
+            .await
+            .expect("action should persist");
+        store
+            .transition_skill_governance_apply_action(
+                action.id,
+                action.version,
+                boundary,
+                None,
+                None,
+                None,
+                json!({"phase": boundary.as_str()}),
+                None,
+            )
+            .await
+            .expect("action boundary should persist");
+        run_ids.push(run.id);
+    }
+    store.close().await;
+
+    let reopened = Store::open(&database).await.expect("store should reopen");
+    let app = router(reopened.clone(), Arc::new(FakeRuntime));
+    for run_id in run_ids {
+        let (status, response) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/skills/governance/runs/{run_id}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["status"], "recovery_required");
+        assert!(response["recoveryReasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons
+                .iter()
+                .any(|reason| reason == "lease_expired_after_restart")));
+        let persisted = reopened
+            .get_skill_governance_apply_run(run_id)
+            .await
+            .expect("run lookup")
+            .expect("persisted run");
+        assert_eq!(
+            persisted.status,
+            SkillGovernanceApplyRunStatus::RecoveryRequired
+        );
+        assert_eq!(
+            reopened
+                .list_skill_governance_apply_actions(run_id)
+                .await
+                .expect("actions")
+                .first()
+                .expect("action")
+                .status,
+            SkillGovernanceApplyActionStatus::RecoveryRequired
+        );
+    }
 }
 
 #[tokio::test]

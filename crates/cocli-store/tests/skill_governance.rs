@@ -1,7 +1,10 @@
 use std::path::{Path, PathBuf};
 
+use chrono::{Duration, Utc};
 use cocli_store::{
-    NewSkillLockSnapshot, SkillGovernancePlanStatus, SkillGovernanceScope, Store, StoreError,
+    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, NewSkillLockSnapshot,
+    SkillGovernanceApplyActionStatus, SkillGovernanceApplyRunStatus, SkillGovernancePlanStatus,
+    SkillGovernanceRecoveryStatus, SkillGovernanceScope, Store, StoreError,
 };
 use serde_json::json;
 use sqlx_core::query::query;
@@ -295,4 +298,401 @@ async fn database_constraints_reject_unknown_scope_and_status_values() {
     .is_err());
     pool.close().await;
     remove_database(&database_path).await;
+}
+
+#[tokio::test]
+async fn scoped_locks_are_unique_durable_and_support_stale_takeover() {
+    let database_path = temporary_database_path();
+    let store = Store::open(&database_path)
+        .await
+        .expect("store should open");
+    let active = store
+        .acquire_skill_governance_lock(
+            SkillGovernanceScope::Workspace,
+            "workspace-lock",
+            "owner-a",
+            Some(123),
+            Some(Uuid::new_v4()),
+            "nonce-a",
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .expect("active lock should acquire");
+    assert!(!active.took_over_stale);
+    assert_eq!(active.lock.version, 1);
+    assert!(matches!(
+        store
+            .acquire_skill_governance_lock(
+                SkillGovernanceScope::Workspace,
+                "workspace-lock",
+                "owner-b",
+                Some(456),
+                None,
+                "nonce-b",
+                Utc::now() + Duration::minutes(5),
+            )
+            .await,
+        Err(StoreError::SkillGovernanceLockHeld { .. })
+    ));
+    let released = store
+        .release_skill_governance_lock(active.lock.id, active.lock.version, "nonce-a")
+        .await
+        .expect("current nonce releases");
+    assert!(released.released_at.is_some());
+
+    let expired = store
+        .acquire_skill_governance_lock(
+            SkillGovernanceScope::Workspace,
+            "workspace-lock",
+            "owner-expired",
+            None,
+            None,
+            "nonce-expired",
+            Utc::now() - Duration::seconds(1),
+        )
+        .await
+        .expect("expired lease can be created");
+    let takeover = store
+        .acquire_skill_governance_lock(
+            SkillGovernanceScope::Workspace,
+            "workspace-lock",
+            "owner-c",
+            Some(789),
+            None,
+            "nonce-c",
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .expect("expired lock should be taken over");
+    assert!(takeover.took_over_stale);
+    assert_eq!(takeover.lock.id, expired.lock.id);
+    assert_eq!(
+        takeover.lock.previous_owner.as_deref(),
+        Some("owner-expired")
+    );
+    assert_eq!(takeover.lock.takeover_count, 1);
+    store.close().await;
+
+    let reopened = Store::open(&database_path)
+        .await
+        .expect("store should reopen");
+    let loaded = reopened
+        .get_skill_governance_lock(takeover.lock.id)
+        .await
+        .expect("lock lookup should work")
+        .expect("lock should persist");
+    assert_eq!(loaded.owner, "owner-c");
+    assert_eq!(loaded.lease_nonce, "nonce-c");
+    reopened.close().await;
+    remove_database(&database_path).await;
+}
+
+#[tokio::test]
+async fn apply_runs_and_actions_are_idempotent_audited_and_persist_after_reopen() {
+    let database_path = temporary_database_path();
+    let store = Store::open(&database_path)
+        .await
+        .expect("store should open");
+    let plan = store
+        .create_skill_governance_plan(
+            SkillGovernanceScope::Machine,
+            "machine-a",
+            json!({"steps": ["apply"]}),
+            "obs-run",
+            "desired-run",
+        )
+        .await
+        .expect("plan should persist");
+    let lock = store
+        .acquire_skill_governance_lock(
+            SkillGovernanceScope::Machine,
+            "machine-a",
+            "applier",
+            Some(42),
+            None,
+            "lock-nonce",
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .expect("lock should acquire")
+        .lock;
+    let run_input = NewSkillGovernanceApplyRun {
+        scope: SkillGovernanceScope::Machine,
+        scope_id: "machine-a".to_owned(),
+        plan_id: Some(plan.id),
+        lock_id: Some(lock.id),
+        idempotency_key: "idem-1".to_owned(),
+        nonce: "run-nonce".to_owned(),
+        observation_hash: "obs-run".to_owned(),
+        desired_hash: "desired-run".to_owned(),
+        lock_hash: "lock-run".to_owned(),
+        backup_path: None,
+        quarantine_path: None,
+        evidence: json!({"createdBy": "test"}),
+    };
+    let run = store
+        .create_skill_governance_apply_run(run_input.clone())
+        .await
+        .expect("run should create");
+    assert_eq!(run.status, SkillGovernanceApplyRunStatus::Pending);
+    let attached_lock = store
+        .attach_skill_governance_lock_run(
+            lock.id,
+            lock.version,
+            "lock-nonce",
+            run.id,
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .expect("lock should attach to run");
+    assert_eq!(attached_lock.run_id, Some(run.id));
+    assert_eq!(
+        store
+            .create_skill_governance_apply_run(run_input.clone())
+            .await
+            .expect("same idempotent input returns existing")
+            .id,
+        run.id
+    );
+    let mut conflicting_run = run_input;
+    "different-nonce".clone_into(&mut conflicting_run.nonce);
+    assert!(matches!(
+        store
+            .create_skill_governance_apply_run(conflicting_run)
+            .await,
+        Err(StoreError::SkillGovernanceIdempotencyConflict { .. })
+    ));
+    let running = store
+        .transition_skill_governance_apply_run(
+            run.id,
+            run.version,
+            SkillGovernanceApplyRunStatus::Running,
+            SkillGovernanceRecoveryStatus::NotRequired,
+            Some("/tmp/run-backup"),
+            None,
+            json!({"phase": "running"}),
+            None,
+        )
+        .await
+        .expect("run should transition");
+    assert_eq!(running.attempts, 1);
+    assert_eq!(running.backup_path.as_deref(), Some("/tmp/run-backup"));
+
+    let action_input = NewSkillGovernanceApplyAction {
+        run_id: run.id,
+        sequence: 0,
+        action_key: "write-skill-lock".to_owned(),
+        request_hash: "request-hash".to_owned(),
+        backup_path: None,
+        quarantine_path: None,
+        evidence: json!({"queued": true}),
+    };
+    let action = store
+        .create_skill_governance_apply_action(action_input.clone())
+        .await
+        .expect("action should create");
+    assert_eq!(
+        store
+            .create_skill_governance_apply_action(action_input.clone())
+            .await
+            .expect("same action key returns existing")
+            .id,
+        action.id
+    );
+    let mut conflicting_action = action_input;
+    "different-request".clone_into(&mut conflicting_action.request_hash);
+    assert!(matches!(
+        store
+            .create_skill_governance_apply_action(conflicting_action)
+            .await,
+        Err(StoreError::SkillGovernanceIdempotencyConflict { .. })
+    ));
+    let preflight = store
+        .transition_skill_governance_apply_action(
+            action.id,
+            action.version,
+            SkillGovernanceApplyActionStatus::Preflight,
+            None,
+            Some("/tmp/action-backup"),
+            None,
+            json!({"phase": "preflight"}),
+            None,
+        )
+        .await
+        .expect("action should preflight");
+    assert_eq!(preflight.attempts, 1);
+    assert_eq!(preflight.backup_path.as_deref(), Some("/tmp/action-backup"));
+    let verified = store
+        .transition_skill_governance_apply_action(
+            action.id,
+            preflight.version,
+            SkillGovernanceApplyActionStatus::Verified,
+            Some("result-hash"),
+            None,
+            Some("/tmp/action-quarantine"),
+            json!({"phase": "verified"}),
+            None,
+        )
+        .await
+        .expect("action should verify");
+    assert_eq!(verified.result_hash.as_deref(), Some("result-hash"));
+    assert_eq!(
+        verified.quarantine_path.as_deref(),
+        Some("/tmp/action-quarantine")
+    );
+    let recovery_required = store
+        .transition_skill_governance_apply_run(
+            run.id,
+            running.version,
+            SkillGovernanceApplyRunStatus::RecoveryRequired,
+            SkillGovernanceRecoveryStatus::Pending,
+            None,
+            Some("/tmp/run-quarantine"),
+            json!({"phase": "recovery_required"}),
+            Some("verification failed"),
+        )
+        .await
+        .expect("run should record recovery requirement");
+    assert_eq!(
+        recovery_required.quarantine_path.as_deref(),
+        Some("/tmp/run-quarantine")
+    );
+    assert_eq!(
+        recovery_required.recovery_status,
+        SkillGovernanceRecoveryStatus::Pending
+    );
+    assert_eq!(
+        store
+            .list_skill_governance_apply_audit("run", run.id)
+            .await
+            .expect("run audit should list")
+            .len(),
+        3
+    );
+    assert_eq!(
+        store
+            .list_skill_governance_apply_actions(run.id)
+            .await
+            .expect("actions should list")
+            .len(),
+        1
+    );
+    store.close().await;
+
+    let reopened = Store::open(&database_path)
+        .await
+        .expect("store should reopen");
+    let loaded_run = reopened
+        .get_skill_governance_apply_run(run.id)
+        .await
+        .expect("run lookup should work")
+        .expect("run should survive reopen");
+    assert_eq!(
+        loaded_run.status,
+        SkillGovernanceApplyRunStatus::RecoveryRequired
+    );
+    assert_eq!(
+        loaded_run.last_error.as_deref(),
+        Some("verification failed")
+    );
+    let loaded_action = reopened
+        .get_skill_governance_apply_action(action.id)
+        .await
+        .expect("action lookup should work")
+        .expect("action should survive reopen");
+    assert_eq!(
+        loaded_action.status,
+        SkillGovernanceApplyActionStatus::Verified
+    );
+    assert_eq!(loaded_action.result_hash.as_deref(), Some("result-hash"));
+    reopened.close().await;
+    remove_database(&database_path).await;
+}
+
+#[tokio::test]
+async fn apply_state_transitions_require_current_versions() {
+    let store = Store::in_memory().await.expect("store should open");
+    let lock = store
+        .acquire_skill_governance_lock(
+            SkillGovernanceScope::Agent,
+            "agent-version",
+            "owner",
+            None,
+            None,
+            "nonce",
+            Utc::now() + Duration::minutes(5),
+        )
+        .await
+        .expect("lock should acquire")
+        .lock;
+    assert!(matches!(
+        store
+            .renew_skill_governance_lock(
+                lock.id,
+                lock.version + 1,
+                "nonce",
+                Utc::now() + Duration::minutes(10),
+            )
+            .await,
+        Err(StoreError::SkillGovernanceVersionConflict { .. })
+    ));
+    let run = store
+        .create_skill_governance_apply_run(NewSkillGovernanceApplyRun {
+            scope: SkillGovernanceScope::Agent,
+            scope_id: "agent-version".to_owned(),
+            plan_id: None,
+            lock_id: Some(lock.id),
+            idempotency_key: "idem-version".to_owned(),
+            nonce: "run-version".to_owned(),
+            observation_hash: "obs".to_owned(),
+            desired_hash: "desired".to_owned(),
+            lock_hash: "lock".to_owned(),
+            backup_path: None,
+            quarantine_path: None,
+            evidence: json!({}),
+        })
+        .await
+        .expect("run should create");
+    assert!(matches!(
+        store
+            .transition_skill_governance_apply_run(
+                run.id,
+                run.version + 1,
+                SkillGovernanceApplyRunStatus::Running,
+                SkillGovernanceRecoveryStatus::NotRequired,
+                None,
+                None,
+                json!({}),
+                None,
+            )
+            .await,
+        Err(StoreError::SkillGovernanceVersionConflict { .. })
+    ));
+    let action = store
+        .create_skill_governance_apply_action(NewSkillGovernanceApplyAction {
+            run_id: run.id,
+            sequence: 1,
+            action_key: "versioned-action".to_owned(),
+            request_hash: "request".to_owned(),
+            backup_path: None,
+            quarantine_path: None,
+            evidence: json!({}),
+        })
+        .await
+        .expect("action should create");
+    assert!(matches!(
+        store
+            .transition_skill_governance_apply_action(
+                action.id,
+                action.version + 1,
+                SkillGovernanceApplyActionStatus::Preflight,
+                None,
+                None,
+                None,
+                json!({}),
+                None,
+            )
+            .await,
+        Err(StoreError::SkillGovernanceVersionConflict { .. })
+    ));
 }

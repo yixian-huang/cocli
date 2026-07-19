@@ -22,8 +22,12 @@ pub use skills::{
 };
 mod skill_governance;
 pub use skill_governance::{
-    NewSkillLockSnapshot, SkillGovernancePlan, SkillGovernancePlanAudit, SkillGovernancePlanStatus,
-    SkillGovernanceScope, SkillLockSnapshot, SkillProfile, SkillProfileBinding,
+    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, NewSkillLockSnapshot,
+    SkillGovernanceApplyAction, SkillGovernanceApplyActionStatus, SkillGovernanceApplyAudit,
+    SkillGovernanceApplyRun, SkillGovernanceApplyRunStatus, SkillGovernanceLeaseAcquire,
+    SkillGovernancePlan, SkillGovernancePlanAudit, SkillGovernancePlanStatus,
+    SkillGovernanceRecoveryStatus, SkillGovernanceScope, SkillGovernanceScopedLock,
+    SkillLockSnapshot, SkillProfile, SkillProfileBinding,
 };
 mod workspace;
 pub use workspace::{
@@ -192,6 +196,28 @@ pub enum StoreError {
         /// Entity type being loaded or changed.
         entity: &'static str,
         /// Missing record identifier.
+        id: Uuid,
+    },
+    /// A non-expired skill-governance scoped lock is owned by another actor.
+    #[error(
+        "skill governance lock for {scope}:{scope_id} is held by {owner} until {lease_expires_at}"
+    )]
+    SkillGovernanceLockHeld {
+        /// Persisted scope.
+        scope: String,
+        /// Persisted scope identifier.
+        scope_id: String,
+        /// Current lock owner.
+        owner: String,
+        /// Lease expiry timestamp.
+        lease_expires_at: DateTime<Utc>,
+    },
+    /// An idempotency key was reused with different durable request identity fields.
+    #[error("skill governance idempotency conflict for {entity} {id}")]
+    SkillGovernanceIdempotencyConflict {
+        /// Entity type being created idempotently.
+        entity: &'static str,
+        /// Existing durable record identifier.
         id: Uuid,
     },
     /// A requested logical workspace does not exist.
@@ -3652,6 +3678,11 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             13,
             "skill_governance",
             include_str!("../migrations/0013_skill_governance.sql"),
+        ),
+        (
+            14,
+            "skill_governance_apply_state",
+            include_str!("../migrations/0014_skill_governance_apply_state.sql"),
         ),
     ] {
         let already_applied: bool =

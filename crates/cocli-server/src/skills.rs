@@ -239,6 +239,34 @@ pub(crate) async fn install(
     Ok(install_path)
 }
 
+pub(crate) fn governance_target(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+    skill_name: &str,
+) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+    validate_skill_name(skill_name)?;
+    if compatibility(registry, &agent.runtime) == RuntimeSkillCompatibility::Unsupported {
+        return Err(RuntimeError::Unsupported(format!(
+            "{} does not support skills",
+            agent.runtime
+        )));
+    }
+    let workspace = config.workspace_root.join(agent.id.to_string());
+    let search_root = workspace_skill_roots(registry, &agent.runtime, &workspace)
+        .into_iter()
+        .next()
+        .ok_or_else(|| {
+            RuntimeError::Unsupported(format!("{} exposes no workspace skill path", agent.runtime))
+        })?;
+    let entry_path = safe_child_path(&search_root, skill_name)?;
+    Ok(cocli_api::GovernanceSkillTarget {
+        scope_root: workspace,
+        search_root,
+        entry_path,
+    })
+}
+
 pub(crate) async fn uninstall(
     registry: &Arc<RuntimeRegistry>,
     config: &LocalRuntimeConfig,

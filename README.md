@@ -10,8 +10,8 @@ runtime session.
 
 **Status:** early alpha. The local server, SQLite state, web client, eight
 Runtime adapters, durable delivery, Tasks, Memory, Skills, runtime history,
-live execution events, search, state backup/restore, and read-only Skill
-governance are implemented. The persistent Agent/Channel model in
+live execution events, search, state backup/restore, and Skill governance are
+implemented. The persistent Agent/Channel model in
 [DESIGN.md](DESIGN.md) is landed; APIs, Workspace provider contracts,
 installers, and release guarantees are still evolving toward a public alpha.
 
@@ -88,7 +88,8 @@ Skill governance is available as a supporting Agent/Runtime diagnostic surface.
 The desktop Skills workspace keeps the existing local library and per-Agent
 install/uninstall flow, and adds read-only Runtime inventory, doctor details,
 versioned desired-state profiles, lockfile previews, drift classification, and
-dry-run governance plans.
+dry-run governance plans. It also supports a first governed apply path for
+approved, hash-matched, local or cocli-vendored Agent-scope Skill artifacts.
 
 The inventory API exposes machine-level endpoints at
 `/api/runtimes/skills/{inventory,doctor}` and Agent-level endpoints at
@@ -104,20 +105,29 @@ read-only Skill listing or session Skill contract, so cocli performs a bounded
 capability check, returns structured unsupported/manual governance evidence,
 and falls back to filesystem inventory.
 
-Phase 3A governance is read-only for runtime and filesystem Skill directories.
-It persists profiles, profile bindings, immutable lock snapshots, dry-run
-plans, and approval audit rows in SQLite; uses optimistic `expectedVersion`
-checks for mutable profile, binding, and plan decisions; computes stable
-SHA-256 hashes over deterministic observations, desired state, lock previews,
-and plans; and marks approvals stale when observation, desired-config, or lock
-hashes change.
+Governance persists profiles, profile bindings, immutable lock snapshots,
+dry-run plans, approval audit rows, apply runs, action journals, scoped locks,
+backup references, quarantine references, and recovery state in SQLite. Mutable
+profile, binding, and plan decisions use optimistic `expectedVersion` checks.
+Apply requires a non-stale approved plan, matching observation/desired/lock
+hashes, an idempotency key, and a current confirmation nonce for high-risk
+actions.
 
-Phase 3A does not apply changes, write lockfiles into workspaces, write runtime
-or global Skill directories, download or execute scripts, mutate app/runtime
-configuration, reload runtimes, or claim Session activation. Phase 3B owns
-apply/verify, backup/rollback, atomic writes, directory locks, runtime reload,
-and real session-effective adapters when stable Runtime contracts exist. See
-[docs/skill-governance-phase-3a.md](docs/skill-governance-phase-3a.md).
+The Phase 3B apply path is intentionally narrow. It can automatically copy
+digest-verified local, cocli-managed, or vendored artifacts into
+Runtime-derived Agent workspace Skill roots, symlink digest-verified local
+artifacts, and remove only cocli-managed entries or symlinks by moving them into
+quarantine. It does not accept arbitrary target paths, write user-global Skill
+directories, execute Skill scripts, clone repositories, resolve private
+credentials, download from a Registry or Marketplace, restart Runtime Sessions,
+or claim Session activation.
+Filesystem/runtime verification reports installed or configured-on-disk state;
+`sessionEffective` remains `unknown` without session-bound native evidence.
+
+See [docs/skill-governance-phase-3a.md](docs/skill-governance-phase-3a.md)
+for desired-state and dry-run planning, and
+[docs/skill-governance-phase-3b.md](docs/skill-governance-phase-3b.md) for
+approved apply, verification, rollback, and recovery semantics.
 
 ## Repository layout
 

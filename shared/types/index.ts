@@ -621,6 +621,23 @@ export type SkillGovernanceUpdatePolicy = 'pinned' | 'manual' | 'track_revision'
 export type SkillGovernanceRiskPolicy = 'trusted' | 'allowlisted' | 'approval_required' | 'blocked'
 export type SkillGovernancePlanStatus = 'draft' | 'approved' | 'rejected' | 'stale'
 export type SkillGovernanceLockfileBoundary = 'workspace_candidate' | 'store_only'
+export type SkillGovernanceRunStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'recovery_required'
+  | 'rolled_back'
+export type SkillGovernanceRunPhase =
+  | 'preview'
+  | 'lock'
+  | 'backup'
+  | 'quarantine'
+  | 'apply'
+  | 'verify'
+  | 'rollback'
+  | 'recovery'
 export type SkillGovernanceDriftKind =
   | 'missing'
   | 'extra'
@@ -901,6 +918,105 @@ export interface SkillGovernancePlanDecisionResponse {
   applied: boolean
   dryRun: boolean
   staleReasons: string[]
+}
+
+export interface SkillGovernanceApplyTarget {
+  planId: string
+  expectedVersion: number
+}
+
+export interface SkillGovernanceApplyConfirmation {
+  expectedVersion: number
+  idempotencyKey: string
+  confirmationNonce?: string
+  confirmHighRisk?: boolean
+}
+
+export interface SkillGovernanceRunEffect {
+  kind: 'lock' | 'backup' | 'quarantine' | 'verify' | 'rollback' | 'apply' | 'recovery'
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'skipped'
+  label: string
+  detail?: string
+  createdId?: string
+}
+
+export interface SkillGovernanceApplyPreviewResponse {
+  plan: SkillGovernancePlan
+  dryRun: boolean
+  applied: false
+  highRisk: boolean
+  confirmationRequired: boolean
+  nonceRequired: boolean
+  confirmationNonce?: string
+  idempotencyKey?: string
+  recoveryRequired: boolean
+  recoveryReasons: string[]
+  lockSnapshotId?: string
+  backupId?: string
+  quarantineId?: string
+  effects: SkillGovernanceRunEffect[]
+  actions: SkillGovernancePlanAction[]
+  staleReasons: string[]
+}
+
+export interface SkillGovernanceRun {
+  id: string
+  planId?: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  status: SkillGovernanceRunStatus
+  phase: SkillGovernanceRunPhase
+  progress: number
+  message?: string
+  dryRun: boolean
+  applied: boolean
+  highRisk: boolean
+  recoveryRequired: boolean
+  recoveryReasons: string[]
+  lockSnapshotId?: string
+  backupId?: string
+  quarantineId?: string
+  effects: SkillGovernanceRunEffect[]
+  actions: SkillGovernancePlanAction[]
+  startedAt?: string
+  updatedAt: string
+  completedAt?: string
+}
+
+export interface SkillGovernanceApplyResponse {
+  run: SkillGovernanceRun
+  applied: boolean
+  recoveryRequired: boolean
+}
+
+export interface SkillGovernanceVerifyResponse {
+  run: SkillGovernanceRun
+  verified: boolean
+  recoveryRequired: boolean
+  reasons: string[]
+}
+
+export interface SkillGovernanceRollbackPreviewResponse {
+  run: SkillGovernanceRun
+  dryRun: boolean
+  rollbackRequired: boolean
+  confirmationRequired: boolean
+  confirmationNonce: string
+  idempotencyKey: string
+  effects: SkillGovernanceRunEffect[]
+  actions: SkillGovernancePlanAction[]
+}
+
+export interface SkillGovernanceRollbackConfirmation {
+  idempotencyKey: string
+  confirmationNonce?: string
+  confirmRollback?: boolean
+}
+
+export interface SkillGovernanceRollbackResponse {
+  run: SkillGovernanceRun
+  rolledBack: boolean
+  recoveryRequired: boolean
 }
 
 // SkillFileEntry matches protocol.FileTreeEntry returned by ListInstalledSkillFiles

@@ -136,7 +136,7 @@ impl SkillSnapshotCoordinator {
         })
     }
 
-    async fn invalidate_agent(&self, agent_id: Uuid) {
+    pub(super) async fn invalidate_agent(&self, agent_id: Uuid) {
         self.cache
             .lock()
             .await

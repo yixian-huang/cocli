@@ -55,6 +55,8 @@ describe('LocalApp', () => {
     let skillInstalled = false
     let governanceProfileCreated = false
     let governanceBound = false
+    let governanceRunCreated = false
+    let governanceRunRolledBack = false
     let agentCreated = false
     let taskState: Array<{
       id: string
@@ -360,6 +362,230 @@ describe('LocalApp', () => {
           lockfileChanged: true,
           applied: false,
         }, 201)
+      }
+      if (path === '/api/skills/governance/plans/plan-1/apply/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          plan: {
+            id: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            plan: { schemaVersion: 1, dryRun: true, applied: false },
+            observationHash: 'observation-hash-1',
+            desiredHash: 'desired-hash-1',
+            status: 'approved',
+            version: 1,
+            createdAt: '2026-07-19T08:04:00Z',
+            updatedAt: '2026-07-19T08:04:00Z',
+          },
+          dryRun: true,
+          applied: false,
+          highRisk: true,
+          confirmationRequired: true,
+          nonceRequired: true,
+          confirmationNonce: 'nonce-123',
+          idempotencyKey: 'apply-key-1',
+          recoveryRequired: true,
+          recoveryReasons: ['backup required before applying high-risk changes'],
+          lockSnapshotId: 'lock-1',
+          backupId: 'backup-1',
+          quarantineId: 'quarantine-1',
+          effects: [{
+            kind: 'backup',
+            status: 'pending',
+            label: 'Create backup before apply',
+            createdId: 'backup-1',
+          }, {
+            kind: 'quarantine',
+            status: 'pending',
+            label: 'Quarantine replaced skill files',
+            createdId: 'quarantine-1',
+          }],
+          actions: [],
+          staleReasons: [],
+        })
+      }
+      if (path === '/api/skills/governance/plans/plan-1/apply' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          idempotencyKey: string
+          confirmationNonce?: string
+          confirmHighRisk?: boolean
+        }
+        if (body.idempotencyKey !== 'apply-key-1' || body.confirmationNonce !== 'nonce-123' || !body.confirmHighRisk) {
+          return jsonResponse({ error: 'missing explicit confirmation' }, 409)
+        }
+        governanceRunCreated = true
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'recovery_required',
+            phase: 'verify',
+            progress: 65,
+            message: 'Apply finished; verification requires recovery review',
+            dryRun: false,
+            applied: true,
+            highRisk: true,
+            recoveryRequired: true,
+            recoveryReasons: ['verification found session-effective unknown'],
+            lockSnapshotId: 'lock-1',
+            backupId: 'backup-1',
+            quarantineId: 'quarantine-1',
+            effects: [{
+              kind: 'lock',
+              status: 'succeeded',
+              label: 'Lock snapshot recorded',
+              createdId: 'lock-1',
+            }, {
+              kind: 'backup',
+              status: 'succeeded',
+              label: 'Backup created',
+              createdId: 'backup-1',
+            }, {
+              kind: 'quarantine',
+              status: 'succeeded',
+              label: 'Quarantine captured replaced files',
+              createdId: 'quarantine-1',
+            }],
+            actions: [],
+            startedAt: '2026-07-19T08:05:00Z',
+            updatedAt: '2026-07-19T08:05:10Z',
+          },
+          applied: true,
+          recoveryRequired: true,
+        })
+      }
+      if (path === '/api/skills/governance/runs?scope=machine&scopeId=machine' && !init?.method) {
+        return jsonResponse(governanceRunCreated ? [{
+          id: 'run-1',
+          planId: 'plan-1',
+          scope: 'machine',
+          scopeId: 'machine',
+          status: governanceRunRolledBack ? 'rolled_back' : 'recovery_required',
+          phase: governanceRunRolledBack ? 'rollback' : 'verify',
+          progress: governanceRunRolledBack ? 100 : 65,
+          message: governanceRunRolledBack ? 'Rollback complete' : 'Recovery review required',
+          dryRun: false,
+          applied: !governanceRunRolledBack,
+          highRisk: true,
+          recoveryRequired: !governanceRunRolledBack,
+          recoveryReasons: governanceRunRolledBack ? [] : ['verification found session-effective unknown'],
+          lockSnapshotId: 'lock-1',
+          backupId: 'backup-1',
+          quarantineId: 'quarantine-1',
+          effects: [{
+            kind: 'backup',
+            status: 'succeeded',
+            label: 'Backup created',
+            createdId: 'backup-1',
+          }],
+          actions: [],
+          startedAt: '2026-07-19T08:05:00Z',
+          updatedAt: '2026-07-19T08:05:10Z',
+        }] : [])
+      }
+      if (path === '/api/skills/governance/runs/run-1/verify' && init?.method === 'POST') {
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'recovery_required',
+            phase: 'verify',
+            progress: 72,
+            message: 'Verification requires recovery',
+            dryRun: false,
+            applied: true,
+            highRisk: true,
+            recoveryRequired: true,
+            recoveryReasons: ['session-effective unknown'],
+            effects: [],
+            actions: [],
+            updatedAt: '2026-07-19T08:06:00Z',
+          },
+          verified: false,
+          recoveryRequired: true,
+          reasons: ['session-effective unknown'],
+        })
+      }
+      if (path === '/api/skills/governance/runs/run-1/rollback/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'recovery_required',
+            phase: 'rollback',
+            progress: 72,
+            dryRun: false,
+            applied: true,
+            highRisk: true,
+            recoveryRequired: true,
+            recoveryReasons: ['session-effective unknown'],
+            effects: [],
+            actions: [],
+            updatedAt: '2026-07-19T08:06:00Z',
+          },
+          dryRun: true,
+          rollbackRequired: true,
+          confirmationRequired: true,
+          confirmationNonce: 'rollback-nonce-1',
+          idempotencyKey: 'rollback-key-1',
+          effects: [{
+            kind: 'rollback',
+            status: 'pending',
+            label: 'Restore from backup',
+            createdId: 'backup-1',
+          }],
+          actions: [],
+        })
+      }
+      if (path === '/api/skills/governance/runs/run-1/rollback' && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as {
+          idempotencyKey: string
+          confirmationNonce?: string
+          confirmRollback?: boolean
+        }
+        if (
+          body.idempotencyKey !== 'rollback-key-1'
+          || body.confirmationNonce !== 'rollback-nonce-1'
+          || !body.confirmRollback
+        ) {
+          return jsonResponse({ error: 'missing rollback confirmation' }, 409)
+        }
+        governanceRunRolledBack = true
+        return jsonResponse({
+          run: {
+            id: 'run-1',
+            planId: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            status: 'rolled_back',
+            phase: 'rollback',
+            progress: 100,
+            message: 'Rollback complete',
+            dryRun: false,
+            applied: false,
+            highRisk: true,
+            recoveryRequired: false,
+            recoveryReasons: [],
+            backupId: 'backup-1',
+            quarantineId: 'quarantine-1',
+            effects: [{
+              kind: 'rollback',
+              status: 'succeeded',
+              label: 'Restored from backup',
+              createdId: 'backup-1',
+            }],
+            actions: [],
+            updatedAt: '2026-07-19T08:07:00Z',
+          },
+          rolledBack: true,
+          recoveryRequired: false,
+        })
       }
       if (path === '/api/skills/governance/plans?scope=machine&scopeId=machine' && !init?.method) {
         return jsonResponse([])
@@ -919,6 +1145,28 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Preview dry-run plan' }))
     expect((await screen.findAllByText('approved but not applied')).length).toBeGreaterThan(0)
     expect((await screen.findAllByText(/manual/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Apply/Recovery' }))
+    fireEvent.click(screen.getAllByRole('button', { name: 'Preview apply' })[0])
+    expect((await screen.findAllByText('high risk')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText('recovery required')).length).toBeGreaterThan(0)
+    expect(await screen.findByText(/Backup created|Create backup before apply/)).toBeInTheDocument()
+    expect(screen.getByDisplayValue('apply-key-1')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('nonce-123')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText('I explicitly confirm this apply operation.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Apply with confirmation' }))
+    expect(await screen.findByText(/Apply finished/)).toBeInTheDocument()
+    expect(await screen.findByText(/Lock snapshot recorded/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Verify' }))
+    expect((await screen.findAllByText(/session-effective unknown/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Preview rollback' }))
+    expect(await screen.findByText(/Restore from backup/)).toBeInTheDocument()
+    const idempotencyInputs = screen.getAllByLabelText('Idempotency key')
+    fireEvent.change(idempotencyInputs[idempotencyInputs.length - 1], {
+      target: { value: 'rollback-key-1' },
+    })
+    fireEvent.click(screen.getByLabelText('I explicitly confirm this rollback operation.'))
+    fireEvent.click(screen.getByRole('button', { name: 'Rollback' }))
+    expect(await screen.findByText(/Rollback complete/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('tab', { name: 'Evidence' }))
     expect((await screen.findAllByText(/observed/)).length).toBeGreaterThan(0)
     expect(await screen.findByRole('heading', { name: 'Runtime × Skill inventory' })).toBeInTheDocument()

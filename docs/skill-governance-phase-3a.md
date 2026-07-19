@@ -192,17 +192,14 @@ Phase 3A is intentionally read-only outside SQLite governance tables:
 `writesRealDirectories: false`. `/api/skills/governance/plans` stores dry-run
 plans only. Plan approval changes plan status and audit rows, not Skill files.
 
-## Phase 3B ownership
+## Phase 3B handoff
 
-Phase 3B owns the write path:
+Phase 3B adds the first governed write path for approved plans. It remains
+narrow: automatic apply is limited to digest-verified local or cocli-vendored
+Agent-scope artifacts, Runtime-derived targets, scoped leases, backup,
+quarantine, atomic mutation, force-refresh verification, and CAS-safe rollback.
 
-- apply and verify operations;
-- backup and rollback;
-- atomic writes;
-- directory locks;
-- real lockfile writes;
-- Runtime reload;
-- stable Session-effective adapters when a Runtime exposes a session-bound
-  Skill contract.
-
-Until Phase 3B lands, governance plans are advisory and auditable only.
+Remote sources, private credentials, installation scripts, global writes,
+workspace lockfile files, Runtime reload, and Session-effective proof remain
+blocked/manual until stable source and Runtime contracts exist. See
+[docs/skill-governance-phase-3b.md](skill-governance-phase-3b.md).

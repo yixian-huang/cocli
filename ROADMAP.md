@@ -56,10 +56,19 @@ cross-platform release evidence.
   remains read-only, Cursor native Skill/session probing is explicitly
   unsupported by current stable CLI contracts, and no discovery result is
   treated as Session-effective proof.
-- **Phase 3B — governed apply and verification (planned):** implement
-  apply/verify execution, backup/rollback, atomic writes, directory locks,
-  runtime reload, real lockfile writes, and Session-effective adapters only for
-  Runtimes that expose stable session-bound Skill contracts.
+- **Phase 3B — governed apply and verification (complete for the safe local
+  subset):** apply only approved, non-stale plans whose observation, desired,
+  and lock hashes still match. The first automatic writer supports
+  Agent-scoped, Runtime-target-derived Skill entries for digest-verified local
+  or cocli-vendored copy actions and digest-verified local symlink actions,
+  Store-only lock snapshot journaling,
+  cocli-managed or symlink removal through quarantine, scoped leases, backup
+  manifests, staging plus atomic rename, force-refresh verification, CAS-safe
+  rollback, idempotent retries, and recovery-required state. Remote downloads,
+  private credentials, Git clone, Registry/Marketplace sources, installation
+  scripts, machine/workspace/global writes, Runtime reload, real workspace
+  lockfile writes, and Session-effective adapters remain blocked/manual until
+  stable source and Runtime contracts exist.
 
 This track remains subordinate to cocli's persistent Agent and Channel model;
 it is Runtime governance for multi-Agent desktop work, not a standalone Skill

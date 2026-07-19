@@ -20,13 +20,18 @@ import {
   type AgentSkill,
   type MachineSkillDoctor,
   type RuntimeSkillCompatibility,
+  type SkillGovernanceApplyPreviewResponse,
+  type SkillGovernanceApplyResponse,
   type SkillGovernanceBinding,
   type SkillGovernanceEffectiveDesired,
   type SkillGovernanceLockPreviewResponse,
   type SkillGovernanceObservation,
   type SkillGovernancePlanPreviewResponse,
   type SkillGovernanceProfile,
+  type SkillGovernanceRollbackPreviewResponse,
+  type SkillGovernanceRun,
   type SkillGovernanceScope,
+  type SkillGovernanceVerifyResponse,
   type SkillFileEntry,
   type SkillLibraryEntry,
 } from './api'
@@ -60,7 +65,7 @@ function compatibilityLabel(
   }
 }
 
-type GovernanceTab = 'profiles' | 'lock' | 'plan' | 'evidence'
+type GovernanceTab = 'profiles' | 'lock' | 'plan' | 'apply' | 'evidence'
 
 function shortHash(value: string | undefined): string {
   return value ? value.slice(0, 12) : 'unknown'
@@ -96,6 +101,11 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const [effectiveDesired, setEffectiveDesired] = useState<SkillGovernanceEffectiveDesired | null>(null)
   const [lockPreview, setLockPreview] = useState<SkillGovernanceLockPreviewResponse | null>(null)
   const [planPreview, setPlanPreview] = useState<SkillGovernancePlanPreviewResponse | null>(null)
+  const [applyPreview, setApplyPreview] = useState<SkillGovernanceApplyPreviewResponse | null>(null)
+  const [applyResult, setApplyResult] = useState<SkillGovernanceApplyResponse | null>(null)
+  const [verifyResult, setVerifyResult] = useState<SkillGovernanceVerifyResponse | null>(null)
+  const [rollbackPreview, setRollbackPreview] = useState<SkillGovernanceRollbackPreviewResponse | null>(null)
+  const [governanceRuns, setGovernanceRuns] = useState<SkillGovernanceRun[]>([])
   const [profileName, setProfileName] = useState('default-governance-profile')
   const [profileDescription, setProfileDescription] = useState('Safe default profile with no desired skills yet.')
   const [bindingProfileId, setBindingProfileId] = useState('')
@@ -107,6 +117,12 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const [actionFilter, setActionFilter] = useState('all')
   const [governanceRuntimeFilter, setGovernanceRuntimeFilter] = useState('all')
   const [governanceScopeFilter, setGovernanceScopeFilter] = useState('all')
+  const [applyIdempotencyKey, setApplyIdempotencyKey] = useState('')
+  const [applyNonce, setApplyNonce] = useState('')
+  const [applyConfirmed, setApplyConfirmed] = useState(false)
+  const [rollbackIdempotencyKey, setRollbackIdempotencyKey] = useState('')
+  const [rollbackNonce, setRollbackNonce] = useState('')
+  const [rollbackConfirmed, setRollbackConfirmed] = useState(false)
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
@@ -177,6 +193,27 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       && (governanceScopeFilter === 'all' || skill.scope === governanceScopeFilter)
     ))
   ), [governanceEvidence, governanceRuntimeFilter, governanceScopeFilter])
+  const currentPlan = planPreview?.plan ?? applyPreview?.plan ?? null
+  const currentRun = applyResult?.run
+    ?? verifyResult?.run
+    ?? rollbackPreview?.run
+    ?? governanceRuns[0]
+    ?? null
+  const latestEffects = rollbackPreview?.effects ?? currentRun?.effects ?? applyPreview?.effects ?? []
+  const applyRequiresNonce = applyPreview?.nonceRequired || applyPreview?.highRisk || false
+  const applyReady = Boolean(
+    applyPreview
+    && currentPlan
+    && applyConfirmed
+    && applyIdempotencyKey.trim()
+    && (!applyRequiresNonce || applyNonce.trim()),
+  )
+  const rollbackReady = Boolean(
+    rollbackPreview
+    && currentRun
+    && rollbackConfirmed
+    && rollbackIdempotencyKey.trim(),
+  )
 
   const refreshCatalog = useCallback(async () => {
     const response = await localApi.listSkillLibrary()
@@ -211,20 +248,23 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       workspaceId: governanceWorkspaceId.trim() || undefined,
       agentId: governanceAgentId.trim() || selectedAgentId || undefined,
     }
-    const [profiles, bindings, evidence, desired] = await Promise.all([
+    const scopeId = bindingScope === 'machine' ? 'machine' : bindingScopeId.trim()
+    const [profiles, bindings, evidence, desired, runs] = await Promise.all([
       localApi.listGovernanceProfiles(),
       localApi.listGovernanceBindings(),
       localApi.getGovernanceEvidence(force),
       localApi.getGovernanceEffectiveDesired(target),
+      localApi.listGovernanceRuns(scopeId ? { scope: bindingScope, scopeId } : undefined),
     ])
     setGovernanceProfiles(profiles)
     setGovernanceBindings(bindings)
     setGovernanceEvidence(evidence)
     setEffectiveDesired(desired)
+    setGovernanceRuns(runs)
     setBindingProfileId((current) => (
       profiles.some((profile) => profile.id === current) ? current : profiles[0]?.id ?? ''
     ))
-  }, [governanceAgentId, governanceWorkspaceId, selectedAgentId])
+  }, [bindingScope, bindingScopeId, governanceAgentId, governanceWorkspaceId, selectedAgentId])
 
   useEffect(() => {
     if (selectedAgentId && agents.some((agent) => agent.id === selectedAgentId)) return
@@ -478,6 +518,73 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     })
   }
 
+  function previewGovernanceApply() {
+    if (!currentPlan) return
+    void runAction('governance:preview-apply', async () => {
+      const preview = await localApi.previewGovernanceApply(currentPlan.id)
+      setApplyPreview(preview)
+      setApplyResult(null)
+      setVerifyResult(null)
+      setRollbackPreview(null)
+      setApplyIdempotencyKey(preview.idempotencyKey ?? '')
+      setApplyNonce(preview.confirmationNonce ?? '')
+      setApplyConfirmed(false)
+      setGovernanceTab('apply')
+      await refreshGovernance(true)
+    })
+  }
+
+  function applyGovernancePlan() {
+    if (!currentPlan || !applyReady) return
+    void runAction('governance:apply', async () => {
+      const result = await localApi.applyGovernancePlan(currentPlan.id, {
+        expectedVersion: currentPlan.version,
+        idempotencyKey: applyIdempotencyKey.trim(),
+        confirmationNonce: applyNonce.trim() || undefined,
+        confirmHighRisk: applyPreview?.highRisk || undefined,
+      })
+      setApplyResult(result)
+      await refreshGovernance(true)
+    })
+  }
+
+  function verifyGovernanceRun() {
+    if (!currentRun) return
+    void runAction('governance:verify', async () => {
+      setVerifyResult(await localApi.verifyGovernanceRun(currentRun.id))
+      await refreshGovernance(true)
+    })
+  }
+
+  function previewGovernanceRollback() {
+    if (!currentRun) return
+    void runAction('governance:preview-rollback', async () => {
+      const preview = await localApi.previewGovernanceRollback(currentRun.id)
+      setRollbackPreview(preview)
+      setRollbackIdempotencyKey(preview.idempotencyKey)
+      setRollbackNonce(preview.confirmationNonce)
+      setRollbackConfirmed(false)
+      setGovernanceTab('apply')
+    })
+  }
+
+  function rollbackGovernanceRun() {
+    if (!currentRun || !rollbackReady) return
+    void runAction('governance:rollback', async () => {
+      const result = await localApi.rollbackGovernanceRun(currentRun.id, {
+        idempotencyKey: rollbackIdempotencyKey.trim(),
+        confirmationNonce: rollbackNonce.trim() || undefined,
+        confirmRollback: true,
+      })
+      setApplyResult({
+        run: result.run,
+        applied: result.run.applied,
+        recoveryRequired: result.recoveryRequired,
+      })
+      await refreshGovernance(true)
+    })
+  }
+
   const selectedCompatibility = selectedAgent
     ? compatibility[selectedAgent.runtime]
     : undefined
@@ -574,6 +681,12 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
           {planPreview?.plan.status === 'approved' && !planPreview.applied && (
             <span className="governance-pill warning">{t('skillsGovernanceApprovedNotApplied')}</span>
           )}
+          {(applyPreview?.highRisk || currentRun?.highRisk) && (
+            <span className="governance-pill danger">{t('skillsGovernanceHighRisk')}</span>
+          )}
+          {(applyPreview?.recoveryRequired || currentRun?.recoveryRequired || verifyResult?.recoveryRequired) && (
+            <span className="governance-pill danger">{t('skillsGovernanceRecoveryRequired')}</span>
+          )}
           {lockPreview && (
             <span className={`governance-pill ${lockPreview.lockfileChanged ? 'warning' : 'ok'}`}>
               {lockPreview.lockfileChanged
@@ -593,6 +706,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
             ['profiles', t('skillsGovernanceProfiles')],
             ['lock', t('skillsGovernanceLockDrift')],
             ['plan', t('skillsGovernancePlanPreview')],
+            ['apply', t('skillsGovernanceApplyRecovery')],
             ['evidence', t('skillsGovernanceEvidence')],
           ] as const).map(([key, label]) => (
             <button
@@ -760,6 +874,9 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
             <button type="button" onClick={previewGovernancePlan} disabled={!governanceRequest.scopeId || action === 'governance:preview-plan'}>
               {t('skillsGovernancePreviewPlan')}
             </button>
+            <button type="button" onClick={previewGovernanceApply} disabled={!currentPlan || action === 'governance:preview-apply'}>
+              {t('skillsGovernancePreviewApply')}
+            </button>
             <button
               type="button"
               onClick={() => void runAction('governance:evidence', () => refreshGovernance(true))}
@@ -814,6 +931,175 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
                 {planPreview.plan.plan.staleReasons.map((reason) => <p key={reason}>{reason}</p>)}
               </div>
             ) : null}
+          </div>
+        )}
+
+        {governanceTab === 'apply' && (
+          <div className="governance-apply-layout">
+            <section className="governance-list">
+              <h3>{t('skillsGovernanceApplyRecovery')}</h3>
+              {!currentPlan && <p>{t('skillsGovernanceNoApplyPlan')}</p>}
+              {currentPlan && (
+                <div className="governance-status-row">
+                  <span className="governance-pill">{currentPlan.status}</span>
+                  <span className="governance-pill">{t('skillsGovernancePlanPreview')}: {shortHash(currentPlan.id)}</span>
+                  <span className="governance-pill">{t('skillsGovernanceStatus')}: v{currentPlan.version}</span>
+                </div>
+              )}
+              {applyPreview && (
+                <>
+                  <div className="governance-status-row">
+                    <span className="governance-pill">{applyPreview.dryRun ? t('skillsGovernanceDryRun') : t('skillsGovernanceStatus')}</span>
+                    <span className={`governance-pill ${applyPreview.highRisk ? 'danger' : 'ok'}`}>
+                      {applyPreview.highRisk ? t('skillsGovernanceHighRisk') : t('skillsGovernanceRiskAccepted')}
+                    </span>
+                    <span className="governance-pill">{applyPreview.applied ? t('skillsGovernanceApplied') : t('skillsGovernanceNotApplied')}</span>
+                    {applyPreview.lockSnapshotId && <span className="governance-pill">lock {shortHash(applyPreview.lockSnapshotId)}</span>}
+                    {applyPreview.backupId && <span className="governance-pill">backup {shortHash(applyPreview.backupId)}</span>}
+                    {applyPreview.quarantineId && <span className="governance-pill">quarantine {shortHash(applyPreview.quarantineId)}</span>}
+                  </div>
+                  {applyPreview.recoveryReasons.length > 0 && (
+                    <div className="governance-warning-block">
+                      <strong>{t('skillsGovernanceRecoveryRequired')}</strong>
+                      {applyPreview.recoveryReasons.map((reason) => <p key={reason}>{reason}</p>)}
+                    </div>
+                  )}
+                </>
+              )}
+              <button
+                type="button"
+                onClick={previewGovernanceApply}
+                disabled={!currentPlan || action === 'governance:preview-apply'}
+              >
+                {t('skillsGovernancePreviewApply')}
+              </button>
+              {applyPreview && (
+                <div className="governance-confirmation">
+                  <label htmlFor="governance-apply-idempotency">
+                    {t('skillsGovernanceIdempotencyKey')}
+                  </label>
+                  <input
+                    id="governance-apply-idempotency"
+                    value={applyIdempotencyKey}
+                    onChange={(event) => setApplyIdempotencyKey(event.target.value)}
+                    placeholder="governance-apply-..."
+                  />
+                  <label htmlFor="governance-apply-nonce">
+                    {applyRequiresNonce
+                      ? t('skillsGovernanceHighRiskNonce')
+                      : t('skillsGovernanceConfirmationNonce')}
+                  </label>
+                  <input
+                    id="governance-apply-nonce"
+                    value={applyNonce}
+                    onChange={(event) => setApplyNonce(event.target.value)}
+                    placeholder={applyPreview.confirmationNonce ? t('skillsGovernanceNonceProvided') : 'nonce'}
+                  />
+                  <label className="governance-check">
+                    <input
+                      type="checkbox"
+                      checked={applyConfirmed}
+                      onChange={(event) => setApplyConfirmed(event.target.checked)}
+                    />
+                    <span>{t('skillsGovernanceExplicitConfirm')}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="danger-action"
+                    onClick={applyGovernancePlan}
+                    disabled={!applyReady || action === 'governance:apply'}
+                  >
+                    {t('skillsGovernanceApply')}
+                  </button>
+                </div>
+              )}
+            </section>
+
+            <section className="governance-list">
+              <h3>{t('skillsGovernanceRunProgress')}</h3>
+              {!currentRun && <p>{t('skillsGovernanceNoRuns')}</p>}
+              {currentRun && (
+                <>
+                  <div className="governance-run-heading">
+                    <strong>{currentRun.phase} · {currentRun.status}</strong>
+                    <span>{currentRun.message ?? t('skillsGovernanceRunProgress')}</span>
+                    <progress max="100" value={Math.max(0, Math.min(100, currentRun.progress))} />
+                  </div>
+                  <div className="governance-status-row">
+                    <span className="governance-pill">{currentRun.applied ? t('skillsGovernanceApplied') : t('skillsGovernanceNotApplied')}</span>
+                    {currentRun.backupId && <span className="governance-pill">backup {shortHash(currentRun.backupId)}</span>}
+                    {currentRun.quarantineId && <span className="governance-pill">quarantine {shortHash(currentRun.quarantineId)}</span>}
+                    {currentRun.lockSnapshotId && <span className="governance-pill">lock {shortHash(currentRun.lockSnapshotId)}</span>}
+                    {currentRun.recoveryRequired && <span className="governance-pill danger">{t('skillsGovernanceRecoveryRequired')}</span>}
+                  </div>
+                  {currentRun.recoveryReasons.map((reason) => <p key={reason}>{reason}</p>)}
+                  <div className="governance-status-row">
+                    <button type="button" onClick={verifyGovernanceRun} disabled={action === 'governance:verify'}>
+                      {t('skillsGovernanceVerify')}
+                    </button>
+                    <button type="button" onClick={previewGovernanceRollback} disabled={action === 'governance:preview-rollback'}>
+                      {t('skillsGovernancePreviewRollback')}
+                    </button>
+                  </div>
+                </>
+              )}
+              {verifyResult && (
+                <div className={`governance-warning-block ${verifyResult.verified ? 'ok' : ''}`}>
+                  <strong>{verifyResult.verified ? t('skillsGovernanceVerified') : t('skillsGovernanceRecoveryRequired')}</strong>
+                  {verifyResult.reasons.map((reason) => <p key={reason}>{reason}</p>)}
+                </div>
+              )}
+              {rollbackPreview && (
+                <div className="governance-confirmation">
+                  <div className="governance-status-row">
+                    <span className="governance-pill">{rollbackPreview.dryRun ? t('skillsGovernanceDryRun') : t('skillsGovernanceStatus')}</span>
+                    <span className="governance-pill warning">{t('skillsGovernanceRollback')}</span>
+                  </div>
+                  <label htmlFor="governance-rollback-idempotency">{t('skillsGovernanceIdempotencyKey')}</label>
+                  <input
+                    id="governance-rollback-idempotency"
+                    value={rollbackIdempotencyKey}
+                    onChange={(event) => setRollbackIdempotencyKey(event.target.value)}
+                    placeholder="governance-rollback-..."
+                  />
+                  <label htmlFor="governance-rollback-nonce">{t('skillsGovernanceConfirmationNonce')}</label>
+                  <input
+                    id="governance-rollback-nonce"
+                    value={rollbackNonce}
+                    onChange={(event) => setRollbackNonce(event.target.value)}
+                    placeholder="nonce"
+                  />
+                  <label className="governance-check">
+                    <input
+                      type="checkbox"
+                      checked={rollbackConfirmed}
+                      onChange={(event) => setRollbackConfirmed(event.target.checked)}
+                    />
+                    <span>{t('skillsGovernanceExplicitConfirmRollback')}</span>
+                  </label>
+                  <button
+                    type="button"
+                    className="danger-action"
+                    onClick={rollbackGovernanceRun}
+                    disabled={!rollbackReady || action === 'governance:rollback'}
+                  >
+                    {t('skillsGovernanceRollback')}
+                  </button>
+                </div>
+              )}
+            </section>
+
+            <section className="governance-list full">
+              <h3>{t('skillsGovernanceRunEffects')}</h3>
+              {latestEffects.length === 0 && <p>{t('skillsGovernanceNoEffects')}</p>}
+              {latestEffects.map((effect, index) => (
+                <article key={`${effect.kind}:${effect.createdId ?? index}`}>
+                  <strong>{effect.kind} · {effect.status}</strong>
+                  <span>{effect.label}{effect.createdId ? ` · ${shortHash(effect.createdId)}` : ''}</span>
+                  {effect.detail && <p>{effect.detail}</p>}
+                </article>
+              ))}
+            </section>
           </div>
         )}
 

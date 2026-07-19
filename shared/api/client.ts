@@ -17,6 +17,9 @@ import type {
   OverflowStatsEntry,
   ResponderMode,
   ResponderRole,
+  SkillGovernanceApplyConfirmation,
+  SkillGovernanceApplyPreviewResponse,
+  SkillGovernanceApplyResponse,
   SkillGovernanceBinding,
   SkillGovernanceEffectiveDesired,
   SkillGovernanceLockPreviewResponse,
@@ -28,7 +31,12 @@ import type {
   SkillGovernancePreviewRequest,
   SkillGovernanceProfile,
   SkillGovernanceProfileDocument,
+  SkillGovernanceRollbackConfirmation,
+  SkillGovernanceRollbackPreviewResponse,
+  SkillGovernanceRollbackResponse,
+  SkillGovernanceRun,
   SkillGovernanceScope,
+  SkillGovernanceVerifyResponse,
   SkillFileEntry,
   SkillLibraryEntry,
   SkillLibraryFileMeta,
@@ -720,6 +728,48 @@ export const skillGovernance = {
       {
         method: 'POST',
         body: JSON.stringify({ expectedVersion }),
+      },
+    ),
+  previewApply: (planId: string) =>
+    request<SkillGovernanceApplyPreviewResponse>(
+      `/api/skills/governance/plans/${planId}/apply/preview`,
+      { method: 'POST' },
+    ),
+  applyPlan: (planId: string, input: SkillGovernanceApplyConfirmation) =>
+    request<SkillGovernanceApplyResponse>(
+      `/api/skills/governance/plans/${planId}/apply`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
+      },
+    ),
+  listRuns: (input?: { scope?: SkillGovernanceScope; scopeId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.scopeId) params.set('scopeId', input.scopeId)
+    const query = params.toString()
+    return request<SkillGovernanceRun[]>(
+      `/api/skills/governance/runs${query ? `?${query}` : ''}`,
+    )
+  },
+  getRun: (runId: string) =>
+    request<SkillGovernanceRun>(`/api/skills/governance/runs/${runId}`),
+  verifyRun: (runId: string) =>
+    request<SkillGovernanceVerifyResponse>(
+      `/api/skills/governance/runs/${runId}/verify`,
+      { method: 'POST' },
+    ),
+  previewRollback: (runId: string) =>
+    request<SkillGovernanceRollbackPreviewResponse>(
+      `/api/skills/governance/runs/${runId}/rollback/preview`,
+      { method: 'POST' },
+    ),
+  rollbackRun: (runId: string, input: SkillGovernanceRollbackConfirmation) =>
+    request<SkillGovernanceRollbackResponse>(
+      `/api/skills/governance/runs/${runId}/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify(input),
       },
     ),
 }

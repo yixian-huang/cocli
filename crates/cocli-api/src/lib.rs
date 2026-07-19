@@ -1,6 +1,7 @@
 //! Local HTTP API and runtime-neutral application service.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,10 +25,30 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex, Notify};
 use uuid::Uuid;
 
+mod skill_apply;
+mod skill_apply_http;
 mod skill_governance;
 mod skill_governance_http;
 mod skill_http;
 mod skill_import;
+
+/// Deterministic content and manifest digests used by trusted local Skill
+/// profiles. This helper is read-only and never executes artifact content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceArtifactDigests {
+    pub content_digest: String,
+    pub manifest_digest: String,
+}
+
+/// Computes Phase 3B digests for a local Skill directory without mutating it.
+pub fn governance_artifact_digests(root: &FsPath) -> Result<GovernanceArtifactDigests, String> {
+    let artifact = skill_apply::load_local_artifact(root)?;
+    Ok(GovernanceArtifactDigests {
+        content_digest: artifact.content_digest,
+        manifest_digest: artifact.manifest_digest,
+    })
+}
 
 /// Reconciles SQLite-managed skill installs with runtime workspace files.
 ///
@@ -286,6 +307,18 @@ pub struct RuntimeSkillFinding {
     pub duplicate: bool,
     pub shadowed: bool,
     pub issues: Vec<RuntimeSkillIssue>,
+}
+
+/// Runtime-owned canonical destination for one governed Agent Skill.
+///
+/// The governance applier never accepts an arbitrary target path from an API
+/// caller. It asks the Runtime adapter to derive the search root and entry from
+/// the Agent workspace and logical Skill name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernanceSkillTarget {
+    pub scope_root: PathBuf,
+    pub search_root: PathBuf,
+    pub entry_path: PathBuf,
 }
 
 /// Filesystem/native-probe report returned by the runtime boundary.
@@ -819,6 +852,18 @@ pub trait RuntimeService: Send + Sync {
         })
     }
 
+    /// Resolves a canonical Agent-workspace target without creating it or
+    /// stopping/restarting a Runtime Session.
+    async fn governance_skill_target(
+        &self,
+        _agent: &Agent,
+        _skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed Agent Skill target".to_owned(),
+        ))
+    }
+
     /// Atomically installs or refreshes one library skill in the agent workspace.
     async fn install_skill(
         &self,
@@ -1298,6 +1343,7 @@ fn router_with_delivery_config_and_live_events(
             authorize_bridge_request,
         ));
     Router::new()
+        .merge(skill_apply_http::router())
         .merge(skill_governance_http::router())
         .merge(skill_http::router())
         .merge(bridge_router)
@@ -4162,7 +4208,9 @@ impl From<StoreError> for ApiError {
             }
             StoreError::SkillGovernanceNotFound { .. } => Some(StatusCode::NOT_FOUND),
             StoreError::SkillGovernanceVersionConflict { .. }
-            | StoreError::SkillGovernanceTransitionConflict { .. } => Some(StatusCode::CONFLICT),
+            | StoreError::SkillGovernanceTransitionConflict { .. }
+            | StoreError::SkillGovernanceLockHeld { .. }
+            | StoreError::SkillGovernanceIdempotencyConflict { .. } => Some(StatusCode::CONFLICT),
             StoreError::InvalidSkillName(_)
             | StoreError::InvalidSkillFilePath(_)
             | StoreError::InvalidSkillFileSize { .. } => Some(StatusCode::BAD_REQUEST),
