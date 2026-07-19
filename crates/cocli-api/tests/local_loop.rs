@@ -10,8 +10,9 @@ use axum::http::{Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
     reconcile_skill_state, router, router_with_delivery_config, DeliveryConfig, RuntimeError,
-    RuntimeInfo, RuntimeService, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent,
-    RuntimeSkillFileEntry,
+    RuntimeInfo, RuntimeService, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence,
+    RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection,
+    RuntimeSkillSearchPath,
 };
 use cocli_store::{
     Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillLibrary, SkillLibraryFile,
@@ -26,6 +27,124 @@ struct FakeRuntime;
 
 #[derive(Debug)]
 struct FailingStartRuntime;
+
+#[derive(Debug, Default)]
+struct SnapshotSkillRuntime {
+    agent_inspections: AtomicUsize,
+    machine_inspections: AtomicUsize,
+    delay: Duration,
+}
+
+impl SnapshotSkillRuntime {
+    fn inspection(runtime: &str, scope: &str) -> RuntimeSkillInspection {
+        let path = format!("/tmp/{runtime}/shared-skill/SKILL.md");
+        let evidence = RuntimeSkillEvidence {
+            source: "filesystem".to_owned(),
+            detail: "test search paths".to_owned(),
+            proves_session_visibility: false,
+        };
+        RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: RuntimeSkillCompatibility::Supported,
+            evidence: evidence.clone(),
+            search_paths: vec![RuntimeSkillSearchPath {
+                path: format!("/tmp/{runtime}"),
+                scope: scope.to_owned(),
+                exists: true,
+                readable: true,
+                symlink: false,
+                resolved_path: None,
+                issue: None,
+            }],
+            skills: vec![RuntimeSkillFinding {
+                fingerprint: "shared-skill-fingerprint".to_owned(),
+                skill: RuntimeSkill {
+                    name: "shared-skill".to_owned(),
+                    display_name: "Shared Skill".to_owned(),
+                    description: "test skill".to_owned(),
+                    user_invocable: true,
+                    skill_type: scope.to_owned(),
+                    path: path.clone(),
+                    install_path: None,
+                },
+                runtime: runtime.to_owned(),
+                scope: scope.to_owned(),
+                source_path: path,
+                resolved_path: None,
+                presence: "discovered".to_owned(),
+                evidence,
+                enabled: None,
+                valid: Some(true),
+                duplicate: false,
+                shadowed: false,
+                issues: Vec::new(),
+            }],
+            issues: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeService for SnapshotSkillRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        vec![RuntimeInfo {
+            name: "fake".to_owned(),
+            installed: true,
+            binary: None,
+            version: Some("test".to_owned()),
+            models: Vec::new(),
+            capabilities: vec!["skills:supported".to_owned()],
+            unavailable_reason: None,
+        }]
+    }
+
+    async fn reply(&self, _agent: &Agent, _message: &Message) -> Result<String, RuntimeError> {
+        Ok(String::new())
+    }
+
+    fn skill_compatibility(&self, runtime: &str) -> RuntimeSkillCompatibility {
+        if runtime == "chatrs" {
+            RuntimeSkillCompatibility::Unsupported
+        } else {
+            RuntimeSkillCompatibility::Supported
+        }
+    }
+
+    async fn list_skills(&self, agent: &Agent) -> Result<Vec<RuntimeSkill>, RuntimeError> {
+        Ok(Self::inspection(&agent.runtime, "workspace")
+            .skills
+            .into_iter()
+            .map(|finding| finding.skill)
+            .collect())
+    }
+
+    async fn inspect_skills(&self, agent: &Agent) -> Result<RuntimeSkillInspection, RuntimeError> {
+        self.agent_inspections.fetch_add(1, Ordering::SeqCst);
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        if agent.name == "broken" {
+            return Err(RuntimeError::Delivery(
+                "simulated agent probe failure".to_owned(),
+            ));
+        }
+        Ok(Self::inspection(&agent.runtime, "workspace"))
+    }
+
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<RuntimeSkillInspection, RuntimeError> {
+        self.machine_inspections.fetch_add(1, Ordering::SeqCst);
+        if runtime == "grok" {
+            return Err(RuntimeError::Delivery(
+                "simulated runtime probe failure".to_owned(),
+            ));
+        }
+        Ok(Self::inspection(runtime, "user"))
+    }
+}
 
 #[async_trait]
 impl RuntimeService for FakeRuntime {
@@ -1056,6 +1175,144 @@ async fn concurrent_duplicate_skill_install_mutates_runtime_once() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn ordinary_agent_skill_list_does_not_run_heavy_inspection() {
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store.create_channel("skills-list").await.expect("channel");
+    let agent = store
+        .create_agent(channel.id, "quick-list", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("agent");
+    let runtime = Arc::new(SnapshotSkillRuntime::default());
+    let app = router(store, runtime.clone());
+
+    let (status, body) = json_request(
+        app,
+        "GET",
+        &format!("/api/agents/{}/skills", agent.id),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["skills"].as_array().map(Vec::len), Some(1));
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn skill_snapshots_coalesce_cache_and_force_refresh() {
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("skill-snapshots")
+        .await
+        .expect("channel");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "snapshot-agent",
+            "fake",
+            None,
+            AgentStatus::Stopped,
+        )
+        .await
+        .expect("agent");
+    let runtime = Arc::new(SnapshotSkillRuntime {
+        delay: Duration::from_millis(50),
+        ..SnapshotSkillRuntime::default()
+    });
+    let app = router(store, runtime.clone());
+    let uri = format!("/api/agents/{}/skills/inventory", agent.id);
+
+    let first = json_request(app.clone(), "GET", &uri, json!({}));
+    let second = json_request(app.clone(), "GET", &uri, json!({}));
+    let ((first_status, first_body), (second_status, second_body)) = tokio::join!(first, second);
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        (
+            first_body["cacheStatus"].as_str(),
+            second_body["cacheStatus"].as_str()
+        ),
+        (Some("fresh"), Some("cached")) | (Some("cached"), Some("fresh"))
+    ));
+
+    let (cached_status, cached) = json_request(app.clone(), "GET", &uri, json!({})).await;
+    assert_eq!(cached_status, StatusCode::OK);
+    assert_eq!(cached["cacheStatus"], "cached");
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 1);
+
+    let doctor_uri = format!("/api/agents/{}/skills/doctor", agent.id);
+    let (doctor_status, doctor) = json_request(app.clone(), "GET", &doctor_uri, json!({})).await;
+    assert_eq!(doctor_status, StatusCode::OK);
+    assert_eq!(doctor["summary"]["runtimeCount"], 1);
+
+    let force_uri = format!("{uri}?force=true");
+    let first_force = json_request(app.clone(), "GET", &force_uri, json!({}));
+    let second_force = json_request(app, "GET", &force_uri, json!({}));
+    let ((first_status, _), (second_status, _)) = tokio::join!(first_force, second_force);
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn machine_skill_inventory_exists_without_agents_and_isolates_failures() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(SnapshotSkillRuntime::default());
+    let app = router(store.clone(), runtime);
+
+    let (inventory_status, inventory) = json_request(
+        app.clone(),
+        "GET",
+        "/api/runtimes/skills/inventory",
+        json!({}),
+    )
+    .await;
+    assert_eq!(inventory_status, StatusCode::OK);
+    assert!(inventory["observedAt"].is_string());
+    assert_eq!(inventory["agents"].as_array().map(Vec::len), Some(0));
+
+    let (empty_status, empty) =
+        json_request(app.clone(), "GET", "/api/runtimes/skills/doctor", json!({})).await;
+    assert_eq!(empty_status, StatusCode::OK);
+    assert_eq!(empty["agents"].as_array().map(Vec::len), Some(0));
+    assert!(empty["runtimes"].as_array().is_some_and(|runtimes| runtimes
+        .iter()
+        .any(|runtime| { runtime["runtime"] == "fake" && runtime["skillCount"] == 1 })));
+    assert!(empty["diagnostics"]
+        .as_array()
+        .is_some_and(|diagnostics| diagnostics.iter().any(|item| item["runtime"] == "grok")));
+
+    let channel = store
+        .create_channel("partial-skills")
+        .await
+        .expect("channel");
+    store
+        .create_agent(channel.id, "healthy", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("healthy agent");
+    store
+        .create_agent(channel.id, "broken", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("broken agent");
+
+    let (status, body) = json_request(
+        app,
+        "GET",
+        "/api/runtimes/skills/doctor?force=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["agents"].as_array().map(Vec::len), Some(1));
+    assert!(body["diagnostics"]
+        .as_array()
+        .is_some_and(|diagnostics| diagnostics
+            .iter()
+            .any(|item| { item["subject"] == "agent" && item["agentName"] == "broken" })));
 }
 
 #[tokio::test]

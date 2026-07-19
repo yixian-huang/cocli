@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use chrono::Utc;
 use cocli_api::{
     RuntimeError, RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence,
     RuntimeSkillFileContent, RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection,
@@ -38,7 +39,7 @@ pub(crate) async fn list(
     config: &LocalRuntimeConfig,
     agent: &Agent,
 ) -> Result<Vec<RuntimeSkill>, RuntimeError> {
-    Ok(inspect(registry, config, agent)
+    Ok(inspect_agent(registry, config, agent, false)
         .await?
         .skills
         .into_iter()
@@ -50,6 +51,15 @@ pub(crate) async fn inspect(
     registry: &Arc<RuntimeRegistry>,
     config: &LocalRuntimeConfig,
     agent: &Agent,
+) -> Result<RuntimeSkillInspection, RuntimeError> {
+    inspect_agent(registry, config, agent, true).await
+}
+
+async fn inspect_agent(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    agent: &Agent,
+    include_native: bool,
 ) -> Result<RuntimeSkillInspection, RuntimeError> {
     let workspace = config.workspace_root.join(agent.id.to_string());
     tokio::fs::create_dir_all(&workspace)
@@ -71,9 +81,62 @@ pub(crate) async fn inspect(
     .map_err(|error| RuntimeError::Delivery(format!("skill scan task failed: {error}")))?
     .map_err(|error| skill_io_error("scan runtime skills", &error))?;
 
+    if include_native {
+        if let Some(driver) = driver {
+            match driver.probe_skills(&workspace).await {
+                Ok(Some(probe)) => merge_native_probe(&mut inspection, probe, &workspace),
+                Ok(None) => {}
+                Err(error) => inspection.issues.push(skill_issue(
+                    "native_probe_failed",
+                    "warning",
+                    format!(
+                        "native runtime skill probe failed; using filesystem evidence: {error}"
+                    ),
+                    None,
+                    None,
+                )),
+            }
+        }
+    }
+    inspection.observed_at = Utc::now();
+    inspection.issues = group_issues(std::mem::take(&mut inspection.issues));
+    namespace_issue_fingerprints(&mut inspection);
+    Ok(inspection)
+}
+
+pub(crate) async fn inspect_machine(
+    registry: &Arc<RuntimeRegistry>,
+    config: &LocalRuntimeConfig,
+    runtime: &str,
+) -> Result<RuntimeSkillInspection, RuntimeError> {
+    let workspace = &config.workspace_root;
+    let paths: Vec<PathBuf> = skill_paths(registry, runtime, workspace)
+        .into_iter()
+        .filter(|path| !path.starts_with(workspace))
+        .collect();
+    let compatibility = compatibility(registry, runtime);
+    let driver = registry.get(runtime);
+    let scan_runtime = runtime.to_owned();
+    let scan_workspace = workspace.clone();
+    let mut inspection = tokio::task::spawn_blocking(move || {
+        scan_skill_paths(
+            &scan_runtime,
+            compatibility,
+            SkillDiscoveryEvidence::FILESYSTEM,
+            &scan_workspace,
+            &paths,
+        )
+    })
+    .await
+    .map_err(|error| RuntimeError::Delivery(format!("machine skill scan task failed: {error}")))?
+    .map_err(|error| skill_io_error("scan machine runtime skills", &error))?;
+
     if let Some(driver) = driver {
-        match driver.probe_skills(&workspace).await {
-            Ok(Some(probe)) => merge_native_probe(&mut inspection, probe, &workspace),
+        match driver.probe_skills(workspace).await {
+            Ok(Some(probe)) => {
+                merge_native_probe(&mut inspection, probe, workspace);
+                inspection.skills.retain(|skill| skill.scope != "workspace");
+            }
             Ok(None) => {}
             Err(error) => inspection.issues.push(skill_issue(
                 "native_probe_failed",
@@ -84,6 +147,9 @@ pub(crate) async fn inspect(
             )),
         }
     }
+    inspection.observed_at = Utc::now();
+    inspection.issues = group_issues(std::mem::take(&mut inspection.issues));
+    namespace_issue_fingerprints(&mut inspection);
     Ok(inspection)
 }
 
@@ -570,6 +636,7 @@ fn scan_skill_paths(
                 ));
             }
             issues.extend(finding_issues.iter().cloned());
+            let fingerprint = skill_fingerprint(Some(&resolved_candidate), runtime, &name);
             skills.push(RuntimeSkillFinding {
                 skill: RuntimeSkill {
                     display_name: metadata.name.unwrap_or_else(|| name.clone()),
@@ -581,6 +648,7 @@ fn scan_skill_paths(
                     install_path,
                 },
                 runtime: runtime.to_owned(),
+                fingerprint,
                 scope: scope.to_owned(),
                 source_path: source_short,
                 resolved_path: Some(resolved_short),
@@ -595,6 +663,7 @@ fn scan_skill_paths(
         }
     }
     Ok(RuntimeSkillInspection {
+        observed_at: Utc::now(),
         runtime: runtime.to_owned(),
         compatibility,
         evidence,
@@ -691,6 +760,10 @@ fn native_skill_finding(
     home: Option<&Path>,
 ) -> RuntimeSkillFinding {
     let scope = normalize_native_scope(&native.scope);
+    let fingerprint_path = native
+        .path
+        .as_deref()
+        .map(|path| path.parent().unwrap_or(path).to_path_buf());
     let (path, source_path, resolved_path, install_path) = match native.path {
         Some(metadata_path) => {
             let source_path = metadata_path.parent().unwrap_or(&metadata_path);
@@ -706,6 +779,7 @@ fn native_skill_finding(
             (source.clone(), source, None, None)
         }
     };
+    let fingerprint = skill_fingerprint(fingerprint_path.as_deref(), runtime, &native.name);
     RuntimeSkillFinding {
         skill: RuntimeSkill {
             display_name: native.name.clone(),
@@ -717,6 +791,7 @@ fn native_skill_finding(
             install_path,
         },
         runtime: runtime.to_owned(),
+        fingerprint,
         scope: scope.to_owned(),
         source_path,
         resolved_path,
@@ -756,12 +831,88 @@ fn skill_issue(
     path: Option<String>,
     skill_name: Option<String>,
 ) -> RuntimeSkillIssue {
+    let root_code = match code {
+        "shadowed_skill" | "not_runtime_discovered" => "skill_visibility",
+        other => other,
+    };
+    let basis = skill_name
+        .as_deref()
+        .map(|name| format!("{root_code}|skill|{}", name.to_ascii_lowercase()))
+        .or_else(|| {
+            path.as_deref()
+                .map(|path| format!("{root_code}|path|{path}"))
+        })
+        .unwrap_or_else(|| root_code.to_owned());
     RuntimeSkillIssue {
+        fingerprint: stable_fingerprint(&basis),
         code: code.to_owned(),
         severity: severity.to_owned(),
         message,
+        related_paths: path.clone().into_iter().collect(),
+        related_codes: vec![code.to_owned()],
         path,
         skill_name,
+    }
+}
+
+fn skill_fingerprint(path: Option<&Path>, runtime: &str, name: &str) -> String {
+    let basis = path.map_or_else(
+        || format!("runtime|{runtime}|{}", name.to_ascii_lowercase()),
+        |path| format!("path|{}", comparable_path(path).to_string_lossy()),
+    );
+    stable_fingerprint(&basis)
+}
+
+fn stable_fingerprint(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn group_issues(issues: Vec<RuntimeSkillIssue>) -> Vec<RuntimeSkillIssue> {
+    let mut grouped: Vec<RuntimeSkillIssue> = Vec::new();
+    let mut indexes = HashMap::new();
+    for issue in issues {
+        if let Some(index) = indexes.get(&issue.fingerprint).copied() {
+            let existing: &mut RuntimeSkillIssue = &mut grouped[index];
+            if issue.severity == "error" {
+                "error".clone_into(&mut existing.severity);
+            }
+            for path in issue.related_paths {
+                if !existing.related_paths.contains(&path) {
+                    existing.related_paths.push(path);
+                }
+            }
+            for code in issue.related_codes {
+                if !existing.related_codes.contains(&code) {
+                    existing.related_codes.push(code);
+                }
+            }
+            continue;
+        }
+        indexes.insert(issue.fingerprint.clone(), grouped.len());
+        grouped.push(issue);
+    }
+    grouped
+}
+
+fn namespace_issue_fingerprints(inspection: &mut RuntimeSkillInspection) {
+    for issue in &mut inspection.issues {
+        issue.fingerprint = stable_fingerprint(&format!(
+            "runtime|{}|{}",
+            inspection.runtime, issue.fingerprint
+        ));
+    }
+    for finding in &mut inspection.skills {
+        for issue in &mut finding.issues {
+            issue.fingerprint = stable_fingerprint(&format!(
+                "runtime|{}|{}",
+                inspection.runtime, issue.fingerprint
+            ));
+        }
     }
 }
 
@@ -1279,6 +1430,58 @@ mod tests {
         assert_eq!(builtin.resolved_path, None);
     }
 
+    #[tokio::test]
+    async fn failed_native_probe_keeps_filesystem_inventory() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("codex");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+        let skill = workspace.join(".codex/skills/fallback");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: Fallback\ndescription: Filesystem fallback.\n---\n",
+        )
+        .expect("skill manifest");
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(cocli_driver_codex::CodexDriver::new(
+            temp.path().join("missing-codex"),
+            temp.path().join("missing-bridge"),
+        )));
+
+        let report = inspect(&Arc::new(registry), &config, &agent)
+            .await
+            .expect("filesystem fallback should succeed");
+
+        assert!(report
+            .skills
+            .iter()
+            .any(|finding| finding.skill.name == "fallback"));
+        assert_eq!(report.evidence.source, "filesystem");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_failed"));
+    }
+
+    #[tokio::test]
+    async fn machine_inventory_reports_user_roots_without_creating_an_agent_workspace() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let registry = Arc::new(RuntimeRegistry::new());
+
+        let report = inspect_machine(&registry, &config, "cursor")
+            .await
+            .expect("machine inspection");
+
+        assert!(report.search_paths.iter().all(|path| path.scope == "user"));
+        assert!(report
+            .search_paths
+            .iter()
+            .any(|path| path.path.ends_with(".cursor/skills")));
+        assert!(!config.workspace_root.exists());
+    }
+
     #[cfg(unix)]
     #[test]
     fn scan_follows_skill_symlinks_and_reports_shadowing_invalid_and_broken_entries() {
@@ -1348,5 +1551,68 @@ mod tests {
             .issues
             .iter()
             .any(|issue| issue.code == "broken_symlink"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn aliases_to_one_skill_target_share_a_fingerprint() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().expect("temp directory");
+        let workspace = temp.path().join("workspace");
+        let primary = workspace.join(".codex/skills");
+        let shared = workspace.join(".agents/skills");
+        let target = temp.path().join("targets/reviewer");
+        fs::create_dir_all(&primary).expect("primary path");
+        fs::create_dir_all(&shared).expect("shared path");
+        fs::create_dir_all(&target).expect("target");
+        fs::write(
+            target.join("SKILL.md"),
+            "---\nname: Reviewer\ndescription: Reviews.\n---\n",
+        )
+        .expect("manifest");
+        symlink(&target, primary.join("reviewer")).expect("first alias");
+        symlink(&target, shared.join("reviewer-alias")).expect("second alias");
+
+        let report = scan_skill_paths(
+            "codex",
+            RuntimeSkillCompatibility::Supported,
+            SkillDiscoveryEvidence::FILESYSTEM,
+            &workspace,
+            &[primary, shared],
+        )
+        .expect("scan");
+
+        assert_eq!(report.skills.len(), 2);
+        assert_eq!(report.skills[0].fingerprint, report.skills[1].fingerprint);
+        assert!(report.skills[1].duplicate);
+        assert!(report.skills[1]
+            .issues
+            .iter()
+            .any(|issue| issue.code == "duplicate_target"));
+    }
+
+    #[test]
+    fn visibility_issues_for_one_skill_are_grouped_without_losing_paths() {
+        let grouped = group_issues(vec![
+            skill_issue(
+                "shadowed_skill",
+                "warning",
+                "shadowed".to_owned(),
+                Some("~/.agents/skills/quickbox-qb".to_owned()),
+                Some("quickbox-qb".to_owned()),
+            ),
+            skill_issue(
+                "not_runtime_discovered",
+                "warning",
+                "not discovered".to_owned(),
+                Some("~/.codex/skills/quickbox-qb".to_owned()),
+                Some("quickbox-qb".to_owned()),
+            ),
+        ]);
+
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].related_paths.len(), 2);
+        assert_eq!(grouped[0].related_codes.len(), 2);
     }
 }

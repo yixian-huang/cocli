@@ -65,6 +65,9 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const [loadingCatalog, setLoadingCatalog] = useState(true)
   const [loadingAgent, setLoadingAgent] = useState(false)
   const [agentSkillQuery, setAgentSkillQuery] = useState('')
+  const [issueSeverity, setIssueSeverity] = useState('all')
+  const [issueRuntime, setIssueRuntime] = useState('all')
+  const [issueScope, setIssueScope] = useState('all')
   const [action, setAction] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [viewingSkill, setViewingSkill] = useState<AgentSkill | null>(null)
@@ -115,8 +118,8 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     ))
   }, [])
 
-  const refreshDoctor = useCallback(async () => {
-    setDoctor(await localApi.inspectMachineSkills())
+  const refreshDoctor = useCallback(async (force = false) => {
+    setDoctor(await localApi.inspectMachineSkills(force))
   }, [])
 
   const refreshAgentSkills = useCallback(async (agentId: string) => {
@@ -226,7 +229,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         refreshAgentSkills(selectedAgentId),
-        refreshDoctor(),
+        refreshDoctor(true),
       ])
     })
   }
@@ -239,7 +242,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         refreshAgentSkills(selectedAgentId),
-        refreshDoctor(),
+        refreshDoctor(true),
       ])
     })
   }
@@ -250,7 +253,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         selectedAgentId ? refreshAgentSkills(selectedAgentId) : Promise.resolve(),
-        refreshDoctor(),
+        refreshDoctor(true),
       ])
     })
   }
@@ -264,7 +267,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       await Promise.all([
         refreshCatalog(),
         selectedAgentId ? refreshAgentSkills(selectedAgentId) : Promise.resolve(),
-        refreshDoctor(),
+        refreshDoctor(true),
       ])
     })
   }
@@ -315,6 +318,47 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const selectedInventory = doctor?.agents.find((inventory) => (
     inventory.agentId === selectedAgentId
   )) ?? null
+  const visibleIssues = useMemo(() => {
+    if (!doctor) return []
+    const candidates = [
+      ...doctor.runtimes.flatMap((runtime) => (runtime.issues ?? []).map((issue) => ({
+        ...issue,
+        runtime: runtime.runtime,
+        scope: 'machine' as const,
+      }))),
+      ...doctor.agents.flatMap((inventory) => inventory.issues.map((issue) => ({
+        ...issue,
+        runtime: inventory.runtime,
+        scope: 'agent' as const,
+      }))),
+      ...(doctor.diagnostics ?? []).map((diagnostic) => ({
+        fingerprint: diagnostic.fingerprint,
+        code: diagnostic.errorType,
+        severity: 'error' as const,
+        message: diagnostic.message,
+        relatedPaths: [],
+        runtime: diagnostic.runtime,
+        scope: diagnostic.subject === 'agent' ? 'agent' as const : 'machine' as const,
+      })),
+    ].filter((issue) => (
+      (issueSeverity === 'all' || issue.severity === issueSeverity)
+      && (issueRuntime === 'all' || issue.runtime === issueRuntime)
+      && (issueScope === 'all' || issue.scope === issueScope)
+    ))
+    const grouped = new Map<string, (typeof candidates)[number]>()
+    for (const issue of candidates) {
+      const existing = grouped.get(issue.fingerprint)
+      if (!existing) {
+        grouped.set(issue.fingerprint, issue)
+        continue
+      }
+      existing.relatedPaths = [...new Set([
+        ...(existing.relatedPaths ?? []),
+        ...(issue.relatedPaths ?? []),
+      ])]
+    }
+    return [...grouped.values()]
+  }, [doctor, issueRuntime, issueScope, issueSeverity])
 
   return (
     <section className="local-skills-workspace" aria-label={t('skillsWorkspace')}>
@@ -332,7 +376,7 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
             await Promise.all([
               refreshCatalog(),
               selectedAgentId ? refreshAgentSkills(selectedAgentId) : Promise.resolve(),
-              refreshDoctor(),
+              refreshDoctor(true),
             ])
           })}
           disabled={action === 'refresh'}
@@ -366,6 +410,16 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
           )}
         </div>
         <p className="skill-evidence-note">{t('skillsEvidenceNotice')}</p>
+        {doctor && (
+          <p className="skill-snapshot-note">
+            {t('skillsSnapshotStatus', {
+              status: doctor.cacheStatus ?? 'fresh',
+              observedAt: doctor.observedAt
+                ? new Date(doctor.observedAt).toLocaleString()
+                : t('skillsNoEvidence'),
+            })}
+          </p>
+        )}
         {doctor && (
           <div className="runtime-skill-matrix-wrap">
             <table className="runtime-skill-matrix">
@@ -428,6 +482,51 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
               </div>
             </div>
           </details>
+        )}
+        {doctor && (
+          <div className="skill-issue-browser">
+            <div className="skill-issue-filters">
+              <label>
+                <span>{t('skillsSeverity')}</span>
+                <select value={issueSeverity} onChange={(event) => setIssueSeverity(event.target.value)}>
+                  <option value="all">{t('skillsAll')}</option>
+                  <option value="error">{t('skillsDoctorError')}</option>
+                  <option value="warning">{t('skillsDoctorWarning')}</option>
+                </select>
+              </label>
+              <label>
+                <span>{t('skillsRuntime')}</span>
+                <select value={issueRuntime} onChange={(event) => setIssueRuntime(event.target.value)}>
+                  <option value="all">{t('skillsAll')}</option>
+                  {doctor.runtimes.map((runtime) => (
+                    <option key={runtime.runtime} value={runtime.runtime}>{runtime.runtime}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>{t('skillsScope')}</span>
+                <select value={issueScope} onChange={(event) => setIssueScope(event.target.value)}>
+                  <option value="all">{t('skillsAll')}</option>
+                  <option value="machine">{t('skillsMachineScope')}</option>
+                  <option value="agent">{t('skillsAgentScope')}</option>
+                </select>
+              </label>
+            </div>
+            {visibleIssues.length === 0
+              ? <p>{t('skillsNoIssues')}</p>
+              : (
+                <ul className="skill-grouped-issues">
+                  {visibleIssues.map((issue) => (
+                    <li key={issue.fingerprint} className={issue.severity}>
+                      <strong>{issue.code}</strong>
+                      <span>{issue.runtime} · {issue.scope}</span>
+                      <p>{issue.message}</p>
+                      {issue.relatedPaths?.map((path) => <code key={path}>{path}</code>)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+          </div>
         )}
       </section>
 

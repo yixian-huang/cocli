@@ -606,13 +606,14 @@ export const runtimes = {
     request<Record<string, 'supported' | 'uncertain' | 'unsupported' | 'unknown'>>(
       `/api/runtimes/compatibility`
     ),
-  skillInventory: () =>
-    request<{
-      runtimes: import('@shared/types').RuntimeSkillInventorySummary[]
-      agents: import('@shared/types').AgentSkillInventory[]
-    }>(`/api/runtimes/skills/inventory`),
-  skillDoctor: () =>
-    request<MachineSkillDoctor>(`/api/runtimes/skills/doctor`),
+  skillInventory: (force = false) =>
+    request<Omit<MachineSkillDoctor, 'summary'>>(
+      `/api/runtimes/skills/inventory${force ? '?force=true' : ''}`
+    ),
+  skillDoctor: (force = false) =>
+    request<MachineSkillDoctor>(
+      `/api/runtimes/skills/doctor${force ? '?force=true' : ''}`
+    ),
 }
 
 // Unified Memory (L1/L2 read API — Tasks 6.1/6.2)

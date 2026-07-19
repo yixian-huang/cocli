@@ -572,6 +572,13 @@ impl RuntimeService for LocalRuntimeService {
         crate::skills::inspect(&self.registry, &self.config, agent).await
     }
 
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<cocli_api::RuntimeSkillInspection, RuntimeError> {
+        crate::skills::inspect_machine(&self.registry, &self.config, runtime).await
+    }
+
     async fn install_skill(
         &self,
         agent: &Agent,

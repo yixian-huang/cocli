@@ -105,13 +105,16 @@ describe('LocalApp', () => {
       if (path === '/api/runtimes/compatibility') {
         return jsonResponse({ fake: 'supported' })
       }
-      if (path === '/api/runtimes/skills/doctor') {
+      if (path.startsWith('/api/runtimes/skills/doctor')) {
         const evidence = {
           source: 'filesystem',
           detail: 'runtime driver search paths',
           provesSessionVisibility: false,
         }
         return jsonResponse({
+          observedAt: '2026-07-19T08:00:00Z',
+          cacheStatus: path.includes('force=true') ? 'fresh' : 'cached',
+          forceRefresh: path.includes('force=true'),
           summary: {
             status: 'ok',
             runtimeCount: 1,
@@ -128,8 +131,18 @@ describe('LocalApp', () => {
             skillCount: skillInstalled ? 2 : 0,
             issueCount: 0,
             evidenceSources: agentCreated ? ['filesystem'] : [],
+            observedAt: '2026-07-19T08:00:00Z',
+            cacheStatus: 'cached',
+            expiresAt: '2026-07-19T08:00:03Z',
+            evidence,
+            searchPaths: [],
+            skills: [],
+            issues: [],
           }],
           agents: agentCreated ? [{
+            observedAt: '2026-07-19T08:00:00Z',
+            cacheStatus: 'cached',
+            expiresAt: '2026-07-19T08:00:03Z',
             agentId: 'agent-1',
             agentName: 'builder',
             runtime: 'fake',
@@ -145,6 +158,7 @@ describe('LocalApp', () => {
             skills: [],
             issues: [],
           }] : [],
+          diagnostics: [],
         })
       }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
@@ -687,6 +701,9 @@ describe('LocalApp', () => {
     expect(await screen.findByRole('heading', { name: 'Runtime × Skill inventory' })).toBeInTheDocument()
     expect(screen.getByText(/Neither proves that a running session loaded or activated/)).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /fake supported/ })).toBeInTheDocument()
+    expect(screen.getByLabelText('Severity')).toBeInTheDocument()
+    expect(screen.getByLabelText('Scope')).toBeInTheDocument()
+    expect(screen.getByText(/cached snapshot/)).toBeInTheDocument()
     expect(await screen.findByText('Review local changes')).toBeInTheDocument()
 
     const installButtons = await screen.findAllByRole('button', { name: 'Install' })

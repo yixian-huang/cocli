@@ -496,6 +496,7 @@ export interface SkillLibraryReinstallResponse {
 // Agent Skill Install (Phase 3)
 // State is one of "managed" | "external" | "broken"
 export interface SkillView {
+  fingerprint?: string
   name: string
   displayName?: string
   description?: string
@@ -530,11 +531,14 @@ export interface RuntimeSkillEvidence {
 }
 
 export interface RuntimeSkillIssue {
+  fingerprint: string
   code: string
   severity: 'warning' | 'error'
   message: string
   path?: string
   skillName?: string
+  relatedPaths?: string[]
+  relatedCodes?: string[]
 }
 
 export interface RuntimeSkillSearchPath {
@@ -548,6 +552,9 @@ export interface RuntimeSkillSearchPath {
 }
 
 export interface AgentSkillInventory {
+  observedAt: string
+  cacheStatus: SkillSnapshotStatus
+  expiresAt: string
   agentId: string
   agentName: string
   runtime: string
@@ -559,12 +566,33 @@ export interface AgentSkillInventory {
 }
 
 export interface RuntimeSkillInventorySummary {
+  observedAt: string
+  cacheStatus: SkillSnapshotStatus
+  expiresAt: string
   runtime: string
   compatibility: RuntimeSkillCompatibility
   agentCount: number
   skillCount: number
   issueCount: number
   evidenceSources: string[]
+  evidence: RuntimeSkillEvidence
+  searchPaths: RuntimeSkillSearchPath[]
+  skills: SkillView[]
+  issues: RuntimeSkillIssue[]
+}
+
+export type SkillSnapshotStatus = 'fresh' | 'cached' | 'mixed'
+
+export interface SkillInspectionDiagnostic {
+  fingerprint: string
+  subject: 'runtime' | 'agent'
+  runtime: string
+  agentId?: string
+  agentName?: string
+  stage: string
+  errorType: string
+  message: string
+  observedAt: string
 }
 
 export interface SkillDoctorSummary {
@@ -578,9 +606,13 @@ export interface SkillDoctorSummary {
 }
 
 export interface MachineSkillDoctor {
+  observedAt: string
+  cacheStatus: SkillSnapshotStatus
+  forceRefresh: boolean
   summary: SkillDoctorSummary
   runtimes: RuntimeSkillInventorySummary[]
   agents: AgentSkillInventory[]
+  diagnostics: SkillInspectionDiagnostic[]
 }
 
 // SkillFileEntry matches protocol.FileTreeEntry returned by ListInstalledSkillFiles

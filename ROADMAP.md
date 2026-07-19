@@ -41,9 +41,14 @@ cross-platform release evidence.
   source evidence, Runtime-reported disabled state, filesystem fallback, and
   probe-failure diagnostics. Native discovery still does not claim active
   Session visibility or activation.
-- **Phase 2B — remaining probes and governed changes (planned):** add a stable
-  Cursor native probe, explicit plan/apply/verify operations, and lockfile plus
-  drift governance.
+- **Phase 2B — snapshot and diagnostic hardening (complete):** add explicit
+  observation timestamps, bounded short-TTL caching, in-flight native-probe
+  coalescing, force refresh, lightweight filesystem-only Agent lists, true
+  machine Runtime inventory without synthetic Agents, partial-failure
+  diagnostics, and stable Skill/issue fingerprints with grouped root causes.
+- **Phase 2C — remaining native and governed changes (planned):** add a stable
+  Cursor native probe, Session-effective evidence, explicit plan/apply/verify
+  operations, and lockfile plus drift governance.
 
 This track remains subordinate to cocli's persistent Agent and Channel model;
 it is Runtime governance for multi-Agent desktop work, not a standalone Skill

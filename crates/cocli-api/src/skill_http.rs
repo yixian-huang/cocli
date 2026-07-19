@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use cocli_store::{
@@ -10,7 +12,7 @@ use cocli_store::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::{OwnedMutexGuard, Semaphore};
+use tokio::sync::{Mutex, OwnedMutexGuard, Semaphore};
 use tokio::task::JoinSet;
 use uuid::Uuid;
 
@@ -18,9 +20,129 @@ use super::skill_import::{
     canonical_skill_name, derive_source_name, fetch_skill, FetchedSkill, SkillImportError,
 };
 use super::{
-    require_agent, ApiError, AppState, RuntimeSkillCompatibility, RuntimeSkillEvidence,
-    RuntimeSkillFinding, RuntimeSkillInspection, RuntimeSkillIssue, RuntimeSkillSearchPath,
+    require_agent, ApiError, AppState, RuntimeError, RuntimeSkillCompatibility,
+    RuntimeSkillEvidence, RuntimeSkillFinding, RuntimeSkillInspection, RuntimeSkillIssue,
+    RuntimeSkillSearchPath,
 };
+
+const SKILL_SNAPSHOT_TTL: Duration = Duration::from_secs(3);
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum SkillSnapshotKey {
+    Agent(Uuid),
+    Machine(String),
+}
+
+#[derive(Clone)]
+struct CachedSkillInspection {
+    inspection: RuntimeSkillInspection,
+    stored_at: Instant,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Clone)]
+struct SkillSnapshot {
+    inspection: RuntimeSkillInspection,
+    cache_status: &'static str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+pub(super) struct SkillSnapshotCoordinator {
+    ttl: Duration,
+    cache: Mutex<HashMap<SkillSnapshotKey, CachedSkillInspection>>,
+    locks: Mutex<HashMap<SkillSnapshotKey, Arc<Mutex<()>>>>,
+}
+
+impl SkillSnapshotCoordinator {
+    pub(super) fn new() -> Arc<Self> {
+        Self::with_ttl(SKILL_SNAPSHOT_TTL)
+    }
+
+    fn with_ttl(ttl: Duration) -> Arc<Self> {
+        Arc::new(Self {
+            ttl,
+            cache: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
+        })
+    }
+
+    async fn get_or_refresh<F, Fut>(
+        &self,
+        key: SkillSnapshotKey,
+        force: bool,
+        refresh: F,
+    ) -> Result<SkillSnapshot, RuntimeError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<RuntimeSkillInspection, RuntimeError>>,
+    {
+        let requested_at = Instant::now();
+        if !force {
+            if let Some(snapshot) = self.cached(&key).await {
+                return Ok(snapshot);
+            }
+        }
+        let lock = {
+            let mut locks = self.locks.lock().await;
+            Arc::clone(
+                locks
+                    .entry(key.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let _guard = lock.lock().await;
+        if let Some(cached) = self.cache.lock().await.get(&key).cloned() {
+            let fresh = cached.stored_at.elapsed() < self.ttl;
+            let force_already_satisfied = cached.stored_at >= requested_at;
+            if fresh && (!force || force_already_satisfied) {
+                return Ok(SkillSnapshot {
+                    inspection: cached.inspection,
+                    cache_status: "cached",
+                    expires_at: cached.expires_at,
+                });
+            }
+        }
+        let inspection = refresh().await?;
+        let expires_at = chrono::Utc::now()
+            + chrono::Duration::from_std(self.ttl).unwrap_or_else(|_| chrono::Duration::seconds(3));
+        self.cache.lock().await.insert(
+            key,
+            CachedSkillInspection {
+                inspection: inspection.clone(),
+                stored_at: Instant::now(),
+                expires_at,
+            },
+        );
+        Ok(SkillSnapshot {
+            inspection,
+            cache_status: "fresh",
+            expires_at,
+        })
+    }
+
+    async fn cached(&self, key: &SkillSnapshotKey) -> Option<SkillSnapshot> {
+        let mut cache = self.cache.lock().await;
+        if cache
+            .get(key)
+            .is_some_and(|cached| cached.stored_at.elapsed() >= self.ttl)
+        {
+            cache.remove(key);
+            return None;
+        }
+        cache.get(key).cloned().map(|cached| SkillSnapshot {
+            inspection: cached.inspection,
+            cache_status: "cached",
+            expires_at: cached.expires_at,
+        })
+    }
+
+    async fn invalidate_agent(&self, agent_id: Uuid) {
+        self.cache
+            .lock()
+            .await
+            .retain(|key, _| !matches!(key, SkillSnapshotKey::Agent(id) if *id == agent_id));
+    }
+}
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -413,7 +535,10 @@ async fn refresh_installed_skills(
         }
         .await;
         match refresh {
-            Ok(agent) => refreshed.push((agent, install)),
+            Ok(agent) => {
+                state.skill_snapshots.invalidate_agent(agent.id).await;
+                refreshed.push((agent, install));
+            }
             Err(error) => {
                 let rollback_errors =
                     rollback_runtime_refreshes(state, library, previous_files, &refreshed).await;
@@ -444,7 +569,9 @@ async fn rollback_runtime_refreshes(
             .install_skill(agent, &library.name, previous_files)
             .await
         {
-            Ok(path) if path == install.install_path => {}
+            Ok(path) if path == install.install_path => {
+                state.skill_snapshots.invalidate_agent(agent.id).await;
+            }
             Ok(path) => errors.push(format!(
                 "agent {} restored to unexpected path {} (expected {})",
                 agent.id, path, install.install_path
@@ -490,6 +617,7 @@ async fn delete_library(
                     agent.id
                 )));
             }
+            state.skill_snapshots.invalidate_agent(agent.id).await;
             removed.push((agent, install));
         }
     }
@@ -545,6 +673,7 @@ async fn runtime_compatibility(
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SkillView {
+    fingerprint: String,
     name: String,
     display_name: String,
     description: String,
@@ -588,6 +717,9 @@ struct AgentSkillsResponse {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AgentSkillInventoryResponse {
+    observed_at: chrono::DateTime<chrono::Utc>,
+    cache_status: &'static str,
+    expires_at: chrono::DateTime<chrono::Utc>,
     agent_id: Uuid,
     agent_name: String,
     runtime: String,
@@ -601,18 +733,30 @@ struct AgentSkillInventoryResponse {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSkillInventorySummary {
+    observed_at: chrono::DateTime<chrono::Utc>,
+    cache_status: &'static str,
+    expires_at: chrono::DateTime<chrono::Utc>,
     runtime: String,
     compatibility: RuntimeSkillCompatibility,
     agent_count: usize,
     skill_count: usize,
     issue_count: usize,
     evidence_sources: Vec<String>,
+    evidence: RuntimeSkillEvidence,
+    search_paths: Vec<RuntimeSkillSearchPath>,
+    skills: Vec<SkillView>,
+    issues: Vec<RuntimeSkillIssue>,
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MachineSkillInventoryResponse {
+    observed_at: chrono::DateTime<chrono::Utc>,
+    cache_status: &'static str,
+    force_refresh: bool,
     runtimes: Vec<RuntimeSkillInventorySummary>,
     agents: Vec<AgentSkillInventoryResponse>,
+    diagnostics: Vec<SkillInspectionDiagnostic>,
 }
 
 #[derive(Debug, Serialize)]
@@ -634,10 +778,37 @@ struct AgentSkillDoctorResponse {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct MachineSkillDoctorResponse {
+    observed_at: chrono::DateTime<chrono::Utc>,
+    cache_status: &'static str,
+    force_refresh: bool,
     summary: SkillDoctorSummary,
     runtimes: Vec<RuntimeSkillInventorySummary>,
     agents: Vec<AgentSkillInventoryResponse>,
+    diagnostics: Vec<SkillInspectionDiagnostic>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillInspectionDiagnostic {
+    fingerprint: String,
+    subject: &'static str,
+    runtime: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_name: Option<String>,
+    stage: &'static str,
+    error_type: &'static str,
+    message: String,
+    observed_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SkillRefreshQuery {
+    #[serde(default)]
+    force: bool,
 }
 
 async fn list_agent_skills(
@@ -645,102 +816,338 @@ async fn list_agent_skills(
     Path(agent_id): Path<Uuid>,
 ) -> Result<Json<AgentSkillsResponse>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
-    let inventory = build_agent_skill_inventory(&state, agent).await?;
-    Ok(Json(AgentSkillsResponse {
-        skills: inventory.skills,
-    }))
+    let skills = build_agent_skill_list(&state, agent).await?;
+    Ok(Json(AgentSkillsResponse { skills }))
 }
 
 async fn agent_skill_inventory(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
+    Query(query): Query<SkillRefreshQuery>,
 ) -> Result<Json<AgentSkillInventoryResponse>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
-    Ok(Json(build_agent_skill_inventory(&state, agent).await?))
+    Ok(Json(
+        build_agent_skill_inventory(&state, agent, query.force).await?,
+    ))
 }
 
 async fn agent_skill_doctor(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
+    Query(query): Query<SkillRefreshQuery>,
 ) -> Result<Json<AgentSkillDoctorResponse>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
-    let inventory = build_agent_skill_inventory(&state, agent).await?;
-    let summary = doctor_summary(std::slice::from_ref(&inventory));
+    let inventory = build_agent_skill_inventory(&state, agent, query.force).await?;
+    let summary = doctor_summary(&[], std::slice::from_ref(&inventory), &[]);
     Ok(Json(AgentSkillDoctorResponse { summary, inventory }))
 }
 
 async fn machine_skill_inventory(
     State(state): State<AppState>,
+    Query(query): Query<SkillRefreshQuery>,
 ) -> Result<Json<MachineSkillInventoryResponse>, ApiError> {
-    let agents = build_machine_skill_inventory(&state).await?;
-    let runtimes = runtime_inventory_summaries(&state, &agents).await;
-    Ok(Json(MachineSkillInventoryResponse { runtimes, agents }))
+    let machine = build_machine_skill_inventory(&state, query.force).await?;
+    Ok(Json(MachineSkillInventoryResponse {
+        observed_at: machine.observed_at,
+        cache_status: machine.cache_status,
+        force_refresh: query.force,
+        runtimes: machine.runtimes,
+        agents: machine.agents,
+        diagnostics: machine.diagnostics,
+    }))
 }
 
 async fn machine_skill_doctor(
     State(state): State<AppState>,
+    Query(query): Query<SkillRefreshQuery>,
 ) -> Result<Json<MachineSkillDoctorResponse>, ApiError> {
-    let agents = build_machine_skill_inventory(&state).await?;
-    let runtimes = runtime_inventory_summaries(&state, &agents).await;
-    let summary = doctor_summary(&agents);
+    let machine = build_machine_skill_inventory(&state, query.force).await?;
+    let summary = doctor_summary(&machine.runtimes, &machine.agents, &machine.diagnostics);
     Ok(Json(MachineSkillDoctorResponse {
+        observed_at: machine.observed_at,
+        cache_status: machine.cache_status,
+        force_refresh: query.force,
         summary,
-        runtimes,
-        agents,
+        runtimes: machine.runtimes,
+        agents: machine.agents,
+        diagnostics: machine.diagnostics,
     }))
+}
+
+struct MachineSkillInventory {
+    observed_at: chrono::DateTime<chrono::Utc>,
+    cache_status: &'static str,
+    runtimes: Vec<RuntimeSkillInventorySummary>,
+    agents: Vec<AgentSkillInventoryResponse>,
+    diagnostics: Vec<SkillInspectionDiagnostic>,
 }
 
 async fn build_machine_skill_inventory(
     state: &AppState,
-) -> Result<Vec<AgentSkillInventoryResponse>, ApiError> {
+    force: bool,
+) -> Result<MachineSkillInventory, ApiError> {
     const MAX_CONCURRENT_INSPECTIONS: usize = 4;
+
+    let agents = state.store.list_agents().await?;
+    let mut runtime_names = vec![
+        "chatrs".to_owned(),
+        "claude".to_owned(),
+        "codex".to_owned(),
+        "cursor".to_owned(),
+        "gemini".to_owned(),
+        "grok".to_owned(),
+        "kimi".to_owned(),
+        "opencode".to_owned(),
+    ];
+    runtime_names.extend(
+        state
+            .runtime
+            .list()
+            .await
+            .into_iter()
+            .map(|runtime| runtime.name),
+    );
+    runtime_names.extend(agents.iter().map(|agent| agent.runtime.clone()));
+    runtime_names.sort();
+    runtime_names.dedup();
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_INSPECTIONS));
     let mut tasks = JoinSet::new();
-    for (index, agent) in state.store.list_agents().await?.into_iter().enumerate() {
+    for (index, runtime) in runtime_names.into_iter().enumerate() {
         let state = state.clone();
         let semaphore = Arc::clone(&semaphore);
         tasks.spawn(async move {
-            let _permit = semaphore.acquire_owned().await.map_err(|error| {
-                ApiError::json(
-                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    json!({"error": format!("skill inspection semaphore closed: {error}")}),
-                )
-            })?;
-            build_agent_skill_inventory(&state, agent)
-                .await
-                .map(|inventory| (index, inventory))
+            let _permit = semaphore.acquire_owned().await.ok();
+            let result = build_runtime_skill_inventory(&state, &runtime, force).await;
+            (index, runtime, result)
+        });
+    }
+    let mut runtimes = Vec::new();
+    let mut diagnostics = Vec::new();
+    while let Some(result) = tasks.join_next().await {
+        match result {
+            Ok((index, _runtime, Ok(inventory))) => runtimes.push((index, inventory)),
+            Ok((index, runtime, Err(error))) => {
+                diagnostics.push(skill_diagnostic(
+                    "runtime",
+                    runtime.clone(),
+                    None,
+                    None,
+                    "inspection",
+                    "runtime_error",
+                    error.message.clone(),
+                ));
+                runtimes.push((
+                    index,
+                    failed_runtime_inventory(state, runtime, error.message),
+                ));
+            }
+            Err(error) => diagnostics.push(skill_diagnostic(
+                "runtime",
+                "unknown".to_owned(),
+                None,
+                None,
+                "task",
+                "join_error",
+                error.to_string(),
+            )),
+        }
+    }
+    runtimes.sort_by_key(|(index, _)| *index);
+    let mut runtimes: Vec<_> = runtimes
+        .into_iter()
+        .map(|(_, inventory)| inventory)
+        .collect();
+
+    let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_INSPECTIONS));
+    let mut tasks = JoinSet::new();
+    for (index, agent) in agents.into_iter().enumerate() {
+        let state = state.clone();
+        let semaphore = Arc::clone(&semaphore);
+        tasks.spawn(async move {
+            let _permit = semaphore.acquire_owned().await.ok();
+            let runtime = agent.runtime.clone();
+            let agent_id = agent.id;
+            let agent_name = agent.name.clone();
+            let result = build_agent_skill_inventory(&state, agent, force).await;
+            (index, runtime, agent_id, agent_name, result)
         });
     }
     let mut inventories = Vec::new();
     while let Some(result) = tasks.join_next().await {
-        let inventory = result.map_err(|error| {
-            ApiError::json(
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                json!({"error": format!("skill inspection task failed: {error}")}),
-            )
-        })??;
-        inventories.push(inventory);
+        match result {
+            Ok((index, _runtime, _agent_id, _agent_name, Ok(inventory))) => {
+                inventories.push((index, inventory));
+            }
+            Ok((_index, runtime, agent_id, agent_name, Err(error))) => {
+                diagnostics.push(skill_diagnostic(
+                    "agent",
+                    runtime,
+                    Some(agent_id),
+                    Some(agent_name),
+                    "inspection",
+                    "runtime_or_store_error",
+                    error.message,
+                ));
+            }
+            Err(error) => diagnostics.push(skill_diagnostic(
+                "agent",
+                "unknown".to_owned(),
+                None,
+                None,
+                "task",
+                "join_error",
+                error.to_string(),
+            )),
+        }
     }
     inventories.sort_by_key(|(index, _)| *index);
-    Ok(inventories
+    let agents: Vec<_> = inventories
         .into_iter()
         .map(|(_, inventory)| inventory)
-        .collect())
+        .collect();
+    for runtime in &mut runtimes {
+        let matching: Vec<_> = agents
+            .iter()
+            .filter(|agent| agent.runtime == runtime.runtime)
+            .collect();
+        runtime.agent_count = matching.len();
+        let unique_skills: HashSet<&str> = runtime
+            .skills
+            .iter()
+            .chain(matching.iter().flat_map(|agent| &agent.skills))
+            .map(|skill| skill.fingerprint.as_str())
+            .collect();
+        runtime.skill_count = unique_skills.len();
+        let unique_issues: HashSet<&str> = runtime
+            .issues
+            .iter()
+            .chain(matching.iter().flat_map(|agent| &agent.issues))
+            .map(|issue| issue.fingerprint.as_str())
+            .collect();
+        runtime.issue_count = unique_issues.len();
+        runtime
+            .evidence_sources
+            .extend(matching.iter().map(|agent| agent.evidence.source.clone()));
+        runtime.evidence_sources.sort();
+        runtime.evidence_sources.dedup();
+    }
+    let mut observed_at = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH;
+    for value in runtimes
+        .iter()
+        .map(|runtime| runtime.observed_at)
+        .chain(agents.iter().map(|agent| agent.observed_at))
+    {
+        if value > observed_at {
+            observed_at = value;
+        }
+    }
+    let statuses: Vec<_> = runtimes
+        .iter()
+        .map(|runtime| runtime.cache_status)
+        .chain(agents.iter().map(|agent| agent.cache_status))
+        .collect();
+    let cache_status = if statuses.iter().all(|status| *status == "cached") {
+        "cached"
+    } else if statuses.iter().all(|status| *status == "fresh") {
+        "fresh"
+    } else {
+        "mixed"
+    };
+    Ok(MachineSkillInventory {
+        observed_at,
+        cache_status,
+        runtimes,
+        agents,
+        diagnostics,
+    })
 }
 
 async fn build_agent_skill_inventory(
     state: &AppState,
     agent: Agent,
+    force: bool,
 ) -> Result<AgentSkillInventoryResponse, ApiError> {
+    let agent_for_probe = agent.clone();
+    let runtime = Arc::clone(&state.runtime);
+    let snapshot = state
+        .skill_snapshots
+        .get_or_refresh(
+            SkillSnapshotKey::Agent(agent.id),
+            force,
+            move || async move { runtime.inspect_skills(&agent_for_probe).await },
+        )
+        .await?;
+    build_agent_skill_inventory_from_inspection(state, agent, snapshot).await
+}
+
+async fn build_agent_skill_list(
+    state: &AppState,
+    agent: Agent,
+) -> Result<Vec<SkillView>, ApiError> {
+    let runtime_name = agent.runtime.clone();
+    let evidence = RuntimeSkillEvidence::default();
+    let observed_at = chrono::Utc::now();
+    let scanned = state
+        .runtime
+        .list_skills(&agent)
+        .await?
+        .into_iter()
+        .map(|skill| RuntimeSkillFinding {
+            fingerprint: stable_api_fingerprint(&format!("{}|{}", runtime_name, skill.path)),
+            scope: skill.skill_type.clone(),
+            source_path: skill.path.clone(),
+            resolved_path: None,
+            presence: "installed".to_owned(),
+            runtime: runtime_name.clone(),
+            evidence: evidence.clone(),
+            enabled: None,
+            valid: None,
+            duplicate: false,
+            shadowed: false,
+            issues: Vec::new(),
+            skill,
+        })
+        .collect();
+    let snapshot = SkillSnapshot {
+        inspection: RuntimeSkillInspection {
+            observed_at,
+            runtime: runtime_name,
+            compatibility: state.runtime.skill_compatibility(&agent.runtime),
+            evidence,
+            search_paths: Vec::new(),
+            skills: scanned,
+            issues: Vec::new(),
+        },
+        cache_status: "fresh",
+        expires_at: observed_at,
+    };
+    Ok(
+        build_agent_skill_inventory_from_inspection(state, agent, snapshot)
+            .await?
+            .skills,
+    )
+}
+
+async fn build_agent_skill_inventory_from_inspection(
+    state: &AppState,
+    agent: Agent,
+    snapshot: SkillSnapshot,
+) -> Result<AgentSkillInventoryResponse, ApiError> {
+    let SkillSnapshot {
+        inspection,
+        cache_status,
+        expires_at,
+    } = snapshot;
     let RuntimeSkillInspection {
+        observed_at,
         runtime,
         compatibility,
         evidence,
         search_paths,
         skills: scanned,
         mut issues,
-    } = state.runtime.inspect_skills(&agent).await?;
+    } = inspection;
     let installs = state.store.list_agent_skill_installs(agent.id).await?;
     let mut by_path: HashMap<String, AgentSkillInstall> = installs
         .into_iter()
@@ -758,11 +1165,17 @@ async fn build_agent_skill_inventory(
     }
     for install in by_path.into_values() {
         let issue = RuntimeSkillIssue {
+            fingerprint: stable_api_fingerprint(&format!(
+                "missing_managed_install|{}|{}",
+                agent.id, install.install_path
+            )),
             code: "missing_managed_install".to_owned(),
             severity: "error".to_owned(),
             message: "SQLite install record has no discovered filesystem skill".to_owned(),
             path: Some(install.install_path.clone()),
             skill_name: Some(install.library_name.clone()),
+            related_paths: vec![install.install_path.clone()],
+            related_codes: vec!["missing_managed_install".to_owned()],
         };
         issues.push(issue.clone());
         skills.push(broken_skill_view(
@@ -774,6 +1187,9 @@ async fn build_agent_skill_inventory(
     }
     skills.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(AgentSkillInventoryResponse {
+        observed_at,
+        cache_status,
+        expires_at,
         agent_id: agent.id,
         agent_name: agent.name,
         runtime,
@@ -797,6 +1213,7 @@ fn scanned_skill_view(skill: RuntimeSkillFinding, install: Option<AgentSkillInst
         skill.presence
     };
     SkillView {
+        fingerprint: skill.fingerprint,
         name: skill.skill.name,
         display_name: skill.skill.display_name,
         description: skill.skill.description,
@@ -830,6 +1247,10 @@ fn broken_skill_view(
     issue: RuntimeSkillIssue,
 ) -> SkillView {
     SkillView {
+        fingerprint: stable_api_fingerprint(&format!(
+            "missing_managed_install|{}",
+            install.install_path
+        )),
         name: install.library_name,
         display_name: String::new(),
         description: String::new(),
@@ -856,91 +1277,94 @@ fn broken_skill_view(
     }
 }
 
-async fn runtime_inventory_summaries(
+async fn build_runtime_skill_inventory(
     state: &AppState,
-    inventories: &[AgentSkillInventoryResponse],
-) -> Vec<RuntimeSkillInventorySummary> {
-    let mut names = vec![
-        "chatrs".to_owned(),
-        "claude".to_owned(),
-        "codex".to_owned(),
-        "cursor".to_owned(),
-        "gemini".to_owned(),
-        "grok".to_owned(),
-        "kimi".to_owned(),
-        "opencode".to_owned(),
-    ];
-    names.extend(
-        state
-            .runtime
-            .list()
-            .await
-            .into_iter()
-            .map(|runtime| runtime.name),
-    );
-    names.extend(
-        inventories
-            .iter()
-            .map(|inventory| inventory.runtime.clone()),
-    );
-    names.sort();
-    names.dedup();
-    names
+    runtime: &str,
+    force: bool,
+) -> Result<RuntimeSkillInventorySummary, ApiError> {
+    let runtime_name = runtime.to_owned();
+    let runtime_service = Arc::clone(&state.runtime);
+    let snapshot = state
+        .skill_snapshots
+        .get_or_refresh(
+            SkillSnapshotKey::Machine(runtime.to_owned()),
+            force,
+            move || async move { runtime_service.inspect_machine_skills(&runtime_name).await },
+        )
+        .await?;
+    let SkillSnapshot {
+        inspection,
+        cache_status,
+        expires_at,
+    } = snapshot;
+    let RuntimeSkillInspection {
+        observed_at,
+        runtime,
+        compatibility,
+        evidence,
+        search_paths,
+        skills,
+        issues,
+    } = inspection;
+    let skills: Vec<_> = skills
         .into_iter()
-        .map(|runtime| {
-            let matching: Vec<&AgentSkillInventoryResponse> = inventories
-                .iter()
-                .filter(|inventory| inventory.runtime == runtime)
-                .collect();
-            let mut evidence_sources: Vec<String> = matching
-                .iter()
-                .map(|inventory| inventory.evidence.source.clone())
-                .collect();
-            evidence_sources.sort();
-            evidence_sources.dedup();
-            let unique_skills: HashSet<&str> = matching
-                .iter()
-                .flat_map(|inventory| &inventory.skills)
-                .map(|skill| skill.source_path.as_str())
-                .collect();
-            let unique_issues: HashSet<(&str, Option<&str>)> = matching
-                .iter()
-                .flat_map(|inventory| &inventory.issues)
-                .map(|issue| (issue.code.as_str(), issue.path.as_deref()))
-                .collect();
-            RuntimeSkillInventorySummary {
-                compatibility: state.runtime.skill_compatibility(&runtime),
-                runtime,
-                agent_count: matching.len(),
-                skill_count: unique_skills.len(),
-                issue_count: unique_issues.len(),
-                evidence_sources,
-            }
-        })
-        .collect()
+        .map(|skill| scanned_skill_view(skill, None))
+        .collect();
+    Ok(RuntimeSkillInventorySummary {
+        observed_at,
+        cache_status,
+        expires_at,
+        runtime,
+        compatibility,
+        agent_count: 0,
+        skill_count: skills.len(),
+        issue_count: issues.len(),
+        evidence_sources: vec![evidence.source.clone()],
+        evidence,
+        search_paths,
+        skills,
+        issues,
+    })
 }
 
-fn doctor_summary(inventories: &[AgentSkillInventoryResponse]) -> SkillDoctorSummary {
-    let mut runtimes: Vec<&str> = inventories
+fn doctor_summary(
+    runtimes: &[RuntimeSkillInventorySummary],
+    inventories: &[AgentSkillInventoryResponse],
+    diagnostics: &[SkillInspectionDiagnostic],
+) -> SkillDoctorSummary {
+    let runtime_count = runtimes
         .iter()
-        .map(|inventory| inventory.runtime.as_str())
-        .collect();
-    runtimes.sort_unstable();
-    runtimes.dedup();
-    let issue_count = inventories
+        .map(|runtime| runtime.runtime.as_str())
+        .chain(
+            inventories
+                .iter()
+                .map(|inventory| inventory.runtime.as_str()),
+        )
+        .collect::<HashSet<_>>()
+        .len();
+    let mut issues: HashMap<&str, &RuntimeSkillIssue> = HashMap::new();
+    for issue in runtimes
         .iter()
-        .map(|inventory| inventory.issues.len())
-        .sum();
-    let error_count = inventories
-        .iter()
-        .flat_map(|inventory| &inventory.issues)
+        .flat_map(|runtime| &runtime.issues)
+        .chain(inventories.iter().flat_map(|inventory| &inventory.issues))
+    {
+        issues.entry(&issue.fingerprint).or_insert(issue);
+    }
+    let error_count = issues
+        .values()
         .filter(|issue| issue.severity == "error")
-        .count();
-    let warning_count = inventories
-        .iter()
-        .flat_map(|inventory| &inventory.issues)
+        .count()
+        + diagnostics.len();
+    let warning_count = issues
+        .values()
         .filter(|issue| issue.severity == "warning")
         .count();
+    let unique_skills: HashSet<&str> = runtimes
+        .iter()
+        .flat_map(|runtime| &runtime.skills)
+        .chain(inventories.iter().flat_map(|inventory| &inventory.skills))
+        .map(|skill| skill.fingerprint.as_str())
+        .collect();
     SkillDoctorSummary {
         status: if error_count > 0 {
             "error"
@@ -949,15 +1373,74 @@ fn doctor_summary(inventories: &[AgentSkillInventoryResponse]) -> SkillDoctorSum
         } else {
             "ok"
         },
-        runtime_count: runtimes.len(),
+        runtime_count,
         agent_count: inventories.len(),
-        skill_count: inventories
-            .iter()
-            .map(|inventory| inventory.skills.len())
-            .sum(),
-        issue_count,
+        skill_count: unique_skills.len(),
+        issue_count: issues.len() + diagnostics.len(),
         error_count,
         warning_count,
+    }
+}
+
+fn skill_diagnostic(
+    subject: &'static str,
+    runtime: String,
+    agent_id: Option<Uuid>,
+    agent_name: Option<String>,
+    stage: &'static str,
+    error_type: &'static str,
+    message: String,
+) -> SkillInspectionDiagnostic {
+    let fingerprint = stable_api_fingerprint(&format!(
+        "{subject}|{runtime}|{}|{stage}|{error_type}",
+        agent_id.map_or_else(String::new, |id| id.to_string())
+    ));
+    SkillInspectionDiagnostic {
+        fingerprint,
+        subject,
+        runtime,
+        agent_id,
+        agent_name,
+        stage,
+        error_type,
+        message,
+        observed_at: chrono::Utc::now(),
+    }
+}
+
+fn stable_api_fingerprint(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn failed_runtime_inventory(
+    state: &AppState,
+    runtime: String,
+    message: String,
+) -> RuntimeSkillInventorySummary {
+    let observed_at = chrono::Utc::now();
+    RuntimeSkillInventorySummary {
+        observed_at,
+        cache_status: "fresh",
+        expires_at: observed_at,
+        compatibility: state.runtime.skill_compatibility(&runtime),
+        runtime,
+        agent_count: 0,
+        skill_count: 0,
+        issue_count: 0,
+        evidence_sources: vec!["unavailable".to_owned()],
+        evidence: RuntimeSkillEvidence {
+            source: "unavailable".to_owned(),
+            detail: message,
+            proves_session_visibility: false,
+        },
+        search_paths: Vec::new(),
+        skills: Vec::new(),
+        issues: Vec::new(),
     }
 }
 
@@ -1032,11 +1515,14 @@ async fn install_agent_skill(
         .create_agent_skill_install(agent_id, request.library_id, &install_path)
         .await
     {
-        Ok(install) => Ok(Json(InstallAgentSkillResponse {
-            install_id: install.id,
-            install_path,
-            bytes,
-        })),
+        Ok(install) => {
+            state.skill_snapshots.invalidate_agent(agent_id).await;
+            Ok(Json(InstallAgentSkillResponse {
+                install_id: install.id,
+                install_path,
+                bytes,
+            }))
+        }
         Err(error) => {
             if !matches!(error, StoreError::SkillAlreadyInstalled { .. }) {
                 if let Err(rollback_error) =
@@ -1098,6 +1584,7 @@ async fn uninstall_agent_skill(
             }
         }
     }
+    state.skill_snapshots.invalidate_agent(agent_id).await;
     Ok(Json(OkResponse { ok: true }))
 }
 
@@ -1210,14 +1697,72 @@ fn import_gateway_error(error: SkillImportError) -> ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use chrono::Utc;
 
     use super::*;
     use crate::RuntimeSkill;
 
+    fn empty_inspection(runtime: &str) -> RuntimeSkillInspection {
+        RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: RuntimeSkillCompatibility::Supported,
+            evidence: RuntimeSkillEvidence::default(),
+            search_paths: Vec::new(),
+            skills: Vec::new(),
+            issues: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn snapshot_ttl_expires_and_force_bypasses_an_older_entry() {
+        let coordinator = SkillSnapshotCoordinator::with_ttl(Duration::from_millis(20));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let key = SkillSnapshotKey::Machine("fake".to_owned());
+
+        for expected_status in ["fresh", "cached"] {
+            let calls = Arc::clone(&calls);
+            let snapshot = coordinator
+                .get_or_refresh(key.clone(), false, move || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(empty_inspection("fake"))
+                })
+                .await
+                .expect("snapshot");
+            assert_eq!(snapshot.cache_status, expected_status);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        let refresh_calls = Arc::clone(&calls);
+        let expired = coordinator
+            .get_or_refresh(key.clone(), false, move || async move {
+                refresh_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(empty_inspection("fake"))
+            })
+            .await
+            .expect("expired refresh");
+        assert_eq!(expired.cache_status, "fresh");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        let force_calls = Arc::clone(&calls);
+        let forced = coordinator
+            .get_or_refresh(key, true, move || async move {
+                force_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(empty_inspection("fake"))
+            })
+            .await
+            .expect("forced refresh");
+        assert_eq!(forced.cache_status, "fresh");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
     #[test]
     fn managed_skill_preserves_native_discovery_presence() {
         let finding = RuntimeSkillFinding {
+            fingerprint: "skill-reviewer".to_owned(),
             skill: RuntimeSkill {
                 name: "reviewer".to_owned(),
                 display_name: "Reviewer".to_owned(),

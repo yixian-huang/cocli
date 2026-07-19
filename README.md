@@ -106,8 +106,35 @@ and falls back to filesystem evidence with a doctor warning when a native probe
 fails. A native discovery response is still not proof that an already-running
 Runtime Session loaded or activated the Skill. The doctor UI and API expose the
 evidence source explicitly, and discovery does not write to user-global Skill
-directories. Planned follow-up work adds a Cursor native probe,
-plan/apply/verify changes, and lockfile/drift governance.
+directories.
+
+Inventory and doctor responses include `observedAt`, `cacheStatus`, and a
+three-second `expiresAt` boundary. Concurrent requests for the same Runtime or
+Agent snapshot share one in-flight probe; a result may be reused only inside
+that short TTL. Pass `?force=true` to inventory or doctor endpoints to bypass
+an older cached result. Skill install, uninstall, and reinstall invalidate the
+affected Agent snapshot. Ordinary `GET /api/agents/:agent_id/skills` remains a
+filesystem-only compatibility path and does not wait for a native probe.
+
+Machine inventory now scans each supported Runtime's user/global roots even
+when no Agent exists, then overlays Agent workspace results. Stable Skill and
+issue fingerprints deduplicate aliases and repeated machine/Agent evidence.
+Per-Runtime and per-Agent failures are returned as structured `diagnostics`
+alongside successful results rather than failing the whole machine report.
+
+Evidence boundaries are intentionally strict:
+
+- `machine-discovered` means a candidate was observed in a Runtime user/global
+  search root or its read-only native discovery response.
+- `runtime-discovered` means a Runtime native probe returned the candidate for
+  the probed working directory.
+- `agent-workspace` means the candidate exists in that Agent's workspace scope.
+- `session-effective` means an active Session demonstrably loaded or activated
+  the Skill. Codex/Grok discovery does not currently prove this, so it remains
+  unknown unless future Session-native evidence says otherwise.
+
+Planned follow-up work is limited to a Cursor native probe, Session-effective
+evidence, plan/apply/verify changes, and lockfile/drift governance.
 
 ## Repository layout
 

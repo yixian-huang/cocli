@@ -247,6 +247,8 @@ pub struct RuntimeSkillSearchPath {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSkillIssue {
+    /// Stable identifier for the logical root cause, independent of display order.
+    pub fingerprint: String,
     pub code: String,
     pub severity: String,
     pub message: String,
@@ -254,6 +256,10 @@ pub struct RuntimeSkillIssue {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_codes: Vec<String>,
 }
 
 /// One discovered candidate plus the evidence needed to interpret it.
@@ -263,6 +269,8 @@ pub struct RuntimeSkillFinding {
     #[serde(flatten)]
     pub skill: RuntimeSkill,
     pub runtime: String,
+    /// Stable identity used to deduplicate filesystem aliases and machine/Agent overlays.
+    pub fingerprint: String,
     pub scope: String,
     pub source_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -282,6 +290,7 @@ pub struct RuntimeSkillFinding {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSkillInspection {
+    pub observed_at: DateTime<Utc>,
     pub runtime: String,
     pub compatibility: RuntimeSkillCompatibility,
     pub evidence: RuntimeSkillEvidence,
@@ -766,6 +775,7 @@ pub trait RuntimeService: Send + Sync {
             .await?
             .into_iter()
             .map(|skill| RuntimeSkillFinding {
+                fingerprint: format!("{}:{}", runtime, skill.path),
                 scope: skill.skill_type.clone(),
                 source_path: skill.path.clone(),
                 resolved_path: None,
@@ -781,11 +791,28 @@ pub trait RuntimeService: Send + Sync {
             })
             .collect();
         Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
             runtime,
             compatibility: self.skill_compatibility(&agent.runtime),
             evidence,
             search_paths: Vec::new(),
             skills,
+            issues: Vec::new(),
+        })
+    }
+
+    /// Inspects user/global skill roots for a Runtime without creating an Agent.
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<RuntimeSkillInspection, RuntimeError> {
+        Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: self.skill_compatibility(runtime),
+            evidence: RuntimeSkillEvidence::default(),
+            search_paths: Vec::new(),
+            skills: Vec::new(),
             issues: Vec::new(),
         })
     }
@@ -894,6 +921,7 @@ pub(crate) struct AppState {
     deliveries: Arc<DeliveryCoordinator>,
     _delivery_worker: Arc<DeliveryWorker>,
     skill_mutation_locks: SkillMutationLocks,
+    skill_snapshots: Arc<skill_http::SkillSnapshotCoordinator>,
     bridge_mutation_lock: Arc<Mutex<()>>,
 }
 
@@ -1404,6 +1432,7 @@ fn router_with_delivery_config_and_live_events(
             deliveries,
             _delivery_worker: delivery_worker,
             skill_mutation_locks: Arc::new(Mutex::new(HashMap::new())),
+            skill_snapshots: skill_http::SkillSnapshotCoordinator::new(),
             bridge_mutation_lock: Arc::new(Mutex::new(())),
         })
 }

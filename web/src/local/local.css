@@ -1424,6 +1424,66 @@ textarea::placeholder {
   line-height: 1.55;
 }
 
+.skill-snapshot-note {
+  margin: 0;
+  color: var(--quiet);
+  font-family: var(--font-signal);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.skill-issue-browser {
+  display: grid;
+  gap: var(--space-3);
+  border-top: 1px solid var(--line);
+  padding-top: var(--space-3);
+}
+
+.skill-issue-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.skill-issue-filters label {
+  display: grid;
+  gap: 4px;
+  color: var(--quiet);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.skill-issue-filters select {
+  min-width: 120px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 6px 8px;
+  background: var(--panel);
+  color: var(--text);
+}
+
+.skill-grouped-issues {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.skill-grouped-issues li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  border-left: 2px solid var(--warning);
+  padding-left: var(--space-2);
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.skill-grouped-issues li.error { border-left-color: var(--danger); }
+.skill-grouped-issues p { width: 100%; margin: 0; }
+.skill-grouped-issues code { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+
 .runtime-skill-matrix-wrap {
   overflow-x: auto;
 }

@@ -139,11 +139,14 @@ export interface RuntimeSkillEvidence {
 }
 
 export interface RuntimeSkillIssue {
+  fingerprint: string
   code: string
   severity: 'warning' | 'error'
   message: string
   path?: string
   skillName?: string
+  relatedPaths?: string[]
+  relatedCodes?: string[]
 }
 
 export interface RuntimeSkillSearchPath {
@@ -176,6 +179,7 @@ export interface SkillLibraryEntry {
 }
 
 export interface AgentSkill {
+  fingerprint: string
   name: string
   displayName: string
   description: string
@@ -202,6 +206,9 @@ export interface AgentSkill {
 }
 
 export interface AgentSkillInventory {
+  observedAt: string
+  cacheStatus: SkillSnapshotStatus
+  expiresAt: string
   agentId: string
   agentName: string
   runtime: string
@@ -213,12 +220,33 @@ export interface AgentSkillInventory {
 }
 
 export interface RuntimeSkillInventorySummary {
+  observedAt: string
+  cacheStatus: SkillSnapshotStatus
+  expiresAt: string
   runtime: string
   compatibility: RuntimeSkillCompatibility
   agentCount: number
   skillCount: number
   issueCount: number
   evidenceSources: string[]
+  evidence: RuntimeSkillEvidence
+  searchPaths: RuntimeSkillSearchPath[]
+  skills: AgentSkill[]
+  issues: RuntimeSkillIssue[]
+}
+
+export type SkillSnapshotStatus = 'fresh' | 'cached' | 'mixed'
+
+export interface SkillInspectionDiagnostic {
+  fingerprint: string
+  subject: 'runtime' | 'agent'
+  runtime: string
+  agentId?: string
+  agentName?: string
+  stage: string
+  errorType: string
+  message: string
+  observedAt: string
 }
 
 export interface SkillDoctorSummary {
@@ -232,9 +260,13 @@ export interface SkillDoctorSummary {
 }
 
 export interface MachineSkillDoctor {
+  observedAt: string
+  cacheStatus: SkillSnapshotStatus
+  forceRefresh: boolean
   summary: SkillDoctorSummary
   runtimes: RuntimeSkillInventorySummary[]
   agents: AgentSkillInventory[]
+  diagnostics: SkillInspectionDiagnostic[]
 }
 
 export interface SkillFileEntry {
@@ -492,11 +524,11 @@ export const localApi = {
   },
   listSkillCompatibility: () =>
     request<Record<string, RuntimeSkillCompatibility>>('/api/runtimes/compatibility'),
-  inspectMachineSkills: () =>
-    request<MachineSkillDoctor>('/api/runtimes/skills/doctor'),
-  inspectAgentSkills: (agentId: string) =>
+  inspectMachineSkills: (force = false) =>
+    request<MachineSkillDoctor>(`/api/runtimes/skills/doctor${force ? '?force=true' : ''}`),
+  inspectAgentSkills: (agentId: string, force = false) =>
     request<{ summary: SkillDoctorSummary; inventory: AgentSkillInventory }>(
-      `/api/agents/${agentId}/skills/doctor`,
+      `/api/agents/${agentId}/skills/doctor${force ? '?force=true' : ''}`,
     ),
   listSkillLibrary: () =>
     request<{ entries: SkillLibraryEntry[] }>('/api/zones/local/skills/library'),
