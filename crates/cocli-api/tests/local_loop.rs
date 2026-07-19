@@ -1259,6 +1259,192 @@ async fn skill_snapshots_coalesce_cache_and_force_refresh() {
 }
 
 #[tokio::test]
+async fn skill_governance_profiles_lock_and_dry_run_plans_are_versioned_and_stale_safe() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(SnapshotSkillRuntime::default());
+    let app = router(store, runtime);
+    let profile_document = json!({
+        "schemaVersion": 1,
+        "name": "machine-baseline",
+        "description": "Pinned read-only governance baseline",
+        "skills": [{
+            "logicalIdentity": "shared-skill",
+            "source": {
+                "kind": "local",
+                "location": "/tmp/fake/shared-skill"
+            },
+            "version": "1.0.0",
+            "resolvedRevision": "fixture-v1",
+            "contentDigest": "sha256:fixture-content-v1",
+            "manifestDigest": "sha256:fixture-manifest-v1",
+            "targetRuntime": "fake",
+            "installScope": "machine",
+            "installationMode": "copy",
+            "enabled": true,
+            "updatePolicy": "pinned",
+            "allowedSources": ["local"],
+            "riskPolicy": "allowlisted",
+            "expectedDestination": "/tmp/fake/shared-skill"
+        }]
+    });
+    let (profile_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        profile_document.clone(),
+    )
+    .await;
+    assert_eq!(profile_status, StatusCode::CREATED);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    assert_eq!(profile["version"], 1);
+
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({
+            "profileId": profile_id,
+            "scope": "machine",
+            "scopeId": "ignored-client-value"
+        }),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+    assert_eq!(binding["scopeId"], "machine");
+
+    let (desired_status, desired) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/desired/effective",
+        json!({}),
+    )
+    .await;
+    assert_eq!(desired_status, StatusCode::OK);
+    assert_eq!(desired["skills"].as_array().map(Vec::len), Some(1));
+    assert!(desired["desiredConfigHash"]
+        .as_str()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
+
+    let preview_request = json!({
+        "scope": "machine",
+        "scopeId": "machine",
+        "force": true
+    });
+    let (evidence_status, evidence) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/evidence?force=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(evidence_status, StatusCode::OK);
+    assert!(evidence["skills"].as_array().is_some_and(|skills| skills
+        .iter()
+        .all(|skill| skill["sessionEffective"] == "unknown")));
+
+    let (lock_status, lock) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/lock/preview",
+        preview_request.clone(),
+    )
+    .await;
+    assert_eq!(lock_status, StatusCode::OK);
+    assert_eq!(lock["writesRealDirectories"], false);
+    assert_eq!(lock["lockfileBoundary"], "store_only");
+    assert!(lock["preview"]["lockfileHash"].is_string());
+
+    let (plan_status, plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        preview_request.clone(),
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::CREATED);
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["plan"]["status"], "draft");
+    assert!(plan["preview"]["content"]["actions"]
+        .as_array()
+        .is_some_and(|actions| actions
+            .iter()
+            .filter(|action| action["runtime"] == "fake")
+            .all(|action| action["blocked"] == true)));
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    assert_eq!(approved["plan"]["status"], "approved");
+    assert_eq!(approved["applied"], false);
+
+    let (stale_plan_status, stale_plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        preview_request,
+    )
+    .await;
+    assert_eq!(stale_plan_status, StatusCode::CREATED);
+    let stale_plan_id = stale_plan["plan"]["id"].as_str().expect("stale plan id");
+    let mut changed_document = profile_document;
+    changed_document["skills"][0]["enabled"] = json!(false);
+    let (update_status, updated) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/skills/governance/profiles/{profile_id}"),
+        json!({"expectedVersion": 1, "document": changed_document.clone()}),
+    )
+    .await;
+    assert_eq!(update_status, StatusCode::OK);
+    assert_eq!(updated["version"], 2);
+    let (version_conflict_status, _) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/skills/governance/profiles/{profile_id}"),
+        json!({"expectedVersion": 1, "document": changed_document}),
+    )
+    .await;
+    assert_eq!(version_conflict_status, StatusCode::CONFLICT);
+    let (conflict_status, conflict) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{stale_plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert_eq!(conflict["plan"]["status"], "stale");
+    assert!(conflict["staleReasons"]
+        .as_array()
+        .is_some_and(|reasons| reasons
+            .iter()
+            .any(|reason| reason == "desired_config_hash_changed")));
+
+    let mut secret_document = json!({
+        "schemaVersion": 1,
+        "name": "private-source",
+        "skills": [updated["skills"][0].clone()]
+    });
+    secret_document["skills"][0]["source"]["kind"] = json!("git");
+    secret_document["skills"][0]["source"]["location"] =
+        json!("https://raw-secret@example.com/private.git?token=raw-secret");
+    let (secret_status, secret_error) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/profiles",
+        secret_document,
+    )
+    .await;
+    assert_eq!(secret_status, StatusCode::BAD_REQUEST);
+    assert!(!secret_error.to_string().contains("raw-secret"));
+}
+
+#[tokio::test]
 async fn machine_skill_inventory_exists_without_agents_and_isolates_failures() {
     let store = Store::in_memory().await.expect("store should open");
     let runtime = Arc::new(SnapshotSkillRuntime::default());

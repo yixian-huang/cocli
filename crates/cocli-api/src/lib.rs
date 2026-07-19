@@ -24,6 +24,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex, Notify};
 use uuid::Uuid;
 
+mod skill_governance;
+mod skill_governance_http;
 mod skill_http;
 mod skill_import;
 
@@ -1296,6 +1298,7 @@ fn router_with_delivery_config_and_live_events(
             authorize_bridge_request,
         ));
     Router::new()
+        .merge(skill_governance_http::router())
         .merge(skill_http::router())
         .merge(bridge_router)
         .route("/healthz", get(health))
@@ -4157,6 +4160,9 @@ impl From<StoreError> for ApiError {
             StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
                 Some(StatusCode::CONFLICT)
             }
+            StoreError::SkillGovernanceNotFound { .. } => Some(StatusCode::NOT_FOUND),
+            StoreError::SkillGovernanceVersionConflict { .. }
+            | StoreError::SkillGovernanceTransitionConflict { .. } => Some(StatusCode::CONFLICT),
             StoreError::InvalidSkillName(_)
             | StoreError::InvalidSkillFilePath(_)
             | StoreError::InvalidSkillFileSize { .. } => Some(StatusCode::BAD_REQUEST),

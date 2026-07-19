@@ -269,6 +269,294 @@ export interface MachineSkillDoctor {
   diagnostics: SkillInspectionDiagnostic[]
 }
 
+export type SkillGovernanceScope = 'machine' | 'workspace' | 'agent'
+export type SkillGovernanceInstallMode = 'copy' | 'symlink' | 'native' | 'manual'
+export type SkillGovernanceUpdatePolicy = 'pinned' | 'manual' | 'track_revision'
+export type SkillGovernanceRiskPolicy = 'trusted' | 'allowlisted' | 'approval_required' | 'blocked'
+export type SkillGovernancePlanStatus = 'draft' | 'approved' | 'rejected' | 'stale'
+export type SkillGovernanceLockfileBoundary = 'workspace_candidate' | 'store_only'
+export type SkillGovernanceDriftKind =
+  | 'missing'
+  | 'extra'
+  | 'version_mismatch'
+  | 'content_mismatch'
+  | 'manifest_mismatch'
+  | 'source_mismatch'
+  | 'mode_mismatch'
+  | 'shadowed'
+  | 'broken_symlink'
+  | 'unknown_evidence'
+  | 'unsupported'
+  | 'enabled_mismatch'
+export type SkillGovernanceActionKind =
+  | 'install'
+  | 'update'
+  | 'enable'
+  | 'disable'
+  | 'remove'
+  | 'relink_copy'
+  | 'lockfile_update'
+  | 'manual'
+  | 'unsupported'
+export type SkillGovernanceActionRisk = 'low' | 'medium' | 'high'
+
+export interface SkillGovernanceDesiredSource {
+  kind: string
+  location: string
+  subpath?: string
+  credentialRef?: string
+}
+
+export interface SkillGovernanceDesiredSkill {
+  logicalIdentity: string
+  source: SkillGovernanceDesiredSource
+  version?: string
+  resolvedRevision?: string
+  contentDigest: string
+  manifestDigest: string
+  targetRuntime: string
+  installScope: SkillGovernanceScope
+  installationMode: SkillGovernanceInstallMode
+  enabled: boolean
+  updatePolicy: SkillGovernanceUpdatePolicy
+  allowedSources: string[]
+  riskPolicy: SkillGovernanceRiskPolicy
+  expectedDestination?: string
+}
+
+export interface SkillGovernanceProfileDocument {
+  schemaVersion: number
+  name: string
+  description: string
+  skills: SkillGovernanceDesiredSkill[]
+}
+
+export interface SkillGovernanceProfile extends SkillGovernanceProfileDocument {
+  id: string
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillGovernanceBinding {
+  id: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  profileId: string
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillGovernanceEffectiveSkill extends SkillGovernanceDesiredSkill {
+  identityFingerprint: string
+  sourceProvenance: string
+  ownerBindingId: string
+  ownerProfileId: string
+  ownerProfileName: string
+  ownerScope: SkillGovernanceScope
+}
+
+export interface SkillGovernanceConflict {
+  logicalIdentity: string
+  scope: SkillGovernanceScope
+  bindingIds: string[]
+  profileIds: string[]
+  reason: string
+}
+
+export interface SkillGovernanceEffectiveDesired {
+  schemaVersion: number
+  desiredConfigHash: string
+  skills: SkillGovernanceEffectiveSkill[]
+  conflicts: SkillGovernanceConflict[]
+}
+
+export interface SkillGovernanceObservedSkill {
+  logicalIdentity: string
+  runtime: string
+  scope: SkillGovernanceScope
+  scopeId?: string | null
+  sourceProvenance?: string | null
+  version?: string | null
+  contentDigest?: string | null
+  manifestDigest?: string | null
+  installationMode?: SkillGovernanceInstallMode | null
+  destination?: string | null
+  fingerprint: string
+  enabled?: boolean | null
+  shadowed: boolean
+  brokenSymlink: boolean
+  evidenceStatus: string
+  evidenceSource: string
+  sessionEffective: string
+  sessionReason: string
+  observedAt: string
+  supported: boolean
+}
+
+export interface SkillGovernanceObservationDiagnostic {
+  fingerprint: string
+  runtime: string
+  subject: string
+  stage: string
+  errorType: string
+  message: string
+  observedAt: string
+}
+
+export interface SkillGovernanceObservation {
+  observedAt: string
+  snapshotHash: string
+  skills: SkillGovernanceObservedSkill[]
+  diagnostics: SkillGovernanceObservationDiagnostic[]
+}
+
+export interface SkillGovernanceDrift {
+  fingerprint: string
+  skillFingerprint: string
+  kind: SkillGovernanceDriftKind
+  logicalIdentity: string
+  runtime: string
+  scope: SkillGovernanceScope
+  reason: string
+  expected?: string
+  actual?: string
+}
+
+export interface SkillGovernanceLockSnapshot {
+  id: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  profileId?: string | null
+  snapshot: Record<string, unknown>
+  observationHash: string
+  desiredHash: string
+  lockHash: string
+  createdAt: string
+}
+
+export interface SkillGovernanceLockfilePreview {
+  observedAt: string
+  snapshotHash: string
+  desiredConfigHash: string
+  lockfileHash: string
+  content: {
+    schemaVersion: number
+    generatedFrom: {
+      observationHash: string
+      desiredConfigHash: string
+    }
+    entries: SkillGovernanceLockEntry[]
+  }
+  serialized: string
+}
+
+export interface SkillGovernanceLockEntry {
+  logicalIdentity: string
+  identityFingerprint: string
+  sourceProvenance: string
+  resolvedRevision?: string
+  version?: string
+  contentDigest: string
+  manifestDigest: string
+  targetRuntime: string
+  scope: SkillGovernanceScope
+  installationMode: SkillGovernanceInstallMode
+  enabled: boolean
+  updatePolicy: SkillGovernanceUpdatePolicy
+  allowedSources: string[]
+  riskPolicy: SkillGovernanceRiskPolicy
+  expectedDestination: string
+  expectedFingerprint: string
+}
+
+export interface SkillGovernancePreviewRequest {
+  scope: SkillGovernanceScope
+  scopeId: string
+  workspaceId?: string
+  agentId?: string
+  force?: boolean
+}
+
+export interface SkillGovernanceLockPreviewResponse {
+  snapshot: SkillGovernanceLockSnapshot
+  preview: SkillGovernanceLockfilePreview
+  drift: SkillGovernanceDrift[]
+  previousLockHash?: string
+  lockfileChanged: boolean
+  writesRealDirectories: boolean
+  lockfileBoundary: SkillGovernanceLockfileBoundary
+}
+
+export interface SkillGovernancePlanAction {
+  action: SkillGovernanceActionKind
+  runtime: string
+  scope: SkillGovernanceScope
+  target: string
+  skillFingerprint: string
+  before: string
+  after: string
+  risk: SkillGovernanceActionRisk
+  reason: string
+  evidence: string
+  expectedObservationHash: string
+  expectedConfigHash: string
+  expectedLockHash: string
+  approvalRequired: boolean
+  blocked: boolean
+}
+
+export interface SkillGovernanceDryRunPlanPreview {
+  planHash: string
+  dryRun: boolean
+  content: {
+    schemaVersion: number
+    observationHash: string
+    desiredConfigHash: string
+    lockfileHash: string
+    actions: SkillGovernancePlanAction[]
+  }
+}
+
+export interface SkillGovernancePlan {
+  id: string
+  scope: SkillGovernanceScope
+  scopeId: string
+  plan: {
+    schemaVersion?: number
+    dryRun?: boolean
+    applied?: boolean
+    lockfileChanged?: boolean
+    staleReasons?: string[]
+    drift?: SkillGovernanceDrift[]
+    preview?: SkillGovernanceDryRunPlanPreview
+    [key: string]: unknown
+  }
+  observationHash: string
+  desiredHash: string
+  status: SkillGovernancePlanStatus
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface SkillGovernancePlanPreviewResponse {
+  plan: SkillGovernancePlan
+  preview: SkillGovernanceDryRunPlanPreview
+  drift: SkillGovernanceDrift[]
+  lockSnapshotId: string
+  lockfileChanged: boolean
+  applied: boolean
+}
+
+export interface SkillGovernancePlanDecisionResponse {
+  plan: SkillGovernancePlan
+  applied: boolean
+  dryRun: boolean
+  staleReasons: string[]
+}
+
 export interface SkillFileEntry {
   name: string
   isDir: boolean
@@ -570,6 +858,96 @@ export const localApi = {
   readAgentSkillFile: (agentId: string, installId: string, relativePath: string) =>
     request<{ content: string; binary: boolean }>(
       `/api/agents/${agentId}/skills/${installId}/files/${encodeURIComponent(relativePath)}`,
+    ),
+  listGovernanceProfiles: () =>
+    request<SkillGovernanceProfile[]>('/api/skills/governance/profiles'),
+  createGovernanceProfile: (document: SkillGovernanceProfileDocument) =>
+    request<SkillGovernanceProfile>('/api/skills/governance/profiles', {
+      method: 'POST',
+      body: JSON.stringify(document),
+    }),
+  updateGovernanceProfile: (
+    profileId: string,
+    input: { expectedVersion: number; document: SkillGovernanceProfileDocument },
+  ) =>
+    request<SkillGovernanceProfile>(`/api/skills/governance/profiles/${profileId}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  deleteGovernanceProfile: (profileId: string, expectedVersion: number) =>
+    request<void>(
+      `/api/skills/governance/profiles/${profileId}?expectedVersion=${expectedVersion}`,
+      { method: 'DELETE' },
+    ),
+  listGovernanceBindings: (input?: { scope?: SkillGovernanceScope; scopeId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.scopeId) params.set('scopeId', input.scopeId)
+    const query = params.toString()
+    return request<SkillGovernanceBinding[]>(
+      `/api/skills/governance/bindings${query ? `?${query}` : ''}`,
+    )
+  },
+  bindGovernanceProfile: (input: {
+    profileId: string
+    scope: SkillGovernanceScope
+    scopeId: string
+  }) =>
+    request<SkillGovernanceBinding>('/api/skills/governance/bindings', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  unbindGovernanceProfile: (bindingId: string, expectedVersion: number) =>
+    request<void>(
+      `/api/skills/governance/bindings/${bindingId}?expectedVersion=${expectedVersion}`,
+      { method: 'DELETE' },
+    ),
+  getGovernanceEffectiveDesired: (input?: { workspaceId?: string; agentId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.workspaceId) params.set('workspaceId', input.workspaceId)
+    if (input?.agentId) params.set('agentId', input.agentId)
+    const query = params.toString()
+    return request<SkillGovernanceEffectiveDesired>(
+      `/api/skills/governance/desired/effective${query ? `?${query}` : ''}`,
+    )
+  },
+  getGovernanceEvidence: (force = false) =>
+    request<SkillGovernanceObservation>(
+      `/api/skills/governance/evidence${force ? '?force=true' : ''}`,
+    ),
+  previewGovernanceLock: (input: SkillGovernancePreviewRequest) =>
+    request<SkillGovernanceLockPreviewResponse>('/api/skills/governance/lock/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listGovernanceLocks: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernanceLockSnapshot[]>(`/api/skills/governance/locks?${params}`)
+  },
+  listGovernancePlans: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernancePlan[]>(`/api/skills/governance/plans?${params}`)
+  },
+  previewGovernancePlan: (input: SkillGovernancePreviewRequest) =>
+    request<SkillGovernancePlanPreviewResponse>('/api/skills/governance/plans', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  approveGovernancePlan: (planId: string, expectedVersion: number) =>
+    request<SkillGovernancePlanDecisionResponse>(
+      `/api/skills/governance/plans/${planId}/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion }),
+      },
+    ),
+  rejectGovernancePlan: (planId: string, expectedVersion: number) =>
+    request<SkillGovernancePlanDecisionResponse>(
+      `/api/skills/governance/plans/${planId}/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion }),
+      },
     ),
   listTasks: (channelId: string, status?: TaskStatus) =>
     request<Task[]>(

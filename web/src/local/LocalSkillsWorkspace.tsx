@@ -10,6 +10,7 @@ import {
   PackagePlus,
   RefreshCw,
   RotateCw,
+  ShieldCheck,
   Trash2,
   X,
 } from 'lucide-react'
@@ -19,6 +20,13 @@ import {
   type AgentSkill,
   type MachineSkillDoctor,
   type RuntimeSkillCompatibility,
+  type SkillGovernanceBinding,
+  type SkillGovernanceEffectiveDesired,
+  type SkillGovernanceLockPreviewResponse,
+  type SkillGovernanceObservation,
+  type SkillGovernancePlanPreviewResponse,
+  type SkillGovernanceProfile,
+  type SkillGovernanceScope,
   type SkillFileEntry,
   type SkillLibraryEntry,
 } from './api'
@@ -52,6 +60,12 @@ function compatibilityLabel(
   }
 }
 
+type GovernanceTab = 'profiles' | 'lock' | 'plan' | 'evidence'
+
+function shortHash(value: string | undefined): string {
+  return value ? value.slice(0, 12) : 'unknown'
+}
+
 export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const [catalog, setCatalog] = useState<SkillLibraryEntry[]>([])
   const [compatibility, setCompatibility] = useState<Record<string, RuntimeSkillCompatibility>>({})
@@ -75,6 +89,24 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
   const [selectedFile, setSelectedFile] = useState('')
   const [fileContent, setFileContent] = useState('')
   const [fileBinary, setFileBinary] = useState(false)
+  const [governanceTab, setGovernanceTab] = useState<GovernanceTab>('profiles')
+  const [governanceProfiles, setGovernanceProfiles] = useState<SkillGovernanceProfile[]>([])
+  const [governanceBindings, setGovernanceBindings] = useState<SkillGovernanceBinding[]>([])
+  const [governanceEvidence, setGovernanceEvidence] = useState<SkillGovernanceObservation | null>(null)
+  const [effectiveDesired, setEffectiveDesired] = useState<SkillGovernanceEffectiveDesired | null>(null)
+  const [lockPreview, setLockPreview] = useState<SkillGovernanceLockPreviewResponse | null>(null)
+  const [planPreview, setPlanPreview] = useState<SkillGovernancePlanPreviewResponse | null>(null)
+  const [profileName, setProfileName] = useState('default-governance-profile')
+  const [profileDescription, setProfileDescription] = useState('Safe default profile with no desired skills yet.')
+  const [bindingProfileId, setBindingProfileId] = useState('')
+  const [bindingScope, setBindingScope] = useState<SkillGovernanceScope>('machine')
+  const [bindingScopeId, setBindingScopeId] = useState('machine')
+  const [governanceWorkspaceId, setGovernanceWorkspaceId] = useState('')
+  const [governanceAgentId, setGovernanceAgentId] = useState('')
+  const [driftFilter, setDriftFilter] = useState('all')
+  const [actionFilter, setActionFilter] = useState('all')
+  const [governanceRuntimeFilter, setGovernanceRuntimeFilter] = useState('all')
+  const [governanceScopeFilter, setGovernanceScopeFilter] = useState('all')
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedAgentId) ?? null,
@@ -107,6 +139,44 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       || skill.type.toLocaleLowerCase().includes(query)
     ))
   }, [agentSkillQuery, agentSkills])
+  const governanceTarget = useMemo(() => ({
+    workspaceId: governanceWorkspaceId.trim() || undefined,
+    agentId: governanceAgentId.trim() || selectedAgentId || undefined,
+  }), [governanceAgentId, governanceWorkspaceId, selectedAgentId])
+  const governanceRequest = useMemo(() => ({
+    scope: bindingScope,
+    scopeId: bindingScope === 'machine' ? 'machine' : bindingScopeId.trim(),
+    workspaceId: governanceTarget.workspaceId,
+    agentId: governanceTarget.agentId,
+    force: true,
+  }), [bindingScope, bindingScopeId, governanceTarget])
+  const governanceRuntimeOptions = useMemo(() => {
+    const runtimes = new Set<string>()
+    governanceEvidence?.skills.forEach((skill) => runtimes.add(skill.runtime))
+    lockPreview?.drift.forEach((drift) => runtimes.add(drift.runtime))
+    planPreview?.preview.content.actions.forEach((item) => runtimes.add(item.runtime))
+    return [...runtimes].sort()
+  }, [governanceEvidence, lockPreview, planPreview])
+  const visibleDrift = useMemo(() => (
+    (lockPreview?.drift ?? []).filter((drift) => (
+      (driftFilter === 'all' || drift.kind === driftFilter)
+      && (governanceRuntimeFilter === 'all' || drift.runtime === governanceRuntimeFilter)
+      && (governanceScopeFilter === 'all' || drift.scope === governanceScopeFilter)
+    ))
+  ), [driftFilter, governanceRuntimeFilter, governanceScopeFilter, lockPreview])
+  const visiblePlanActions = useMemo(() => (
+    (planPreview?.preview.content.actions ?? []).filter((item) => (
+      (actionFilter === 'all' || item.action === actionFilter)
+      && (governanceRuntimeFilter === 'all' || item.runtime === governanceRuntimeFilter)
+      && (governanceScopeFilter === 'all' || item.scope === governanceScopeFilter)
+    ))
+  ), [actionFilter, governanceRuntimeFilter, governanceScopeFilter, planPreview])
+  const visibleEvidence = useMemo(() => (
+    (governanceEvidence?.skills ?? []).filter((skill) => (
+      (governanceRuntimeFilter === 'all' || skill.runtime === governanceRuntimeFilter)
+      && (governanceScopeFilter === 'all' || skill.scope === governanceScopeFilter)
+    ))
+  ), [governanceEvidence, governanceRuntimeFilter, governanceScopeFilter])
 
   const refreshCatalog = useCallback(async () => {
     const response = await localApi.listSkillLibrary()
@@ -135,6 +205,26 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       setLoadingAgent(false)
     }
   }, [])
+
+  const refreshGovernance = useCallback(async (force = false) => {
+    const target = {
+      workspaceId: governanceWorkspaceId.trim() || undefined,
+      agentId: governanceAgentId.trim() || selectedAgentId || undefined,
+    }
+    const [profiles, bindings, evidence, desired] = await Promise.all([
+      localApi.listGovernanceProfiles(),
+      localApi.listGovernanceBindings(),
+      localApi.getGovernanceEvidence(force),
+      localApi.getGovernanceEffectiveDesired(target),
+    ])
+    setGovernanceProfiles(profiles)
+    setGovernanceBindings(bindings)
+    setGovernanceEvidence(evidence)
+    setEffectiveDesired(desired)
+    setBindingProfileId((current) => (
+      profiles.some((profile) => profile.id === current) ? current : profiles[0]?.id ?? ''
+    ))
+  }, [governanceAgentId, governanceWorkspaceId, selectedAgentId])
 
   useEffect(() => {
     if (selectedAgentId && agents.some((agent) => agent.id === selectedAgentId)) return
@@ -192,6 +282,34 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
       cancelled = true
     }
   }, [selectedAgentId, t])
+
+  useEffect(() => {
+    if (governanceAgentId || !selectedAgentId) return
+    setGovernanceAgentId(selectedAgentId)
+  }, [governanceAgentId, selectedAgentId])
+
+  useEffect(() => {
+    if (bindingScope === 'machine') {
+      setBindingScopeId('machine')
+    } else if (bindingScope === 'agent' && selectedAgentId && (!bindingScopeId || bindingScopeId === 'machine')) {
+      setBindingScopeId(selectedAgentId)
+    } else if (bindingScope === 'workspace' && bindingScopeId === 'machine') {
+      setBindingScopeId('')
+    }
+  }, [bindingScope, bindingScopeId, selectedAgentId])
+
+  useEffect(() => {
+    let cancelled = false
+    refreshGovernance()
+      .catch((nextError: unknown) => {
+        if (!cancelled) {
+          setError(nextError instanceof Error ? nextError.message : t('skillsLoadError'))
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [refreshGovernance, t])
 
   const runAction = useCallback(async (key: string, task: () => Promise<void>) => {
     setAction(key)
@@ -311,6 +429,55 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
     setFileBinary(false)
   }
 
+  async function createGovernanceProfile(event: FormEvent) {
+    event.preventDefault()
+    const name = profileName.trim()
+    if (!name) return
+    await runAction('governance:create-profile', async () => {
+      const profile = await localApi.createGovernanceProfile({
+        schemaVersion: 1,
+        name,
+        description: profileDescription.trim(),
+        skills: [],
+      })
+      setBindingProfileId(profile.id)
+      await refreshGovernance(true)
+    })
+  }
+
+  async function bindGovernanceProfile(event: FormEvent) {
+    event.preventDefault()
+    if (!bindingProfileId || !governanceRequest.scopeId) return
+    await runAction('governance:bind-profile', async () => {
+      await localApi.bindGovernanceProfile({
+        profileId: bindingProfileId,
+        scope: bindingScope,
+        scopeId: governanceRequest.scopeId,
+      })
+      await refreshGovernance(true)
+    })
+  }
+
+  function previewGovernanceLock() {
+    if (!governanceRequest.scopeId) return
+    void runAction('governance:preview-lock', async () => {
+      const preview = await localApi.previewGovernanceLock(governanceRequest)
+      setLockPreview(preview)
+      setGovernanceTab('lock')
+      await refreshGovernance(true)
+    })
+  }
+
+  function previewGovernancePlan() {
+    if (!governanceRequest.scopeId) return
+    void runAction('governance:preview-plan', async () => {
+      const preview = await localApi.previewGovernancePlan(governanceRequest)
+      setPlanPreview(preview)
+      setGovernanceTab('plan')
+      await refreshGovernance(true)
+    })
+  }
+
   const selectedCompatibility = selectedAgent
     ? compatibility[selectedAgent.runtime]
     : undefined
@@ -392,6 +559,291 @@ export function LocalSkillsWorkspace({ agents, t }: LocalSkillsWorkspaceProps) {
           <button type="button" onClick={() => setError(null)}>{t('dismiss')}</button>
         </div>
       )}
+
+      <section className="skill-governance" aria-labelledby="skill-governance-title">
+        <div className="workspace-section-title">
+          <div>
+            <h2 id="skill-governance-title">{t('skillsGovernanceTitle')}</h2>
+            <p>{t('skillsGovernanceDescription')}</p>
+          </div>
+          <span>{t('skillsGovernanceDryRun')}</span>
+        </div>
+        <div className="governance-status-row">
+          <span className="governance-pill">{t('skillsGovernancePreviewOnly')}</span>
+          <span className="governance-pill warning">{t('skillsGovernanceUnknownSession')}</span>
+          {planPreview?.plan.status === 'approved' && !planPreview.applied && (
+            <span className="governance-pill warning">{t('skillsGovernanceApprovedNotApplied')}</span>
+          )}
+          {lockPreview && (
+            <span className={`governance-pill ${lockPreview.lockfileChanged ? 'warning' : 'ok'}`}>
+              {lockPreview.lockfileChanged
+                ? t('skillsGovernanceLockChanged')
+                : t('skillsGovernanceLockUnchanged')}
+            </span>
+          )}
+          {lockPreview?.writesRealDirectories
+            ? <span className="governance-pill danger">{t('skillsGovernanceWritesRealDirectories')}</span>
+            : <span className="governance-pill ok">{t('skillsGovernancePreviewOnly')}</span>}
+          {lockPreview?.lockfileBoundary && (
+            <span className="governance-pill">{lockPreview.lockfileBoundary}</span>
+          )}
+        </div>
+        <div className="governance-tabs" role="tablist" aria-label={t('skillsGovernanceTitle')}>
+          {([
+            ['profiles', t('skillsGovernanceProfiles')],
+            ['lock', t('skillsGovernanceLockDrift')],
+            ['plan', t('skillsGovernancePlanPreview')],
+            ['evidence', t('skillsGovernanceEvidence')],
+          ] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={governanceTab === key}
+              className={governanceTab === key ? 'active' : ''}
+              onClick={() => setGovernanceTab(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {governanceTab === 'profiles' && (
+          <div className="governance-grid">
+            <form className="governance-form" onSubmit={createGovernanceProfile}>
+              <label htmlFor="governance-profile-name">{t('skillsGovernanceProfileName')}</label>
+              <input
+                id="governance-profile-name"
+                value={profileName}
+                onChange={(event) => setProfileName(event.target.value)}
+              />
+              <label htmlFor="governance-profile-description">{t('skillsGovernanceProfileDescription')}</label>
+              <input
+                id="governance-profile-description"
+                value={profileDescription}
+                onChange={(event) => setProfileDescription(event.target.value)}
+              />
+              <p>{t('skillsGovernanceProfileSafeDefault')}</p>
+              <button
+                type="submit"
+                className="primary-action"
+                disabled={!profileName.trim() || action === 'governance:create-profile'}
+              >
+                <ShieldCheck size={15} aria-hidden="true" />
+                {action === 'governance:create-profile'
+                  ? t('skillsGovernanceCreatingProfile')
+                  : t('skillsGovernanceCreateProfile')}
+              </button>
+            </form>
+            <form className="governance-form" onSubmit={bindGovernanceProfile}>
+              <label htmlFor="governance-profile-select">{t('skillsGovernanceBindProfile')}</label>
+              <select
+                id="governance-profile-select"
+                value={bindingProfileId}
+                onChange={(event) => setBindingProfileId(event.target.value)}
+              >
+                <option value="">{t('skillsGovernanceNoProfiles')}</option>
+                {governanceProfiles.map((profile) => (
+                  <option key={profile.id} value={profile.id}>
+                    {profile.name} · v{profile.version}
+                  </option>
+                ))}
+              </select>
+              <label htmlFor="governance-binding-scope">{t('skillsGovernanceBindingScope')}</label>
+              <select
+                id="governance-binding-scope"
+                value={bindingScope}
+                onChange={(event) => setBindingScope(event.target.value as SkillGovernanceScope)}
+              >
+                <option value="machine">{t('skillsGovernanceMachine')}</option>
+                <option value="workspace">{t('skillsGovernanceWorkspace')}</option>
+                <option value="agent">{t('skillsGovernanceAgent')}</option>
+              </select>
+              <label htmlFor="governance-scope-id">{t('skillsGovernanceScopeId')}</label>
+              <input
+                id="governance-scope-id"
+                value={bindingScopeId}
+                onChange={(event) => setBindingScopeId(event.target.value)}
+                placeholder={t('skillsGovernanceScopeIdPlaceholder')}
+                disabled={bindingScope === 'machine'}
+              />
+              <button
+                type="submit"
+                disabled={!bindingProfileId || !governanceRequest.scopeId || action === 'governance:bind-profile'}
+              >
+                {t('skillsGovernanceBindProfile')}
+              </button>
+            </form>
+            <div className="governance-list">
+              <h3>{t('skillsGovernanceProfiles')}</h3>
+              {governanceProfiles.length === 0 && <p>{t('skillsGovernanceNoProfiles')}</p>}
+              {governanceProfiles.map((profile) => (
+                <article key={profile.id}>
+                  <strong>{profile.name}</strong>
+                  <span>v{profile.version} · {profile.skills.length} desired</span>
+                  {profile.description && <p>{profile.description}</p>}
+                </article>
+              ))}
+            </div>
+            <div className="governance-list">
+              <h3>{t('skillsGovernanceBindProfile')}</h3>
+              {governanceBindings.length === 0 && <p>{t('skillsGovernanceNoBindings')}</p>}
+              {governanceBindings.map((binding) => (
+                <article key={binding.id}>
+                  <strong>{binding.scope}:{binding.scopeId}</strong>
+                  <span>{shortHash(binding.profileId)} · v{binding.version}</span>
+                </article>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {governanceTab !== 'profiles' && (
+          <div className="governance-controls">
+            <label>
+              <span>{t('skillsGovernanceTargetWorkspace')}</span>
+              <input
+                value={governanceWorkspaceId}
+                onChange={(event) => setGovernanceWorkspaceId(event.target.value)}
+                placeholder="workspace id"
+              />
+            </label>
+            <label>
+              <span>{t('skillsGovernanceTargetAgent')}</span>
+              <input
+                value={governanceAgentId}
+                onChange={(event) => setGovernanceAgentId(event.target.value)}
+                placeholder={selectedAgentId || 'agent id'}
+              />
+            </label>
+            <label>
+              <span>{t('skillsGovernanceRuntimeFilter')}</span>
+              <select value={governanceRuntimeFilter} onChange={(event) => setGovernanceRuntimeFilter(event.target.value)}>
+                <option value="all">{t('skillsAll')}</option>
+                {governanceRuntimeOptions.map((runtime) => <option key={runtime} value={runtime}>{runtime}</option>)}
+              </select>
+            </label>
+            <label>
+              <span>{t('skillsGovernanceScopeFilter')}</span>
+              <select value={governanceScopeFilter} onChange={(event) => setGovernanceScopeFilter(event.target.value)}>
+                <option value="all">{t('skillsAll')}</option>
+                <option value="machine">{t('skillsGovernanceMachine')}</option>
+                <option value="workspace">{t('skillsGovernanceWorkspace')}</option>
+                <option value="agent">{t('skillsGovernanceAgent')}</option>
+              </select>
+            </label>
+            {governanceTab === 'lock' && (
+              <label>
+                <span>{t('skillsGovernanceDriftFilter')}</span>
+                <select value={driftFilter} onChange={(event) => setDriftFilter(event.target.value)}>
+                  <option value="all">{t('skillsAll')}</option>
+                  {[...new Set((lockPreview?.drift ?? []).map((drift) => drift.kind))].map((kind) => (
+                    <option key={kind} value={kind}>{kind}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {governanceTab === 'plan' && (
+              <label>
+                <span>{t('skillsGovernanceActionFilter')}</span>
+                <select value={actionFilter} onChange={(event) => setActionFilter(event.target.value)}>
+                  <option value="all">{t('skillsAll')}</option>
+                  {[...new Set((planPreview?.preview.content.actions ?? []).map((item) => item.action))].map((kind) => (
+                    <option key={kind} value={kind}>{kind}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <button type="button" onClick={previewGovernanceLock} disabled={!governanceRequest.scopeId || action === 'governance:preview-lock'}>
+              {t('skillsGovernancePreviewLock')}
+            </button>
+            <button type="button" onClick={previewGovernancePlan} disabled={!governanceRequest.scopeId || action === 'governance:preview-plan'}>
+              {t('skillsGovernancePreviewPlan')}
+            </button>
+            <button
+              type="button"
+              onClick={() => void runAction('governance:evidence', () => refreshGovernance(true))}
+              disabled={action === 'governance:evidence'}
+            >
+              {t('skillsGovernanceRefreshEvidence')}
+            </button>
+          </div>
+        )}
+
+        {governanceTab === 'lock' && (
+          <div className="governance-list">
+            <h3>{t('skillsGovernanceLockDrift')} · {shortHash(lockPreview?.preview.lockfileHash)}</h3>
+            {visibleDrift.length === 0 && <p>{t('skillsGovernanceNoDrift')}</p>}
+            {visibleDrift.map((drift) => (
+              <article key={drift.fingerprint}>
+                <strong>{drift.kind} · {drift.logicalIdentity}</strong>
+                <span>{drift.runtime} · {drift.scope}</span>
+                <p>{drift.reason}</p>
+                {(drift.expected || drift.actual) && <code>{drift.expected ?? 'unknown'} → {drift.actual ?? 'unknown'}</code>}
+              </article>
+            ))}
+          </div>
+        )}
+
+        {governanceTab === 'plan' && (
+          <div className="governance-list">
+            <h3>
+              {t('skillsGovernancePlanPreview')} · {planPreview?.preview.dryRun ? t('skillsGovernanceDryRun') : t('skillsGovernanceStatus')}
+            </h3>
+            {planPreview && (
+              <div className="governance-status-row">
+                <span className="governance-pill">{planPreview.plan.status}</span>
+                <span className="governance-pill">{planPreview.applied ? t('skillsGovernanceApplied') : t('skillsGovernanceNotApplied')}</span>
+                {!planPreview.applied && planPreview.plan.status === 'approved' && (
+                  <span className="governance-pill warning">{t('skillsGovernanceApprovedNotApplied')}</span>
+                )}
+              </div>
+            )}
+            {visiblePlanActions.length === 0 && <p>{t('skillsGovernanceNoActions')}</p>}
+            {visiblePlanActions.map((item) => (
+              <article key={`${item.action}:${item.skillFingerprint}`}>
+                <strong>{item.action} · {item.target}</strong>
+                <span>{item.runtime} · {item.scope} · {item.risk}</span>
+                <p>{item.reason}</p>
+                <code>{item.before} → {item.after}</code>
+              </article>
+            ))}
+            {planPreview?.plan.plan.staleReasons?.length ? (
+              <div>
+                <h3>{t('skillsGovernanceStaleReasons')}</h3>
+                {planPreview.plan.plan.staleReasons.map((reason) => <p key={reason}>{reason}</p>)}
+              </div>
+            ) : null}
+          </div>
+        )}
+
+        {governanceTab === 'evidence' && (
+          <div className="governance-list">
+            <h3>{t('skillsGovernanceEvidence')} · {shortHash(governanceEvidence?.snapshotHash)}</h3>
+            {effectiveDesired && (
+              <div className="governance-status-row">
+                <span className="governance-pill">{t('skillsGovernanceDesired')}: {effectiveDesired.skills.length}</span>
+                <span className={`governance-pill ${effectiveDesired.conflicts.length > 0 ? 'danger' : 'ok'}`}>
+                  {t('skillsGovernanceConflicts')}: {effectiveDesired.conflicts.length}
+                </span>
+              </div>
+            )}
+            {visibleEvidence.length === 0 && <p>{t('skillsGovernanceNoEvidenceRows')}</p>}
+            {visibleEvidence.map((skill) => (
+              <article key={skill.fingerprint}>
+                <strong>{skill.logicalIdentity}</strong>
+                <span>{skill.runtime} · {skill.scope} · {skill.evidenceStatus}</span>
+                <p>
+                  {skill.sessionEffective === 'unknown'
+                    ? t('skillsGovernanceUnknownSession')
+                    : `${skill.sessionEffective}: ${skill.sessionReason}`}
+                </p>
+                <code>{skill.evidenceSource} · {skill.destination ?? skill.fingerprint}</code>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
 
       <section className="skill-diagnostics" aria-labelledby="skill-inventory-title">
         <div className="workspace-section-title">

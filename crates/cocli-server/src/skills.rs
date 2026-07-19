@@ -62,9 +62,6 @@ async fn inspect_agent(
     include_native: bool,
 ) -> Result<RuntimeSkillInspection, RuntimeError> {
     let workspace = config.workspace_root.join(agent.id.to_string());
-    tokio::fs::create_dir_all(&workspace)
-        .await
-        .map_err(|error| skill_io_error("create agent workspace", &error))?;
     let paths = skill_paths(registry, &agent.runtime, &workspace);
     let compatibility = compatibility(registry, &agent.runtime);
     let driver = registry.get(&agent.runtime);
@@ -85,6 +82,13 @@ async fn inspect_agent(
         if let Some(driver) = driver {
             match driver.probe_skills(&workspace).await {
                 Ok(Some(probe)) => merge_native_probe(&mut inspection, probe, &workspace),
+                Ok(None) if agent.runtime == "cursor" => inspection.issues.push(skill_issue(
+                    "native_probe_unsupported",
+                    "warning",
+                    "Cursor exposes filesystem-discovered Agent Skills but no stable native discovery or session-effective contract; manual verification is required".to_owned(),
+                    None,
+                    None,
+                )),
                 Ok(None) => {}
                 Err(error) => inspection.issues.push(skill_issue(
                     "native_probe_failed",
@@ -137,6 +141,13 @@ pub(crate) async fn inspect_machine(
                 merge_native_probe(&mut inspection, probe, workspace);
                 inspection.skills.retain(|skill| skill.scope != "workspace");
             }
+            Ok(None) if runtime == "cursor" => inspection.issues.push(skill_issue(
+                "native_probe_unsupported",
+                "warning",
+                "Cursor exposes filesystem-discovered Agent Skills but no stable native discovery or session-effective contract; manual verification is required".to_owned(),
+                None,
+                None,
+            )),
             Ok(None) => {}
             Err(error) => inspection.issues.push(skill_issue(
                 "native_probe_failed",
@@ -337,6 +348,8 @@ fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
         "cursor" => vec![
             workspace.join(".cursor/skills"),
             workspace.join(".agents/skills"),
+            workspace.join(".claude/skills"),
+            workspace.join(".codex/skills"),
         ],
         "gemini" => vec![workspace.join(".gemini/skills")],
         "grok" => vec![workspace.join(".grok/skills")],
@@ -355,6 +368,8 @@ fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
             "cursor" => {
                 paths.push(home.join(".cursor/skills"));
                 paths.push(home.join(".agents/skills"));
+                paths.push(home.join(".claude/skills"));
+                paths.push(home.join(".codex/skills"));
             }
             "gemini" => paths.push(home.join(".gemini/skills")),
             "grok" => {
@@ -1464,6 +1479,84 @@ mod tests {
             .any(|issue| issue.code == "native_probe_failed"));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cursor_unsupported_native_contract_keeps_filesystem_inventory_and_manual_diagnostic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("cursor");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+        let skill = workspace.join(".cursor/skills/fallback");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: Cursor fallback\ndescription: Filesystem evidence.\n---\n",
+        )
+        .expect("skill manifest");
+        let cursor = temp.path().join("cursor-agent");
+        fs::write(
+            &cursor,
+            "#!/bin/sh\nprintf '%s\\n' 'Usage: cursor-agent [options]' 'Start the Cursor Agent'\n",
+        )
+        .expect("fake cursor");
+        fs::set_permissions(&cursor, fs::Permissions::from_mode(0o755))
+            .expect("cursor permissions");
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(cocli_driver_cursor::CursorDriver::new(
+            cursor,
+            temp.path().join("missing-bridge"),
+        )));
+
+        let report = inspect(&Arc::new(registry), &config, &agent)
+            .await
+            .expect("filesystem fallback should succeed");
+
+        assert!(report
+            .skills
+            .iter()
+            .any(|finding| finding.skill.name == "fallback"));
+        assert_eq!(report.evidence.source, "filesystem");
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_unsupported"));
+    }
+
+    #[tokio::test]
+    async fn missing_cursor_cli_keeps_filesystem_inventory() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("cursor");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+        let skill = workspace.join(".cursor/skills/fallback");
+        fs::create_dir_all(&skill).expect("skill directory");
+        fs::write(
+            skill.join("SKILL.md"),
+            "---\nname: Cursor fallback\ndescription: Filesystem evidence.\n---\n",
+        )
+        .expect("skill manifest");
+        let mut registry = RuntimeRegistry::new();
+        registry.register(Arc::new(cocli_driver_cursor::CursorDriver::new(
+            temp.path().join("missing-cursor"),
+            temp.path().join("missing-bridge"),
+        )));
+
+        let report = inspect(&Arc::new(registry), &config, &agent)
+            .await
+            .expect("filesystem fallback should succeed");
+
+        assert!(report
+            .skills
+            .iter()
+            .any(|finding| finding.skill.name == "fallback"));
+        assert!(report
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_failed"));
+    }
+
     #[tokio::test]
     async fn machine_inventory_reports_user_roots_without_creating_an_agent_workspace() {
         let temp = tempdir().expect("temp directory");
@@ -1480,6 +1573,24 @@ mod tests {
             .iter()
             .any(|path| path.path.ends_with(".cursor/skills")));
         assert!(!config.workspace_root.exists());
+    }
+
+    #[tokio::test]
+    async fn agent_inventory_does_not_create_a_missing_runtime_workspace() {
+        let temp = tempdir().expect("temp directory");
+        let config = test_config(temp.path());
+        let agent = test_agent("cursor");
+        let workspace = config.workspace_root.join(agent.id.to_string());
+
+        let report = inspect(&Arc::new(RuntimeRegistry::new()), &config, &agent)
+            .await
+            .expect("read-only agent inspection");
+
+        assert!(report
+            .skills
+            .iter()
+            .all(|finding| finding.scope != "workspace"));
+        assert!(!workspace.exists());
     }
 
     #[cfg(unix)]

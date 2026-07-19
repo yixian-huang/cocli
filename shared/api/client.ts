@@ -17,6 +17,18 @@ import type {
   OverflowStatsEntry,
   ResponderMode,
   ResponderRole,
+  SkillGovernanceBinding,
+  SkillGovernanceEffectiveDesired,
+  SkillGovernanceLockPreviewResponse,
+  SkillGovernanceLockSnapshot,
+  SkillGovernanceObservation,
+  SkillGovernancePlan,
+  SkillGovernancePlanDecisionResponse,
+  SkillGovernancePlanPreviewResponse,
+  SkillGovernancePreviewRequest,
+  SkillGovernanceProfile,
+  SkillGovernanceProfileDocument,
+  SkillGovernanceScope,
   SkillFileEntry,
   SkillLibraryEntry,
   SkillLibraryFileMeta,
@@ -613,6 +625,102 @@ export const runtimes = {
   skillDoctor: (force = false) =>
     request<MachineSkillDoctor>(
       `/api/runtimes/skills/doctor${force ? '?force=true' : ''}`
+    ),
+}
+
+// Skill governance (Phase 3A — desired profiles, bindings, dry-run previews)
+export const skillGovernance = {
+  listProfiles: () =>
+    request<SkillGovernanceProfile[]>('/api/skills/governance/profiles'),
+  createProfile: (document: SkillGovernanceProfileDocument) =>
+    request<SkillGovernanceProfile>('/api/skills/governance/profiles', {
+      method: 'POST',
+      body: JSON.stringify(document),
+    }),
+  getProfile: (profileId: string) =>
+    request<SkillGovernanceProfile>(`/api/skills/governance/profiles/${profileId}`),
+  updateProfile: (
+    profileId: string,
+    input: { expectedVersion: number; document: SkillGovernanceProfileDocument },
+  ) =>
+    request<SkillGovernanceProfile>(`/api/skills/governance/profiles/${profileId}`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    }),
+  deleteProfile: (profileId: string, expectedVersion: number) =>
+    request<void>(
+      `/api/skills/governance/profiles/${profileId}?expectedVersion=${expectedVersion}`,
+      { method: 'DELETE' },
+    ),
+  listBindings: (input?: { scope?: SkillGovernanceScope; scopeId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.scope) params.set('scope', input.scope)
+    if (input?.scopeId) params.set('scopeId', input.scopeId)
+    const query = params.toString()
+    return request<SkillGovernanceBinding[]>(
+      `/api/skills/governance/bindings${query ? `?${query}` : ''}`,
+    )
+  },
+  bindProfile: (input: {
+    profileId: string
+    scope: SkillGovernanceScope
+    scopeId: string
+  }) =>
+    request<SkillGovernanceBinding>('/api/skills/governance/bindings', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  unbindProfile: (bindingId: string, expectedVersion: number) =>
+    request<void>(
+      `/api/skills/governance/bindings/${bindingId}?expectedVersion=${expectedVersion}`,
+      { method: 'DELETE' },
+    ),
+  effectiveDesired: (input?: { workspaceId?: string; agentId?: string }) => {
+    const params = new URLSearchParams()
+    if (input?.workspaceId) params.set('workspaceId', input.workspaceId)
+    if (input?.agentId) params.set('agentId', input.agentId)
+    const query = params.toString()
+    return request<SkillGovernanceEffectiveDesired>(
+      `/api/skills/governance/desired/effective${query ? `?${query}` : ''}`,
+    )
+  },
+  evidence: (force = false) =>
+    request<SkillGovernanceObservation>(
+      `/api/skills/governance/evidence${force ? '?force=true' : ''}`,
+    ),
+  previewLock: (input: SkillGovernancePreviewRequest) =>
+    request<SkillGovernanceLockPreviewResponse>('/api/skills/governance/lock/preview', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  listLocks: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernanceLockSnapshot[]>(`/api/skills/governance/locks?${params}`)
+  },
+  listPlans: (scope: SkillGovernanceScope, scopeId: string) => {
+    const params = new URLSearchParams({ scope, scopeId })
+    return request<SkillGovernancePlan[]>(`/api/skills/governance/plans?${params}`)
+  },
+  previewPlan: (input: SkillGovernancePreviewRequest) =>
+    request<SkillGovernancePlanPreviewResponse>('/api/skills/governance/plans', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  approvePlan: (planId: string, expectedVersion: number) =>
+    request<SkillGovernancePlanDecisionResponse>(
+      `/api/skills/governance/plans/${planId}/approve`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion }),
+      },
+    ),
+  rejectPlan: (planId: string, expectedVersion: number) =>
+    request<SkillGovernancePlanDecisionResponse>(
+      `/api/skills/governance/plans/${planId}/reject`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ expectedVersion }),
+      },
     ),
 }
 

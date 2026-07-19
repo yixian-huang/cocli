@@ -53,6 +53,8 @@ describe('LocalApp', () => {
 
   beforeEach(() => {
     let skillInstalled = false
+    let governanceProfileCreated = false
+    let governanceBound = false
     let agentCreated = false
     let taskState: Array<{
       id: string
@@ -160,6 +162,210 @@ describe('LocalApp', () => {
           }] : [],
           diagnostics: [],
         })
+      }
+      if (path === '/api/skills/governance/profiles' && !init?.method) {
+        return jsonResponse(governanceProfileCreated ? [{
+          id: 'profile-1',
+          version: 1,
+          schemaVersion: 1,
+          name: 'default-governance-profile',
+          description: 'Safe default profile with no desired skills yet.',
+          skills: [],
+          createdAt: '2026-07-19T08:00:00Z',
+          updatedAt: '2026-07-19T08:00:00Z',
+        }] : [])
+      }
+      if (path === '/api/skills/governance/profiles' && init?.method === 'POST') {
+        governanceProfileCreated = true
+        const body = JSON.parse(String(init.body)) as {
+          schemaVersion: number
+          name: string
+          description: string
+          skills: unknown[]
+        }
+        return jsonResponse({
+          id: 'profile-1',
+          version: 1,
+          ...body,
+          createdAt: '2026-07-19T08:00:00Z',
+          updatedAt: '2026-07-19T08:00:00Z',
+        }, 201)
+      }
+      if (path === '/api/skills/governance/bindings' && !init?.method) {
+        return jsonResponse(governanceBound ? [{
+          id: 'binding-1',
+          scope: 'machine',
+          scopeId: 'machine',
+          profileId: 'profile-1',
+          version: 1,
+          createdAt: '2026-07-19T08:01:00Z',
+          updatedAt: '2026-07-19T08:01:00Z',
+        }] : [])
+      }
+      if (path === '/api/skills/governance/bindings' && init?.method === 'POST') {
+        governanceBound = true
+        const body = JSON.parse(String(init.body)) as {
+          profileId: string
+          scope: 'machine' | 'workspace' | 'agent'
+          scopeId: string
+        }
+        return jsonResponse({
+          id: 'binding-1',
+          ...body,
+          version: 1,
+          createdAt: '2026-07-19T08:01:00Z',
+          updatedAt: '2026-07-19T08:01:00Z',
+        }, 201)
+      }
+      if (path.startsWith('/api/skills/governance/desired/effective')) {
+        return jsonResponse({
+          schemaVersion: 1,
+          desiredConfigHash: 'desired-hash-1',
+          skills: [],
+          conflicts: [],
+        })
+      }
+      if (path.startsWith('/api/skills/governance/evidence')) {
+        return jsonResponse({
+          observedAt: '2026-07-19T08:02:00Z',
+          snapshotHash: 'observation-hash-1',
+          skills: [{
+            logicalIdentity: 'reviewer',
+            runtime: 'fake',
+            scope: 'workspace',
+            sourceProvenance: 'local:/tmp/reviewer',
+            version: null,
+            contentDigest: 'sha256:content',
+            manifestDigest: 'sha256:manifest',
+            installationMode: 'copy',
+            destination: '.fake/skills/reviewer',
+            fingerprint: 'governance-skill-1',
+            enabled: true,
+            shadowed: false,
+            brokenSymlink: false,
+            evidenceStatus: 'observed',
+            evidenceSource: 'filesystem',
+            sessionEffective: 'unknown',
+            sessionReason: 'running session visibility cannot be proven',
+            observedAt: '2026-07-19T08:02:00Z',
+            supported: true,
+          }],
+          diagnostics: [],
+        })
+      }
+      if (path === '/api/skills/governance/lock/preview' && init?.method === 'POST') {
+        return jsonResponse({
+          snapshot: {
+            id: 'lock-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            profileId: null,
+            snapshot: {},
+            observationHash: 'observation-hash-1',
+            desiredHash: 'desired-hash-1',
+            lockHash: 'lock-hash-1',
+            createdAt: '2026-07-19T08:03:00Z',
+          },
+          preview: {
+            observedAt: '2026-07-19T08:03:00Z',
+            snapshotHash: 'observation-hash-1',
+            desiredConfigHash: 'desired-hash-1',
+            lockfileHash: 'lock-hash-1',
+            content: {
+              schemaVersion: 1,
+              generatedFrom: {
+                observationHash: 'observation-hash-1',
+                desiredConfigHash: 'desired-hash-1',
+              },
+              entries: [],
+            },
+            serialized: '{}\n',
+          },
+          drift: [{
+            fingerprint: 'drift-1',
+            skillFingerprint: 'governance-skill-1',
+            kind: 'unknown_evidence',
+            logicalIdentity: 'reviewer',
+            runtime: 'fake',
+            scope: 'workspace',
+            reason: 'session-effective unknown',
+            expected: 'desired',
+            actual: 'observed',
+          }],
+          previousLockHash: null,
+          lockfileChanged: true,
+          writesRealDirectories: false,
+          lockfileBoundary: 'store_only',
+        })
+      }
+      if (path === '/api/skills/governance/plans' && init?.method === 'POST') {
+        return jsonResponse({
+          plan: {
+            id: 'plan-1',
+            scope: 'machine',
+            scopeId: 'machine',
+            plan: {
+              schemaVersion: 1,
+              dryRun: true,
+              applied: false,
+              lockfileChanged: true,
+              preview: {
+                planHash: 'plan-hash-1',
+                dryRun: true,
+                content: {
+                  schemaVersion: 1,
+                  observationHash: 'observation-hash-1',
+                  desiredConfigHash: 'desired-hash-1',
+                  lockfileHash: 'lock-hash-1',
+                  actions: [],
+                },
+              },
+            },
+            observationHash: 'observation-hash-1',
+            desiredHash: 'desired-hash-1',
+            status: 'approved',
+            version: 1,
+            createdAt: '2026-07-19T08:04:00Z',
+            updatedAt: '2026-07-19T08:04:00Z',
+          },
+          preview: {
+            planHash: 'plan-hash-1',
+            dryRun: true,
+            content: {
+              schemaVersion: 1,
+              observationHash: 'observation-hash-1',
+              desiredConfigHash: 'desired-hash-1',
+              lockfileHash: 'lock-hash-1',
+              actions: [{
+                action: 'manual',
+                runtime: 'fake',
+                scope: 'workspace',
+                target: 'reviewer',
+                skillFingerprint: 'governance-skill-1',
+                before: 'unknown',
+                after: 'review',
+                risk: 'medium',
+                reason: 'session-effective unknown',
+                evidence: 'filesystem',
+                expectedObservationHash: 'observation-hash-1',
+                expectedConfigHash: 'desired-hash-1',
+                expectedLockHash: 'lock-hash-1',
+                approvalRequired: true,
+                blocked: false,
+              }],
+            },
+          },
+          drift: [],
+          lockSnapshotId: 'lock-1',
+          lockfileChanged: true,
+          applied: false,
+        }, 201)
+      }
+      if (path === '/api/skills/governance/plans?scope=machine&scopeId=machine' && !init?.method) {
+        return jsonResponse([])
+      }
+      if (path === '/api/skills/governance/locks?scope=machine&scopeId=machine' && !init?.method) {
+        return jsonResponse([])
       }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
       if (path === '/api/agents' && !init?.method) {
@@ -570,6 +776,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    await waitFor(() => expect(FakeEventSource.instance?.url).toBe('/api/events'))
     const eventSource = FakeEventSource.instance
     expect(eventSource?.url).toBe('/api/events')
     eventSource?.onopen?.()
@@ -698,11 +905,27 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     fireEvent.click(screen.getByRole('button', { name: 'Skills' }))
     expect(await screen.findByRole('heading', { name: 'Skills workspace' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Governance preview' })).toBeInTheDocument()
+    expect(screen.getAllByText('dry-run').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('session-effective unknown').length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Create demo profile' }))
+    expect((await screen.findAllByText(/default-governance-profile/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('button', { name: 'Bind profile' }))
+    expect(await screen.findByText(/machine:machine/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Lock/Drift' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview lock' }))
+    expect((await screen.findAllByText(/unknown_evidence/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Plan Preview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Preview dry-run plan' }))
+    expect((await screen.findAllByText('approved but not applied')).length).toBeGreaterThan(0)
+    expect((await screen.findAllByText(/manual/)).length).toBeGreaterThan(0)
+    fireEvent.click(screen.getByRole('tab', { name: 'Evidence' }))
+    expect((await screen.findAllByText(/observed/)).length).toBeGreaterThan(0)
     expect(await screen.findByRole('heading', { name: 'Runtime × Skill inventory' })).toBeInTheDocument()
     expect(screen.getByText(/Neither proves that a running session loaded or activated/)).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /fake supported/ })).toBeInTheDocument()
     expect(screen.getByLabelText('Severity')).toBeInTheDocument()
-    expect(screen.getByLabelText('Scope')).toBeInTheDocument()
+    expect(screen.getAllByLabelText('Scope').length).toBeGreaterThan(0)
     expect(screen.getByText(/cached snapshot/)).toBeInTheDocument()
     expect(await screen.findByText('Review local changes')).toBeInTheDocument()
 

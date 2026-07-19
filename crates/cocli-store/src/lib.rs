@@ -20,6 +20,11 @@ mod skills;
 pub use skills::{
     AgentSkillInstall, NewSkillLibrary, SkillLibraryEntry, SkillLibraryFile, SkillLibraryFileMeta,
 };
+mod skill_governance;
+pub use skill_governance::{
+    NewSkillLockSnapshot, SkillGovernancePlan, SkillGovernancePlanAudit, SkillGovernancePlanStatus,
+    SkillGovernanceScope, SkillLockSnapshot, SkillProfile, SkillProfileBinding,
+};
 mod workspace;
 pub use workspace::{
     SubjectType, SubjectWorkspace, Workspace, WorkspaceBinding, WorkspaceBindingState,
@@ -157,6 +162,38 @@ pub enum StoreError {
     /// The same library is already installed for an agent.
     #[error("skill library {library_id} is already installed for agent {agent_id}")]
     SkillAlreadyInstalled { agent_id: Uuid, library_id: Uuid },
+    /// A skill-governance optimistic-concurrency check failed.
+    #[error(
+        "{entity} version conflict for {id}: current={current_version}, attempted={attempted_version}"
+    )]
+    SkillGovernanceVersionConflict {
+        /// Entity type being modified.
+        entity: &'static str,
+        /// Stable record identifier, or related profile id for scope bindings.
+        id: Uuid,
+        /// Version currently stored.
+        current_version: i64,
+        /// Version supplied by the caller.
+        attempted_version: i64,
+    },
+    /// A governance plan decision was attempted from a terminal/incompatible state.
+    #[error("skill governance plan {id} cannot transition from {from} to {to}")]
+    SkillGovernanceTransitionConflict {
+        /// Plan being transitioned.
+        id: Uuid,
+        /// Current persisted state.
+        from: String,
+        /// Requested state.
+        to: String,
+    },
+    /// A requested skill-governance row does not exist.
+    #[error("{entity} not found: {id}")]
+    SkillGovernanceNotFound {
+        /// Entity type being loaded or changed.
+        entity: &'static str,
+        /// Missing record identifier.
+        id: Uuid,
+    },
     /// A requested logical workspace does not exist.
     #[error("workspace not found: {0}")]
     WorkspaceNotFound(Uuid),
@@ -3610,6 +3647,11 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             12,
             "portable_workspace_foundation",
             include_str!("../migrations/0012_portable_workspace_foundation.sql"),
+        ),
+        (
+            13,
+            "skill_governance",
+            include_str!("../migrations/0013_skill_governance.sql"),
         ),
     ] {
         let already_applied: bool =

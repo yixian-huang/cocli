@@ -46,9 +46,20 @@ cross-platform release evidence.
   coalescing, force refresh, lightweight filesystem-only Agent lists, true
   machine Runtime inventory without synthetic Agents, partial-failure
   diagnostics, and stable Skill/issue fingerprints with grouped root causes.
-- **Phase 2C — remaining native and governed changes (planned):** add a stable
-  Cursor native probe, Session-effective evidence, explicit plan/apply/verify
-  operations, and lockfile plus drift governance.
+- **Phase 3A — read-only governed desired state (complete):** add versioned
+  SkillProfile documents, machine/workspace/Agent profile bindings, deterministic
+  effective desired-state inheritance, same-layer conflict reporting, immutable
+  lock snapshots, stable SHA-256 observation/config/lock/plan hashes, drift and
+  dry-run plan previews, approval/rejection audit rows, optimistic
+  `expectedVersion` checks, approval staleness checks, and the
+  `/api/skills/governance` API surface. Runtime and filesystem Skill evidence
+  remains read-only, Cursor native Skill/session probing is explicitly
+  unsupported by current stable CLI contracts, and no discovery result is
+  treated as Session-effective proof.
+- **Phase 3B — governed apply and verification (planned):** implement
+  apply/verify execution, backup/rollback, atomic writes, directory locks,
+  runtime reload, real lockfile writes, and Session-effective adapters only for
+  Runtimes that expose stable session-bound Skill contracts.
 
 This track remains subordinate to cocli's persistent Agent and Channel model;
 it is Runtime governance for multi-Agent desktop work, not a standalone Skill

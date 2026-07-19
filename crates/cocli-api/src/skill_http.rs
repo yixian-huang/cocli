@@ -692,6 +692,7 @@ struct SkillView {
     #[serde(skip_serializing_if = "Option::is_none")]
     resolved_path: Option<String>,
     evidence: RuntimeSkillEvidence,
+    session_effective: SessionEffectiveEvidence,
     #[serde(skip_serializing_if = "Option::is_none")]
     enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -707,6 +708,19 @@ struct SkillView {
     source_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source_ref: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionEffectiveEvidence {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effective: Option<bool>,
+    reason: String,
+    evidence: RuntimeSkillEvidence,
+    observed_at: chrono::DateTime<chrono::Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1063,6 +1077,134 @@ async fn build_machine_skill_inventory(
     })
 }
 
+pub(super) async fn governance_observation(
+    state: &AppState,
+    force: bool,
+) -> Result<super::skill_governance::GovernanceObservation, ApiError> {
+    use super::skill_governance::{finalize_observation, ObservationDiagnostic, ObservedSkill};
+
+    let machine = build_machine_skill_inventory(state, force).await?;
+    let mut skills = Vec::new();
+    for runtime in &machine.runtimes {
+        let native_unsupported = runtime
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_unsupported");
+        for skill in &runtime.skills {
+            skills.push(ObservedSkill {
+                logical_identity: skill.name.clone(),
+                runtime: runtime.runtime.clone(),
+                scope: governance_scope(&skill.scope),
+                scope_id: Some("machine".to_owned()),
+                source_provenance: Some(format!(
+                    "filesystem:{}",
+                    skill.resolved_path.as_deref().unwrap_or(&skill.source_path)
+                )),
+                version: skill.source_ref.clone(),
+                content_digest: None,
+                manifest_digest: None,
+                installation_mode: skill
+                    .install_id
+                    .map(|_| super::skill_governance::InstallationMode::Copy),
+                destination: skill.install_path.clone(),
+                fingerprint: skill.fingerprint.clone(),
+                enabled: skill.enabled,
+                shadowed: skill.shadowed,
+                broken_symlink: skill
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "broken_symlink"),
+                evidence_status: evidence_status(skill, false),
+                evidence_source: skill.evidence.source.clone(),
+                session_effective: skill.session_effective.status.to_owned(),
+                session_reason: skill.session_effective.reason.clone(),
+                observed_at: runtime.observed_at,
+                supported: runtime.compatibility != RuntimeSkillCompatibility::Unsupported
+                    && !native_unsupported,
+            });
+        }
+    }
+    for agent in &machine.agents {
+        let native_unsupported = agent
+            .issues
+            .iter()
+            .any(|issue| issue.code == "native_probe_unsupported");
+        for skill in agent
+            .skills
+            .iter()
+            .filter(|skill| matches!(skill.scope.as_str(), "workspace" | "repo"))
+        {
+            skills.push(ObservedSkill {
+                logical_identity: skill.name.clone(),
+                runtime: agent.runtime.clone(),
+                scope: super::skill_governance::GovernanceScope::Agent,
+                scope_id: Some(agent.agent_id.to_string()),
+                source_provenance: skill.source_url.clone().or_else(|| {
+                    Some(format!(
+                        "filesystem:{}",
+                        skill.resolved_path.as_deref().unwrap_or(&skill.source_path)
+                    ))
+                }),
+                version: skill.source_ref.clone(),
+                content_digest: None,
+                manifest_digest: None,
+                installation_mode: skill
+                    .install_id
+                    .map(|_| super::skill_governance::InstallationMode::Copy),
+                destination: skill.install_path.clone(),
+                fingerprint: skill.fingerprint.clone(),
+                enabled: skill.enabled,
+                shadowed: skill.shadowed,
+                broken_symlink: skill
+                    .issues
+                    .iter()
+                    .any(|issue| issue.code == "broken_symlink"),
+                evidence_status: evidence_status(skill, true),
+                evidence_source: skill.evidence.source.clone(),
+                session_effective: skill.session_effective.status.to_owned(),
+                session_reason: skill.session_effective.reason.clone(),
+                observed_at: agent.observed_at,
+                supported: agent.compatibility != RuntimeSkillCompatibility::Unsupported
+                    && !native_unsupported,
+            });
+        }
+    }
+    let diagnostics = machine
+        .diagnostics
+        .into_iter()
+        .map(|diagnostic| ObservationDiagnostic {
+            fingerprint: diagnostic.fingerprint,
+            runtime: diagnostic.runtime,
+            subject: diagnostic.subject.to_owned(),
+            stage: diagnostic.stage.to_owned(),
+            error_type: diagnostic.error_type.to_owned(),
+            message: diagnostic.message,
+            observed_at: diagnostic.observed_at,
+        })
+        .collect();
+    finalize_observation(machine.observed_at, skills, diagnostics).map_err(ApiError::bad_request)
+}
+
+fn governance_scope(scope: &str) -> super::skill_governance::GovernanceScope {
+    if matches!(scope, "workspace" | "repo") {
+        super::skill_governance::GovernanceScope::Workspace
+    } else {
+        super::skill_governance::GovernanceScope::Machine
+    }
+}
+
+fn evidence_status(skill: &SkillView, agent_workspace: bool) -> String {
+    if skill.session_effective.status != "unknown" {
+        "session_effective".to_owned()
+    } else if skill.evidence.source != "filesystem" && skill.presence == "discovered" {
+        "runtime_discovered".to_owned()
+    } else if agent_workspace {
+        "agent_workspace".to_owned()
+    } else {
+        "machine_discovered".to_owned()
+    }
+}
+
 async fn build_agent_skill_inventory(
     state: &AppState,
     agent: Agent,
@@ -1161,7 +1303,7 @@ async fn build_agent_skill_inventory_from_inspection(
             .as_ref()
             .filter(|path| !path.is_empty())
             .and_then(|path| by_path.remove(path));
-        skills.push(scanned_skill_view(scanned_skill, managed));
+        skills.push(scanned_skill_view(scanned_skill, managed, observed_at));
     }
     for install in by_path.into_values() {
         let issue = RuntimeSkillIssue {
@@ -1183,6 +1325,7 @@ async fn build_agent_skill_inventory_from_inspection(
             evidence.clone(),
             install,
             issue,
+            observed_at,
         ));
     }
     skills.sort_by(|left, right| left.name.cmp(&right.name));
@@ -1201,7 +1344,11 @@ async fn build_agent_skill_inventory_from_inspection(
     })
 }
 
-fn scanned_skill_view(skill: RuntimeSkillFinding, install: Option<AgentSkillInstall>) -> SkillView {
+fn scanned_skill_view(
+    skill: RuntimeSkillFinding,
+    install: Option<AgentSkillInstall>,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> SkillView {
     let state = if install.is_some() {
         "managed"
     } else {
@@ -1227,6 +1374,7 @@ fn scanned_skill_view(skill: RuntimeSkillFinding, install: Option<AgentSkillInst
         scope: skill.scope,
         source_path: skill.source_path,
         resolved_path: skill.resolved_path,
+        session_effective: session_effective_evidence(&skill.evidence, observed_at),
         evidence: skill.evidence,
         enabled: skill.enabled,
         valid: skill.valid,
@@ -1245,6 +1393,7 @@ fn broken_skill_view(
     evidence: RuntimeSkillEvidence,
     install: AgentSkillInstall,
     issue: RuntimeSkillIssue,
+    observed_at: chrono::DateTime<chrono::Utc>,
 ) -> SkillView {
     SkillView {
         fingerprint: stable_api_fingerprint(&format!(
@@ -1264,6 +1413,7 @@ fn broken_skill_view(
         scope: "workspace".to_owned(),
         source_path: install.install_path.clone(),
         resolved_path: None,
+        session_effective: session_effective_evidence(&evidence, observed_at),
         evidence,
         enabled: None,
         valid: None,
@@ -1274,6 +1424,25 @@ fn broken_skill_view(
         library_id: Some(install.library_id),
         source_url: Some(install.source_url),
         source_ref: install.source_ref,
+    }
+}
+
+fn session_effective_evidence(
+    evidence: &RuntimeSkillEvidence,
+    observed_at: chrono::DateTime<chrono::Utc>,
+) -> SessionEffectiveEvidence {
+    let reason = if evidence.proves_session_visibility {
+        "native discovery is not bound to a concrete runtime session"
+    } else {
+        "discovery evidence does not prove that a concrete runtime session loaded this skill"
+    };
+    SessionEffectiveEvidence {
+        status: "unknown",
+        effective: None,
+        reason: reason.to_owned(),
+        evidence: evidence.clone(),
+        observed_at,
+        session_id: None,
     }
 }
 
@@ -1308,7 +1477,7 @@ async fn build_runtime_skill_inventory(
     } = inspection;
     let skills: Vec<_> = skills
         .into_iter()
-        .map(|skill| scanned_skill_view(skill, None))
+        .map(|skill| scanned_skill_view(skill, None, observed_at))
         .collect();
     Ok(RuntimeSkillInventorySummary {
         observed_at,
@@ -1799,10 +1968,12 @@ mod tests {
             source_ref: None,
         };
 
-        let view = scanned_skill_view(finding, Some(install));
+        let view = scanned_skill_view(finding, Some(install), Utc::now());
 
         assert_eq!(view.state, "managed");
         assert_eq!(view.presence, "discovered");
         assert_eq!(view.evidence.source, "codex_app_server");
+        assert_eq!(view.session_effective.status, "unknown");
+        assert_eq!(view.session_effective.effective, None);
     }
 }
