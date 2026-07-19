@@ -18,6 +18,11 @@ pub use memory::{
 };
 mod mcp_apply;
 pub use mcp_apply::{McpApplyRun, McpApplyRunStatus, NewMcpApplyRun};
+mod mcp_bundle;
+pub use mcp_bundle::{
+    McpBundleImportAudit, McpBundleImportBindingMutation, McpBundleImportCommit,
+    McpBundleImportProfileMutation, McpBundleImportStatus, NewMcpBundleImportAudit,
+};
 mod mcp_governance;
 pub use mcp_governance::{
     McpPlanDecision, McpPlanDecisionStatus, NewMcpPlanDecision, NewMcpProfile,
@@ -222,6 +227,15 @@ pub enum StoreError {
     /// A requested MCP apply run does not exist.
     #[error("MCP apply run not found: {0}")]
     McpApplyRunNotFound(Uuid),
+    /// A requested MCP bundle import audit does not exist.
+    #[error("MCP bundle import audit not found: {0}")]
+    McpBundleImportNotFound(Uuid),
+    /// A bundle import commit used a stale audit version or profile version.
+    #[error("MCP bundle import conflict: {0}")]
+    McpBundleImportConflict(String),
+    /// An MCP bundle import is unsafe or incomplete.
+    #[error("invalid MCP bundle import: {0}")]
+    InvalidMcpBundleImport(String),
 }
 
 /// A local conversation channel.
@@ -3676,6 +3690,11 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             15,
             "mcp_governance_phase_2c",
             include_str!("../migrations/0015_mcp_governance_phase_2c.sql"),
+        ),
+        (
+            16,
+            "mcp_governance_phase_3a",
+            include_str!("../migrations/0016_mcp_governance_phase_3a.sql"),
         ),
     ] {
         let already_applied: bool =

@@ -4222,13 +4222,16 @@ impl From<StoreError> for ApiError {
             StoreError::McpProfileNotFound(_)
             | StoreError::McpProfileBindingNotFound(_)
             | StoreError::McpPlanNotFound(_)
-            | StoreError::McpApplyRunNotFound(_) => Some(StatusCode::NOT_FOUND),
+            | StoreError::McpApplyRunNotFound(_)
+            | StoreError::McpBundleImportNotFound(_) => Some(StatusCode::NOT_FOUND),
             StoreError::McpProfileVersionConflict { .. }
-            | StoreError::McpProfileBindingVersionConflict { .. } => Some(StatusCode::CONFLICT),
+            | StoreError::McpProfileBindingVersionConflict { .. }
+            | StoreError::McpBundleImportConflict(_) => Some(StatusCode::CONFLICT),
             StoreError::InvalidMcpProfile(_)
             | StoreError::InvalidMcpBindingTarget(_)
             | StoreError::InvalidMcpPlanDecision(_)
-            | StoreError::InvalidMcpApplyRun(_) => Some(StatusCode::BAD_REQUEST),
+            | StoreError::InvalidMcpApplyRun(_)
+            | StoreError::InvalidMcpBundleImport(_) => Some(StatusCode::BAD_REQUEST),
             StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
                 Some(StatusCode::CONFLICT)
             }

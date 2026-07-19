@@ -255,23 +255,11 @@ pub fn validate_mcp_profile(profile: &McpProfile) -> Result<(), &'static str> {
             }
         }
         for secret_ref in &server.secret_refs {
-            let reference = secret_ref.reference.as_str();
-            let reference_value = reference
-                .split_once("://")
-                .map(|(_, value)| value)
-                .unwrap_or_default();
             if secret_ref.location.trim().is_empty()
                 || secret_ref.kind.trim().is_empty()
                 || contains_plaintext_secret(&secret_ref.location)
                 || contains_plaintext_secret(&secret_ref.kind)
-                || !matches!(
-                    reference.split_once("://").map(|(scheme, _)| scheme),
-                    Some("env" | "keychain" | "secret" | "vault")
-                )
-                || reference
-                    .split_once("://")
-                    .map_or(true, |(_, value)| value.trim().is_empty())
-                || looks_like_secret_value(reference_value)
+                || !is_valid_mcp_opaque_secret_reference(&secret_ref.reference)
             {
                 return Err("secretRefs must use an approved opaque reference scheme");
             }
@@ -280,7 +268,10 @@ pub fn validate_mcp_profile(profile: &McpProfile) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn contains_plaintext_secret(value: &str) -> bool {
+/// Returns whether a value resembles secret material that must never be
+/// persisted, logged, or returned by governance APIs.
+#[must_use]
+pub fn mcp_value_contains_plaintext_secret(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
     [
         "token=",
@@ -292,11 +283,29 @@ fn contains_plaintext_secret(value: &str) -> bool {
         "api-key=",
         "authorization=",
         "authorization:",
+        "oauth_token=",
+        "oauth_state=",
     ]
     .iter()
     .any(|marker| lower.contains(marker))
         || lower.contains("bearer ")
         || looks_like_secret_value(&lower)
+}
+
+fn contains_plaintext_secret(value: &str) -> bool {
+    mcp_value_contains_plaintext_secret(value)
+}
+
+/// Validates an opaque secret reference without resolving it.
+#[must_use]
+pub fn is_valid_mcp_opaque_secret_reference(reference: &str) -> bool {
+    let Some((scheme, value)) = reference.split_once("://") else {
+        return false;
+    };
+    matches!(scheme, "env" | "keychain" | "secret" | "vault")
+        && !value.trim().is_empty()
+        && !looks_like_secret_value(value)
+        && !mcp_value_contains_plaintext_secret(value)
 }
 
 fn args_contain_plaintext_secret(args: &[String]) -> bool {

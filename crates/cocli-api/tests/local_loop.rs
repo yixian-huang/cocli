@@ -542,6 +542,102 @@ async fn exposes_read_only_mcp_inventory_and_doctor() {
     assert_eq!(doctor["inventory"]["diagnostics"][0]["code"], "cli_missing");
 }
 
+#[tokio::test]
+async fn mcp_bundle_export_import_requires_explicit_rebind_and_never_imports_approval() {
+    let store = Store::in_memory().await.expect("store should open");
+    let machine_id = store.current_installation_id().to_owned();
+    let app = router(store, Arc::new(MutableCapabilityRuntime::default()));
+    let (status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/profiles",
+        mcp_profile_body("portable docs", true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let (status, _binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bindings",
+        json!({
+            "profileId": profile_id,
+            "targetType": "machine",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, exported) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/export-preview",
+        json!({
+            "actor": "operator",
+            "includeCapabilityExpectations": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let bundle = exported["bundle"].clone();
+    let exported_json = serde_json::to_string(&bundle).expect("bundle json");
+    assert!(!exported_json.contains(&machine_id));
+    assert!(!exported_json.contains("planHash"));
+    assert!(!exported_json.contains("approvalId"));
+    assert!(!exported_json.contains("applyRun"));
+    assert_eq!(exported["dryRun"], true);
+
+    let (status, missing) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/import-preview",
+        json!({
+            "actor": "operator",
+            "bundle": bundle,
+            "rebindings": {}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(missing["canCommit"].as_bool().is_some_and(|value| !value));
+    let audit_id = missing["audit"]["id"].as_str().expect("audit id");
+    let audit_version = missing["audit"]["version"].as_i64().expect("audit version");
+
+    let (status, rebound) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/rebind"),
+        json!({
+            "expectedVersion": audit_version,
+            "rebindings": {
+                "targets": {"machine:1": machine_id},
+                "runtimes": {"runtime:codex": "codex"},
+                "secretRefs": {"keychain://cocli/docs-token": "env://DEST_DOCS_TOKEN"},
+                "machineLocalValues": {},
+                "profiles": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rebound["canCommit"], true);
+    let version = rebound["audit"]["version"].as_i64().expect("version");
+    let (status, committed) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/commit"),
+        json!({
+            "expectedVersion": version,
+            "actor": "operator"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(committed["audit"]["status"], "committed");
+    assert_eq!(committed["audit"]["result"]["approvalImported"], false);
+    assert_eq!(committed["audit"]["result"]["applyImported"], false);
+}
+
 fn mcp_profile_body(name: &str, enabled: bool) -> Value {
     json!({
         "name": name,
@@ -786,6 +882,209 @@ async fn mcp_profile_plan_and_approval_api_is_dry_run_versioned_and_stale_aware(
     )
     .await;
     assert_eq!(delete_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn mcp_bundle_export_import_requires_explicit_rebinding_and_is_idempotent() {
+    let store = Store::in_memory().await.expect("store should open");
+    let installation_id = store.current_installation_id().to_owned();
+    let runtime = Arc::new(MutableCapabilityRuntime::default());
+    let app = router(store.clone(), runtime);
+    let (create_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/profiles",
+        json!({
+            "name": "portable-codex",
+            "servers": [{
+                "serverId": "docs",
+                "runtime": "codex",
+                "alias": "docs",
+                "definition": {
+                    "transport": "stdio",
+                    "command": "docs-server"
+                },
+                "desiredEnabled": true,
+                "allowTools": ["read"],
+                "denyTools": [],
+                "approvalMode": "manual",
+                "secretRefs": []
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED);
+    let (binding_status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bindings",
+        json!({
+            "profileId": profile["id"],
+            "targetType": "machine"
+        }),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+
+    let (export_status, exported) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/export-preview",
+        json!({
+            "actor": "bundle-test",
+            "includeCapabilityExpectations": true
+        }),
+    )
+    .await;
+    assert_eq!(export_status, StatusCode::OK);
+    assert_eq!(exported["dryRun"], true);
+    assert_eq!(exported["bundle"]["schemaVersion"], 2);
+    let exported_text = serde_json::to_string(&exported).expect("serialize export");
+    assert!(!exported_text.contains(&installation_id));
+    assert!(!exported_text.contains("approvalId"));
+    assert!(!exported_text.contains("backupPath"));
+
+    let (preview_status, previewed) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/import-preview",
+        json!({
+            "bundle": exported["bundle"],
+            "actor": "bundle-test",
+            "rebindings": {}
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::CREATED);
+    assert_eq!(previewed["canCommit"], false);
+    assert_eq!(previewed["preview"]["approvalImported"], false);
+    let audit_id = previewed["audit"]["id"].as_str().expect("audit id");
+
+    for canary in ["sk-api-canary", "ghp_api_canary", "xoxb-api-canary"] {
+        let (secret_status, secret_response) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/rebind"),
+            json!({
+                "expectedVersion": previewed["audit"]["version"],
+                "rebindings": {
+                    "secretRefs": { "env://OLD_TOKEN": canary }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(secret_status, StatusCode::BAD_REQUEST);
+        assert!(!secret_response.to_string().contains(canary));
+
+        let (preview_secret_status, preview_secret_response) = json_request(
+            app.clone(),
+            "POST",
+            "/api/runtimes/mcp/bundles/import-preview",
+            json!({
+                "bundle": exported["bundle"].clone(),
+                "actor": "bundle-test",
+                "rebindings": {
+                    "machineLocalValues": {
+                        "machine-local:profile:server:command": canary
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(preview_secret_status, StatusCode::BAD_REQUEST);
+        assert!(!preview_secret_response.to_string().contains(canary));
+    }
+
+    let (rebind_status, rebound) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/rebind"),
+        json!({
+            "expectedVersion": previewed["audit"]["version"],
+            "rebindings": {
+                "targets": { "machine:1": installation_id },
+                "runtimes": { "runtime:codex": "codex" },
+                "secretRefs": {},
+                "machineLocalValues": {},
+                "profiles": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(rebind_status, StatusCode::OK);
+    assert_eq!(rebound["canCommit"], true);
+
+    let commit_body = json!({
+        "expectedVersion": rebound["audit"]["version"],
+        "actor": "bundle-test"
+    });
+    let (commit_status, committed) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/commit"),
+        commit_body.clone(),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK);
+    assert_eq!(committed["audit"]["status"], "committed");
+    assert_eq!(committed["audit"]["result"]["approvalImported"], false);
+    assert_eq!(committed["audit"]["result"]["applyImported"], false);
+    let profile_count = store
+        .list_mcp_profiles()
+        .await
+        .expect("list profiles")
+        .len();
+
+    let (repeat_status, repeated) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/commit"),
+        commit_body,
+    )
+    .await;
+    assert_eq!(repeat_status, StatusCode::OK);
+    assert_eq!(repeated["audit"]["id"], audit_id);
+    assert_eq!(
+        store
+            .list_mcp_profiles()
+            .await
+            .expect("list profiles after repeat")
+            .len(),
+        profile_count
+    );
+}
+
+#[tokio::test]
+async fn mcp_adapter_conformance_api_reports_observed_runtime_service_contract() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(MutableCapabilityRuntime::default()));
+    let (status, report) =
+        json_request(app, "GET", "/api/runtimes/mcp/conformance", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let reports = report["reports"].as_array().expect("reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports
+            .iter()
+            .map(|item| item["adapter"]["runtime"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["codex"]
+    );
+    assert!(reports.iter().all(|item| item["passed"] == true));
+    assert!(reports[0]["adapter"]["adapter"]
+        .as_str()
+        .expect("adapter identity")
+        .contains("observed-runtime-service"));
+    assert!(report["note"]
+        .as_str()
+        .expect("note")
+        .contains("production RuntimeService"));
+    assert!(!serde_json::to_string(&report)
+        .expect("serialize report")
+        .contains("fake-adapter"));
+    assert!(!serde_json::to_string(&report)
+        .expect("serialize report")
+        .contains("PHASE3A_CONFORMANCE_SECRET_CANARY"));
 }
 
 #[tokio::test]

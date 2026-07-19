@@ -168,6 +168,21 @@ keys and do not repeat completed non-idempotent writes. Reload remains
 new-session-only/deferred and never restarts active sessions. See
 [docs/mcp-governance-phase-2c.md](docs/mcp-governance-phase-2c.md).
 
+Phase 3A adds portable MCP governance bundles plus a library-only adapter SDK
+and conformance harness. Bundles export versioned, deterministic desired state
+with relative bindings, opaque secret references, provenance, optional
+capability expectations, portability diagnostics, and a stable content hash.
+Import is preview-first and requires explicit rebinding for machine,
+Workspace, Agent, Runtime, secret, and machine-local values; commit only writes
+profiles/bindings with optimistic concurrency and never imports approvals or
+applies Runtime configuration. The SDK defines the redacted adapter boundary
+and no-side-effect conformance checks for capability evidence, unsupported
+downgrade, CAS/write confinement, secret canary redaction, reload/verify, and
+recovery. See [docs/mcp-governance-phase-3a.md](docs/mcp-governance-phase-3a.md).
+The library boundary and reusable test-kit contract are documented separately
+in [docs/mcp-adapter-sdk.md](docs/mcp-adapter-sdk.md) and
+[docs/mcp-adapter-sdk-conformance.md](docs/mcp-adapter-sdk-conformance.md).
+
 ## Repository layout
 
 - `bin/cocli/` — local server binary

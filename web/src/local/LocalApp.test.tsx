@@ -241,6 +241,186 @@ describe('LocalApp', () => {
           }],
         })
       }
+      if (path === '/api/runtimes/mcp/conformance') {
+        return jsonResponse({
+          schemaVersion: 'mcp-adapter-conformance-summary.v1',
+          generatedAt: '2026-07-19T09:00:00Z',
+          reportHash: 'conformance-hash-1',
+          note: 'Conformance status is separate from live preflight.',
+          reports: [{
+            schemaVersion: 'mcp-adapter-conformance.v1',
+            adapter: {
+              runtime: 'cursor',
+              adapter: 'cursor_structured_json_fallback',
+              adapterVersion: '1.0.0',
+              contractVersion: 'mcp-adapter-sdk.v1',
+              evidence: [],
+            },
+            passed: true,
+            cases: [{
+              name: 'capability_probe_deterministic',
+              status: 'passed',
+              reason: 'fake adapter conformance passed',
+              evidence: [],
+            }],
+            reportHash: 'cursor-conformance-hash',
+          }, {
+            schemaVersion: 'mcp-adapter-conformance.v1',
+            adapter: {
+              runtime: 'grok',
+              adapter: 'grok_read_only',
+              adapterVersion: '1.0.0',
+              contractVersion: 'mcp-adapter-sdk.v1',
+              evidence: [],
+            },
+            passed: true,
+            cases: [{
+              name: 'unsupported_safe_degrade',
+              status: 'passed',
+              reason: 'read-only adapter has no writer contract',
+              evidence: [],
+            }],
+            reportHash: 'grok-conformance-hash',
+          }],
+        })
+      }
+      if (path === '/api/runtimes/mcp/bundles/export-preview' && init?.method === 'POST') {
+        return jsonResponse({
+          dryRun: true,
+          diagnostics: [{
+            code: 'target_rebind_required',
+            classification: 'requires_rebind',
+            profileRef: 'profile:ops',
+            rebindKey: 'machine:1',
+            message: 'bundle target must be explicitly rebound',
+          }],
+          bundle: {
+            schemaVersion: 2,
+            createdBy: 'desktop-user',
+            provenance: {
+              producer: 'cocli',
+              sourceSchema: 'mcp-governance-phase-3a',
+              profileFingerprints: { 'profile:ops': 'fingerprint' },
+            },
+            profiles: [{
+              profileRef: 'profile:ops',
+              name: 'Ops baseline',
+              sourceVersion: 2,
+              servers: [],
+            }],
+            relativeBindings: [{
+              profileRef: 'profile:ops',
+              targetType: 'machine',
+              targetRef: 'machine:1',
+            }],
+            portability: [],
+            contentHash: 'bundle-hash-1',
+          },
+        })
+      }
+      if (path === '/api/runtimes/mcp/bundles/import-preview' && init?.method === 'POST') {
+        return jsonResponse({
+          canCommit: false,
+          audit: {
+            id: 'import-1',
+            bundleHash: 'bundle-hash-1',
+            schemaVersion: 2,
+            actor: 'desktop-user',
+            status: 'previewed',
+            version: 1,
+            bundle: JSON.parse(String(init.body)).bundle,
+            rebindings: {},
+            preview: {
+              schemaVersion: 2,
+              bundleHash: 'bundle-hash-1',
+              diagnostics: [{
+                code: 'target_rebind_missing',
+                classification: 'requires_rebind',
+                profileRef: 'profile:ops',
+                rebindKey: 'machine:1',
+                message: 'binding target must be explicitly rebound',
+              }],
+              profileChanges: [{ operation: 'create', profileRef: 'profile:ops' }],
+              bindingChanges: [{ operation: 'missing_target_rebind', targetRef: 'machine:1' }],
+              approvalImported: false,
+              applyImported: false,
+              blockingCount: 1,
+              capabilityExpectationOnly: true,
+            },
+            createdAt: '2026-07-19T09:00:00Z',
+            updatedAt: '2026-07-19T09:00:00Z',
+          },
+          preview: {
+            schemaVersion: 2,
+            bundleHash: 'bundle-hash-1',
+            diagnostics: [{
+              code: 'target_rebind_missing',
+              classification: 'requires_rebind',
+              profileRef: 'profile:ops',
+              rebindKey: 'machine:1',
+              message: 'binding target must be explicitly rebound',
+            }],
+            profileChanges: [{ operation: 'create', profileRef: 'profile:ops' }],
+            bindingChanges: [{ operation: 'missing_target_rebind', targetRef: 'machine:1' }],
+            approvalImported: false,
+            applyImported: false,
+            blockingCount: 1,
+            capabilityExpectationOnly: true,
+          },
+        })
+      }
+      if (path === '/api/runtimes/mcp/bundles/imports/import-1/rebind' && init?.method === 'POST') {
+        const request = JSON.parse(String(init.body))
+        return jsonResponse({
+          canCommit: true,
+          audit: {
+            id: 'import-1',
+            bundleHash: 'bundle-hash-1',
+            schemaVersion: 2,
+            actor: 'desktop-user',
+            status: 'previewed',
+            version: 2,
+            bundle: {
+              schemaVersion: 2,
+              createdBy: 'desktop-user',
+              provenance: {
+                producer: 'cocli',
+                sourceSchema: 'mcp-governance-phase-3a',
+                profileFingerprints: { 'profile:ops': 'fingerprint' },
+              },
+              profiles: [],
+              relativeBindings: [],
+              portability: [],
+              contentHash: 'bundle-hash-1',
+            },
+            rebindings: request.rebindings,
+            preview: {
+              schemaVersion: 2,
+              bundleHash: 'bundle-hash-1',
+              diagnostics: [],
+              profileChanges: [{ operation: 'create', profileRef: 'profile:ops' }],
+              bindingChanges: [{ operation: 'bind', targetRef: 'machine:1' }],
+              approvalImported: false,
+              applyImported: false,
+              blockingCount: 0,
+              capabilityExpectationOnly: true,
+            },
+            createdAt: '2026-07-19T09:00:00Z',
+            updatedAt: '2026-07-19T09:01:00Z',
+          },
+          preview: {
+            schemaVersion: 2,
+            bundleHash: 'bundle-hash-1',
+            diagnostics: [],
+            profileChanges: [{ operation: 'create', profileRef: 'profile:ops' }],
+            bindingChanges: [{ operation: 'bind', targetRef: 'machine:1' }],
+            approvalImported: false,
+            applyImported: false,
+            blockingCount: 0,
+            capabilityExpectationOnly: true,
+          },
+        })
+      }
       if (path === '/api/runtimes/mcp/profiles') {
         return jsonResponse({
           profiles: [{
@@ -1113,13 +1293,31 @@ describe('LocalApp', () => {
     expect(screen.getByText(/approval_missing/)).toBeInTheDocument()
     expect(screen.getByText(/Phase 2C applies only valid approvals/)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Runtime adapter capabilities' })).toBeInTheDocument()
-    expect(screen.getByText(/cursor_structured_json_fallback/)).toBeInTheDocument()
+    expect(screen.getAllByText(/cursor_structured_json_fallback/).length).toBeGreaterThan(0)
+    expect(screen.getByRole('heading', { name: 'Portability' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Adapter conformance' })).toBeInTheDocument()
+    expect(screen.getByText(/conformance-hash-1/)).toBeInTheDocument()
+    expect(screen.getByText(/fake adapter conformance passed/)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Profiles' })).toBeInTheDocument()
     expect(screen.getByText('Ops baseline')).toBeInTheDocument()
     expect(screen.getAllByText(/machine:machine-local/).length).toBeGreaterThan(0)
     expect(screen.getByRole('heading', { name: 'Effective desired state' })).toBeInTheDocument()
     expect(screen.getByText(/same-precedence profiles/)).toBeInTheDocument()
     expect(screen.getByText(/high-risk context/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export preview' }))
+    expect(await screen.findByText(/Bundle hash: bundle-hash-1/)).toBeInTheDocument()
+    expect(screen.getByText(/target_rebind_required/)).toBeInTheDocument()
+    expect((screen.getByLabelText('Bundle JSON') as HTMLTextAreaElement).value).toContain('bundle-hash-1')
+    fireEvent.click(screen.getByRole('button', { name: 'Import preview' }))
+    expect(await screen.findByText(/Import audit: import-1/)).toBeInTheDocument()
+    expect(screen.getByText(/target_rebind_missing/)).toBeInTheDocument()
+    expect(screen.getByText(/Can commit: no/)).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('machine:1'), {
+      target: { value: 'machine-local' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply rebindings' }))
+    expect(await screen.findByText(/Can commit: yes/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Generate dry-run plan' }))
 

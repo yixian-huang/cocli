@@ -3,7 +3,10 @@ import { RefreshCw } from 'lucide-react'
 import {
   localApi,
   type McpApplyRun,
+  type McpBundleExportView,
+  type McpBundleImportView,
   type McpCapabilitySnapshot,
+  type McpConformanceSummary,
   type McpDoctorReport,
   type McpEffectiveDesiredState,
   type McpPlanAction,
@@ -68,12 +71,63 @@ function isExecutableAction(action: McpPlanAction): boolean {
     && action.kind !== 'manual_unsupported'
 }
 
+function rebindKeys(importView: McpBundleImportView | null): string[] {
+  if (!importView) return []
+  const keys = importView.preview.diagnostics
+    .map((diagnostic) => diagnostic.rebindKey)
+    .filter((key): key is string => Boolean(key))
+  return [...new Set(keys)].sort()
+}
+
+function seedRebindValues(
+  importView: McpBundleImportView,
+  current: Record<string, string> = {},
+): Record<string, string> {
+  const next = { ...current }
+  for (const [key, value] of Object.entries(importView.audit.rebindings.targets ?? {})) next[key] = value
+  for (const [key, value] of Object.entries(importView.audit.rebindings.runtimes ?? {})) next[key] = value
+  for (const [key, value] of Object.entries(importView.audit.rebindings.secretRefs ?? {})) next[key] = value
+  for (const [key, value] of Object.entries(importView.audit.rebindings.machineLocalValues ?? {})) next[key] = value
+  for (const key of rebindKeys(importView)) next[key] ??= ''
+  return next
+}
+
+function buildBundleRebindings(values: Record<string, string>) {
+  const rebindings = {
+    targets: {} as Record<string, string>,
+    runtimes: {} as Record<string, string>,
+    secretRefs: {} as Record<string, string>,
+    machineLocalValues: {} as Record<string, string>,
+    profiles: {},
+  }
+  for (const [key, rawValue] of Object.entries(values)) {
+    const value = rawValue.trim()
+    if (!value) continue
+    if (key.startsWith('machine:') || key.startsWith('workspace:') || key.startsWith('agent:')) {
+      rebindings.targets[key] = value
+    } else if (key.startsWith('runtime:')) {
+      rebindings.runtimes[key] = value
+    } else if (key.startsWith('machine-local:')) {
+      rebindings.machineLocalValues[key] = value
+    } else {
+      rebindings.secretRefs[key] = value
+    }
+  }
+  return rebindings
+}
+
 export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
   const [report, setReport] = useState<McpDoctorReport | null>(null)
   const [profiles, setProfiles] = useState<McpProfile[]>([])
   const [bindings, setBindings] = useState<McpProfileBinding[]>([])
   const [effective, setEffective] = useState<McpEffectiveDesiredState | null>(null)
   const [capabilities, setCapabilities] = useState<McpCapabilitySnapshot | null>(null)
+  const [conformance, setConformance] = useState<McpConformanceSummary | null>(null)
+  const [bundleExport, setBundleExport] = useState<McpBundleExportView | null>(null)
+  const [bundleImport, setBundleImport] = useState<McpBundleImportView | null>(null)
+  const [bundleText, setBundleText] = useState('')
+  const [bundleRebindValues, setBundleRebindValues] = useState<Record<string, string>>({})
+  const [bundleBusy, setBundleBusy] = useState(false)
   const [planView, setPlanView] = useState<McpPlanView | null>(null)
   const [preflight, setPreflight] = useState<McpPreflightReport | null>(null)
   const [applyRun, setApplyRun] = useState<McpApplyRun | null>(null)
@@ -90,18 +144,20 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
     setLoading(true)
     setError(null)
     try {
-      const [nextReport, nextProfiles, nextBindings, nextEffective, nextCapabilities] = await Promise.all([
+      const [nextReport, nextProfiles, nextBindings, nextEffective, nextCapabilities, nextConformance] = await Promise.all([
         localApi.inspectMachineMcp(),
         localApi.listMcpProfiles(),
         localApi.listMcpProfileBindings(),
         localApi.getMcpEffectiveDesiredState(),
         localApi.inspectMcpCapabilities(),
+        localApi.inspectMcpConformance(),
       ])
       setReport(nextReport)
       setProfiles(nextProfiles.profiles)
       setBindings(nextBindings.bindings)
       setEffective(nextEffective)
       setCapabilities(nextCapabilities)
+      setConformance(nextConformance)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : t('mcpLoadError'))
     } finally {
@@ -214,6 +270,69 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
       setError(nextError instanceof Error ? nextError.message : t('mcpRollbackError'))
     } finally {
       setRecordingRecovery(false)
+    }
+  }
+
+  const exportBundlePreview = async () => {
+    setBundleBusy(true)
+    setError(null)
+    try {
+      const next = await localApi.exportMcpBundlePreview()
+      setBundleExport(next)
+      setBundleText(JSON.stringify(next.bundle, null, 2))
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpBundleError'))
+    } finally {
+      setBundleBusy(false)
+    }
+  }
+
+  const previewBundleImport = async () => {
+    setBundleBusy(true)
+    setError(null)
+    try {
+      const bundle = JSON.parse(bundleText) as unknown
+      const nextImport = await localApi.importMcpBundlePreview({ bundle })
+      setBundleImport(nextImport)
+      setBundleRebindValues(seedRebindValues(nextImport))
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpBundleError'))
+    } finally {
+      setBundleBusy(false)
+    }
+  }
+
+  const applyBundleRebindings = async () => {
+    if (!bundleImport) return
+    setBundleBusy(true)
+    setError(null)
+    try {
+      const nextImport = await localApi.rebindMcpBundleImport(bundleImport.audit.id, {
+        expectedVersion: bundleImport.audit.version,
+        rebindings: buildBundleRebindings(bundleRebindValues),
+      })
+      setBundleImport(nextImport)
+      setBundleRebindValues(seedRebindValues(nextImport, bundleRebindValues))
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpBundleError'))
+    } finally {
+      setBundleBusy(false)
+    }
+  }
+
+  const commitBundleImport = async () => {
+    if (!bundleImport) return
+    setBundleBusy(true)
+    setError(null)
+    try {
+      setBundleImport(await localApi.commitMcpBundleImport(bundleImport.audit.id, {
+        expectedVersion: bundleImport.audit.version,
+      }))
+      await refresh()
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpBundleError'))
+    } finally {
+      setBundleBusy(false)
     }
   }
 
@@ -347,6 +466,142 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                               .map(([operation, detail]) => `${operation}=${detail?.support ?? 'unknown'}`)
                               .join(' · ')}
                           </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            ) : <p>{t('mcpNoCapabilities')}</p>}
+          </section>
+
+          <section className="mcp-panel" aria-labelledby="mcp-portability-title">
+            <div className="workspace-section-title">
+              <div>
+                <h2 id="mcp-portability-title">{t('mcpPortability')}</h2>
+                <p>{t('mcpPortabilityDescription')}</p>
+              </div>
+              <button className="secondary-action" type="button" onClick={() => void exportBundlePreview()} disabled={bundleBusy}>
+                {bundleBusy ? t('mcpBundleWorking') : t('mcpExportBundlePreview')}
+              </button>
+            </div>
+            <p className="mcp-apply-boundary">{t('mcpBundleBoundary')}</p>
+            {bundleExport && (
+              <>
+                <div className="mcp-plan-status">
+                  <span>{t('mcpBundleSchema')}: {bundleExport.bundle.schemaVersion}</span>
+                  <span>{t('mcpBundleHash')}: {bundleExport.bundle.contentHash}</span>
+                  <span>{t('mcpBundleProfiles')}: {bundleExport.bundle.profiles.length}</span>
+                  <span>{t('mcpBundleBindings')}: {bundleExport.bundle.relativeBindings.length}</span>
+                  <span>{t('mcpBundleProvenance')}: {bundleExport.bundle.provenance.sourceSchema}</span>
+                </div>
+                <ul className="mcp-conflict-list">
+                  {bundleExport.diagnostics.map((diagnostic, index) => (
+                    <li key={`${diagnostic.code}-${diagnostic.rebindKey ?? index}`}>
+                      <strong>{diagnostic.classification} · {diagnostic.code}</strong>
+                      <span>{diagnostic.profileRef ?? 'bundle'} · {diagnostic.serverId ?? 'target'} · {diagnostic.rebindKey ?? diagnostic.field ?? 'none'} · {diagnostic.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            )}
+            <div className="mcp-portability-grid">
+              <label>
+                <span>{t('mcpBundleJson')}</span>
+                <textarea
+                  value={bundleText}
+                  onChange={(event) => setBundleText(event.currentTarget.value)}
+                  spellCheck={false}
+                  rows={8}
+                />
+              </label>
+              <div className="mcp-portability-actions">
+                <button className="secondary-action" type="button" onClick={() => void previewBundleImport()} disabled={bundleBusy || bundleText.trim().length === 0}>
+                  {t('mcpImportPreview')}
+                </button>
+                <button className="primary-action" type="button" onClick={() => void commitBundleImport()} disabled={bundleBusy || !bundleImport?.canCommit || bundleImport.audit.status !== 'previewed'}>
+                  {t('mcpCommitImport')}
+                </button>
+              </div>
+            </div>
+            {bundleImport && (
+              <div className="mcp-preflight">
+                <div className="mcp-plan-status">
+                  <span>{t('mcpImportAudit')}: {bundleImport.audit.id}</span>
+                  <span>{t('mcpApplyStatus')}: {bundleImport.audit.status}</span>
+                  <span>{t('mcpBundleHash')}: {bundleImport.preview.bundleHash}</span>
+                  <span>{t('mcpBlockingDiagnostics')}: {bundleImport.preview.blockingCount}</span>
+                  <span>{t('mcpCanCommit')}: {bundleImport.canCommit ? t('mcpYes') : t('mcpNo')}</span>
+                </div>
+                {rebindKeys(bundleImport).length > 0 && (
+                  <div className="mcp-rebind-grid" aria-label={t('mcpRebindValues')}>
+                    {rebindKeys(bundleImport).map((key) => (
+                      <label key={key}>
+                        <span>{key}</span>
+                        <input
+                          value={bundleRebindValues[key] ?? ''}
+                          onChange={(event) => {
+                            const { value } = event.currentTarget
+                            setBundleRebindValues((current) => ({
+                              ...current,
+                              [key]: value,
+                            }))
+                          }}
+                          placeholder={t('mcpRebindValue')}
+                        />
+                      </label>
+                    ))}
+                    <button className="secondary-action" type="button" onClick={() => void applyBundleRebindings()} disabled={bundleBusy}>
+                      {t('mcpApplyRebindings')}
+                    </button>
+                  </div>
+                )}
+                <ul className="mcp-conflict-list">
+                  {bundleImport.preview.diagnostics.map((diagnostic, index) => (
+                    <li key={`import-${diagnostic.code}-${diagnostic.rebindKey ?? index}`}>
+                      <strong>{diagnostic.classification} · {diagnostic.code}</strong>
+                      <span>{diagnostic.profileRef ?? 'bundle'} · {diagnostic.serverId ?? 'target'} · {diagnostic.rebindKey ?? diagnostic.field ?? 'none'} · {diagnostic.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+
+          <section className="mcp-panel" aria-labelledby="mcp-conformance-title">
+            <div className="workspace-section-title">
+              <div>
+                <h2 id="mcp-conformance-title">{t('mcpConformance')}</h2>
+                <p>{t('mcpConformanceDescription')}</p>
+              </div>
+            </div>
+            {conformance ? (
+              <>
+                <div className="mcp-plan-status">
+                  <span>{t('mcpBundleSchema')}: {conformance.schemaVersion}</span>
+                  <span>{t('mcpReportHash')}: {conformance.reportHash}</span>
+                  <span>{new Date(conformance.generatedAt).toLocaleString()}</span>
+                </div>
+                <p className="mcp-apply-boundary">{conformance.note}</p>
+                <div className="skill-inventory-table-wrap">
+                  <table className="skill-inventory-table mcp-matrix">
+                    <thead>
+                      <tr>
+                        <th>{t('mcpRuntime')}</th>
+                        <th>{t('mcpAdapter')}</th>
+                        <th>{t('mcpApplyStatus')}</th>
+                        <th>{t('mcpOperations')}</th>
+                        <th>{t('mcpEvidence')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {conformance.reports.map((report) => (
+                        <tr key={`${report.adapter.runtime}-${report.adapter.adapter}`}>
+                          <th scope="row">{report.adapter.runtime}</th>
+                          <td>{report.adapter.adapter}</td>
+                          <td>{report.passed ? 'passed' : 'failed'}</td>
+                          <td>{report.cases.map((item) => `${item.name}=${item.status}`).join(' · ') || 'none'}</td>
+                          <td>{report.cases.find((item) => item.status === 'failed')?.reason ?? report.cases[0]?.reason ?? report.reportHash}</td>
                         </tr>
                       ))}
                     </tbody>

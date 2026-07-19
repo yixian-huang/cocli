@@ -674,6 +674,116 @@ export interface McpApplyRunView {
   run: McpApplyRun
 }
 
+export type McpPortabilityClass = 'portable' | 'requires_rebind' | 'machine_local' | 'blocked'
+
+export interface McpBundleDiagnostic {
+  code: string
+  classification: McpPortabilityClass
+  profileRef?: string
+  serverId?: string
+  field?: string
+  rebindKey?: string
+  message: string
+}
+
+export interface McpGovernanceBundle {
+  schemaVersion: number
+  createdBy: string
+  provenance: {
+    producer: string
+    sourceSchema: string
+    profileFingerprints: Record<string, string>
+  }
+  profiles: Array<{
+    profileRef: string
+    name: string
+    description?: string
+    sourceVersion: number
+    servers: McpDesiredServer[]
+  }>
+  relativeBindings: Array<{
+    profileRef: string
+    targetType: 'machine' | 'workspace' | 'agent'
+    targetRef: string
+  }>
+  capabilityExpectations?: Array<Record<string, unknown>>
+  portability: McpBundleDiagnostic[]
+  contentHash: string
+}
+
+export interface McpBundleRebindings {
+  targets?: Record<string, string>
+  runtimes?: Record<string, string>
+  secretRefs?: Record<string, string>
+  machineLocalValues?: Record<string, string>
+  profiles?: Record<string, { profileId: string; expectedVersion: number }>
+}
+
+export interface McpBundleImportAudit {
+  id: string
+  bundleHash: string
+  schemaVersion: number
+  actor: string
+  status: 'previewed' | 'committed' | 'cancelled' | 'failed'
+  version: number
+  bundle: McpGovernanceBundle
+  rebindings: McpBundleRebindings
+  preview: McpBundleImportPreview
+  result?: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+  committedAt?: string
+}
+
+export interface McpBundleImportPreview {
+  schemaVersion: number
+  bundleHash: string
+  diagnostics: McpBundleDiagnostic[]
+  profileChanges: Array<Record<string, unknown>>
+  bindingChanges: Array<Record<string, unknown>>
+  approvalImported: false
+  applyImported: false
+  blockingCount: number
+  capabilityExpectationOnly: boolean
+}
+
+export interface McpBundleExportView {
+  bundle: McpGovernanceBundle
+  diagnostics: McpBundleDiagnostic[]
+  dryRun: boolean
+}
+
+export interface McpBundleImportView {
+  audit: McpBundleImportAudit
+  preview: McpBundleImportPreview
+  canCommit: boolean
+}
+
+export interface McpConformanceSummary {
+  schemaVersion: string
+  generatedAt: string
+  reports: Array<{
+    schemaVersion: string
+    adapter: {
+      runtime: string
+      adapter: string
+      adapterVersion: string
+      contractVersion: string
+      evidence: McpEvidence[]
+    }
+    passed: boolean
+    cases: Array<{
+      name: string
+      status: 'passed' | 'failed' | 'skipped'
+      reason: string
+      evidence: McpEvidence[]
+    }>
+    reportHash: string
+  }>
+  reportHash: string
+  note: string
+}
+
 export interface SkillFileEntry {
   name: string
   isDir: boolean
@@ -937,6 +1047,40 @@ export const localApi = {
     request<McpInventory>('/api/runtimes/mcp/inventory'),
   inspectMcpCapabilities: () =>
     request<McpCapabilitySnapshot>('/api/runtimes/mcp/capabilities'),
+  inspectMcpConformance: () =>
+    request<McpConformanceSummary>('/api/runtimes/mcp/conformance'),
+  exportMcpBundlePreview: (input: { actor?: string; includeCapabilityExpectations?: boolean } = {}) =>
+    request<McpBundleExportView>('/api/runtimes/mcp/bundles/export-preview', {
+      method: 'POST',
+      body: JSON.stringify({ actor: 'desktop-user', includeCapabilityExpectations: true, ...input }),
+    }),
+  exportMcpBundle: (input: { actor?: string; includeCapabilityExpectations?: boolean } = {}) =>
+    request<McpBundleExportView>('/api/runtimes/mcp/bundles/export', {
+      method: 'POST',
+      body: JSON.stringify({ actor: 'desktop-user', includeCapabilityExpectations: true, ...input }),
+    }),
+  importMcpBundlePreview: (input: {
+    bundle: unknown
+    actor?: string
+    rebindings?: McpBundleRebindings
+  }) =>
+    request<McpBundleImportView>('/api/runtimes/mcp/bundles/import-preview', {
+      method: 'POST',
+      body: JSON.stringify({ actor: 'desktop-user', rebindings: {}, ...input }),
+    }),
+  rebindMcpBundleImport: (
+    auditId: string,
+    input: { expectedVersion: number; rebindings: McpBundleRebindings },
+  ) =>
+    request<McpBundleImportView>(`/api/runtimes/mcp/bundles/imports/${auditId}/rebind`, {
+      method: 'POST',
+      body: JSON.stringify(input),
+    }),
+  commitMcpBundleImport: (auditId: string, input: { expectedVersion: number; actor?: string }) =>
+    request<McpBundleImportView>(`/api/runtimes/mcp/bundles/imports/${auditId}/commit`, {
+      method: 'POST',
+      body: JSON.stringify({ actor: 'desktop-user', ...input }),
+    }),
   listMcpProfiles: () =>
     request<{ profiles: McpProfile[] }>('/api/runtimes/mcp/profiles'),
   listMcpProfileBindings: () =>

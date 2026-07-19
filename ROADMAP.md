@@ -75,6 +75,15 @@ package-manager direction.
   saga-style partial-failure results; and verify with fresh inventory/doctor
   readback while reporting new-session-only activation separately from active
   Session effectiveness.
+- **Phase 3A — portable bundles and adapter conformance (complete):** export
+  deterministic governance bundles containing profiles, relative bindings,
+  desired servers, opaque secret references, provenance, optional capability
+  expectations, portability diagnostics, and a stable content hash; require
+  explicit import rebinding for machine/Workspace/Agent/Runtime/secret and
+  machine-local values; commit imports only to desired-state profiles and
+  bindings without approval/apply side effects; and expose a library-only
+  adapter SDK plus conformance harness for redaction, capability evidence,
+  unsupported downgrade, write confinement, reload/verify, and recovery.
 
 MCP governance does not introduce a Gateway or Registry and is not a secret
 store. Unsupported/authentication actions remain blocked, Grok write support
