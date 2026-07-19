@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -13,9 +13,14 @@ use cocli_api::{
     McpDiagnosticSeverity, McpEvidence, McpInventory, RuntimeError, RuntimeInfo, RuntimeService,
     RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
 };
+use cocli_driver_core::{
+    McpApplyActionResult, McpApplyActionStatus, McpApplyExecutionRequest, McpApplyExecutionResult,
+    McpBackupDescriptor, McpReloadResult, McpReloadStatus, McpRollbackExecutionRequest,
+    McpRollbackExecutionResult, McpVerificationResult, McpVerificationStatus,
+};
 use cocli_store::{
-    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillLibrary, SkillLibraryFile,
-    Store,
+    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewMcpApplyRun, NewSkillLibrary,
+    SkillLibraryFile, Store,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -30,6 +35,13 @@ struct FailingStartRuntime;
 #[derive(Debug, Default)]
 struct MutableMcpRuntime {
     inventory: Mutex<McpInventory>,
+}
+
+#[derive(Debug, Default)]
+struct ApplyMcpRuntime {
+    apply_calls: AtomicUsize,
+    rollback_calls: AtomicUsize,
+    applied: AtomicBool,
 }
 
 #[async_trait]
@@ -108,6 +120,101 @@ impl RuntimeService for MutableMcpRuntime {
             .lock()
             .expect("mutable MCP inventory should not be poisoned")
             .clone())
+    }
+}
+
+#[async_trait]
+impl RuntimeService for ApplyMcpRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        let mut inventory = McpInventory::default();
+        if self.applied.load(Ordering::SeqCst) {
+            inventory.diagnostics.push(McpDiagnostic {
+                code: "post_apply_state".to_owned(),
+                severity: McpDiagnosticSeverity::Info,
+                runtime: "cursor".to_owned(),
+                server_id: None,
+                message: "post-apply observation".to_owned(),
+                evidence: Vec::new(),
+                observed_at: "2026-07-19T00:00:00Z".to_owned(),
+            });
+        }
+        Ok(inventory)
+    }
+
+    async fn apply_mcp(
+        &self,
+        _request: McpApplyExecutionRequest,
+    ) -> Result<McpApplyExecutionResult, RuntimeError> {
+        self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        self.applied.store(true, Ordering::SeqCst);
+        Ok(McpApplyExecutionResult {
+            actions: vec![McpApplyActionResult {
+                action_index: 0,
+                runtime: "cursor".to_owned(),
+                server_id: "docs".to_owned(),
+                status: McpApplyActionStatus::Verified,
+                reason: "verified safely".to_owned(),
+                backup: Some(McpBackupDescriptor {
+                    id: "backup-test".to_owned(),
+                    runtime: "cursor".to_owned(),
+                    source_path: "/tmp/config.json".to_owned(),
+                    backup_path: "/tmp/backup.json".to_owned(),
+                    source_hash: "before".to_owned(),
+                    backup_hash: "before".to_owned(),
+                    applied_hash: "after".to_owned(),
+                    source_existed: true,
+                }),
+                before_source_hash: Some("before".to_owned()),
+                after_source_hash: Some("after".to_owned()),
+            }],
+            reloads: vec![McpReloadResult {
+                runtime: "cursor".to_owned(),
+                status: McpReloadStatus::Deferred,
+                reason: "active sessions were not restarted".to_owned(),
+            }],
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Matched,
+                observation_hash: "verified-observation".to_owned(),
+                mismatches: Vec::new(),
+            },
+        })
+    }
+
+    async fn rollback_mcp(
+        &self,
+        request: McpRollbackExecutionRequest,
+    ) -> Result<McpRollbackExecutionResult, RuntimeError> {
+        self.rollback_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(McpRollbackExecutionResult {
+            actions: request
+                .backups
+                .into_iter()
+                .enumerate()
+                .map(|(action_index, backup)| McpApplyActionResult {
+                    action_index,
+                    runtime: backup.runtime.clone(),
+                    server_id: "docs".to_owned(),
+                    status: McpApplyActionStatus::RolledBack,
+                    reason: "backup restored atomically".to_owned(),
+                    backup: Some(backup),
+                    before_source_hash: None,
+                    after_source_hash: None,
+                })
+                .collect(),
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Matched,
+                observation_hash: "rollback-observation".to_owned(),
+                mismatches: Vec::new(),
+            },
+        })
     }
 }
 
@@ -360,6 +467,12 @@ async fn mcp_profile_plan_and_approval_api_is_dry_run_versioned_and_stale_aware(
     assert_eq!(plan_view["plan"]["actions"][0]["blocked"], true);
     let plan_id = plan_view["plan"]["id"].as_str().expect("plan id");
     let plan_hash = plan_view["plan"]["planHash"].as_str().expect("plan hash");
+    let observation_hash = plan_view["plan"]["observationHash"]
+        .as_str()
+        .expect("observation hash");
+    let config_hash = plan_view["plan"]["configHash"]
+        .as_str()
+        .expect("config hash");
 
     let missing_expiry_status = status_request(
         app.clone(),
@@ -385,6 +498,20 @@ async fn mcp_profile_plan_and_approval_api_is_dry_run_versioned_and_stale_aware(
     assert_eq!(approved["approvalStatus"], "approved");
     assert_eq!(approved["approvedButNotApplied"], true);
     assert_eq!(approved["plan"]["applied"], false);
+    let high_risk_status = status_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan_hash,
+            "observationHash": observation_hash,
+            "configHash": config_hash,
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(high_risk_status, StatusCode::BAD_REQUEST);
 
     let mut update = mcp_profile_body("production docs", false);
     update["expectedVersion"] = json!(1);
@@ -470,11 +597,17 @@ async fn mcp_profile_api_rejects_plaintext_secret_without_echoing_it() {
 async fn mcp_approval_becomes_stale_after_observation_drift() {
     let store = Store::in_memory().await.expect("store should open");
     let runtime = Arc::new(MutableMcpRuntime::default());
-    let app = router(store, runtime.clone());
+    let app = router(store.clone(), runtime.clone());
     let (_, plan_view) =
         json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
     let plan_id = plan_view["plan"]["id"].as_str().expect("plan id");
     let plan_hash = plan_view["plan"]["planHash"].as_str().expect("plan hash");
+    let observation_hash = plan_view["plan"]["observationHash"]
+        .as_str()
+        .expect("observation hash");
+    let config_hash = plan_view["plan"]["configHash"]
+        .as_str()
+        .expect("config hash");
     let (approve_status, _) = json_request(
         app.clone(),
         "POST",
@@ -487,6 +620,23 @@ async fn mcp_approval_becomes_stale_after_observation_drift() {
     )
     .await;
     assert_eq!(approve_status, StatusCode::OK);
+    let decision = store
+        .get_mcp_plan_decision(plan_id)
+        .await
+        .expect("read approval")
+        .expect("approval exists");
+    let interrupted = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan_id.to_owned(),
+            approval_id: decision.id,
+            plan_hash: plan_hash.to_owned(),
+            observation_hash: observation_hash.to_owned(),
+            config_hash: config_hash.to_owned(),
+            actor: "api-test".to_owned(),
+            confirm_high_risk: false,
+        })
+        .await
+        .expect("persist interrupted run");
 
     runtime
         .inventory
@@ -504,7 +654,7 @@ async fn mcp_approval_becomes_stale_after_observation_drift() {
         });
 
     let (status, stale) = json_request(
-        app,
+        app.clone(),
         "GET",
         &format!("/api/runtimes/mcp/plans/{plan_id}"),
         json!({}),
@@ -517,6 +667,177 @@ async fn mcp_approval_becomes_stale_after_observation_drift() {
         .expect("stale reasons")
         .iter()
         .any(|reason| reason == "observation_drift"));
+    let (apply_status, recovered) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan_hash,
+            "observationHash": observation_hash,
+            "configHash": config_hash,
+            "actor": "api-test",
+            "confirmHighRisk": true
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(recovered["run"]["id"], interrupted.id.to_string());
+    assert_eq!(recovered["run"]["status"], "failed");
+    assert_eq!(
+        recovered["run"]["staleReasons"][0],
+        "observation or desired configuration drifted during an interrupted apply"
+    );
+}
+
+#[tokio::test]
+async fn mcp_apply_api_revalidates_hashes_is_idempotent_and_rolls_back() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(ApplyMcpRuntime::default());
+    let app = router(store.clone(), runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let plan_hash = plan["planHash"].as_str().expect("plan hash");
+    let observation_hash = plan["observationHash"].as_str().expect("observation hash");
+    let config_hash = plan["configHash"].as_str().expect("config hash");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    let decision = store
+        .get_mcp_plan_decision(plan_id)
+        .await
+        .expect("read approval")
+        .expect("approval exists");
+    let interrupted = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan_id.to_owned(),
+            approval_id: decision.id,
+            plan_hash: plan_hash.to_owned(),
+            observation_hash: observation_hash.to_owned(),
+            config_hash: config_hash.to_owned(),
+            actor: "api-test".to_owned(),
+            confirm_high_risk: false,
+        })
+        .await
+        .expect("persist resumable run");
+
+    let (stale_status, stale) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": "wrong",
+            "observationHash": observation_hash,
+            "configHash": config_hash,
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT);
+    assert!(stale["error"].as_str().expect("error").contains("hashes"));
+
+    let apply_body = json!({
+        "planHash": plan_hash,
+        "observationHash": observation_hash,
+        "configHash": config_hash,
+        "actor": "api-test",
+        "confirmHighRisk": false
+    });
+    let (apply_status, applied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        apply_body.clone(),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(applied["run"]["status"], "verified");
+    assert_eq!(applied["run"]["verification"]["status"], "matched");
+    assert_eq!(applied["run"]["reloads"][0]["status"], "deferred");
+    assert_eq!(applied["run"]["canRollback"], true);
+    let run_id = applied["run"]["id"].as_str().expect("run id");
+    assert_eq!(run_id, interrupted.id.to_string());
+
+    let (_, repeated) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        apply_body,
+    )
+    .await;
+    assert_eq!(repeated["run"]["id"], run_id);
+    assert_eq!(runtime.apply_calls.load(Ordering::SeqCst), 1);
+
+    let (rollback_status, rolled_back) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/apply-runs/{run_id}/rollback"),
+        json!({ "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK);
+    assert_eq!(rolled_back["run"]["rollbackStatus"], "rolled_back");
+    let (_, repeated_rollback) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/apply-runs/{run_id}/rollback"),
+        json!({ "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(repeated_rollback["run"]["rollbackStatus"], "rolled_back");
+    assert_eq!(runtime.rollback_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn mcp_apply_api_never_executes_an_expired_approval() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(ApplyMcpRuntime::default());
+    let app = router(store, runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let expires_at = (Utc::now() + ChronoDuration::milliseconds(500)).to_rfc3339();
+    let approve_status = status_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan["planHash"],
+            "actor": "api-test",
+            "expiresAt": expires_at
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let apply_status = status_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan["planHash"],
+            "observationHash": plan["observationHash"],
+            "configHash": plan["configHash"],
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::CONFLICT);
+    assert_eq!(runtime.apply_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

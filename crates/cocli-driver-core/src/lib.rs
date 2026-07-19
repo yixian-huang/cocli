@@ -27,10 +27,13 @@ pub use mcp::{
 };
 pub use mcp_governance::{
     generate_mcp_plan, hash_mcp_config, hash_mcp_observation, mcp_definition_fingerprint,
-    resolve_mcp_desired_state, validate_mcp_profile, McpApprovalMode, McpBindingTarget,
-    McpBindingTargetType, McpDesiredServer, McpDesiredTarget, McpEffectiveDesiredState,
-    McpEffectiveServer, McpPlan, McpPlanAction, McpPlanActionKind, McpProfile, McpProfileBinding,
-    McpProfileConflict, McpProfileResolution, McpRiskLevel, McpStateSummary,
+    resolve_mcp_desired_state, validate_mcp_profile, McpApplyActionResult, McpApplyActionStatus,
+    McpApplyExecutionRequest, McpApplyExecutionResult, McpApprovalMode, McpBackupDescriptor,
+    McpBindingTarget, McpBindingTargetType, McpDesiredServer, McpDesiredTarget,
+    McpEffectiveDesiredState, McpEffectiveServer, McpPlan, McpPlanAction, McpPlanActionKind,
+    McpProfile, McpProfileBinding, McpProfileConflict, McpProfileResolution, McpReloadResult,
+    McpReloadStatus, McpRiskLevel, McpRollbackExecutionRequest, McpRollbackExecutionResult,
+    McpStateSummary, McpVerificationResult, McpVerificationStatus,
 };
 pub use subtraits::{
     ExitCodeClassifier, ProcessFactory, ProcessInitializer, SessionFileGC, StdinBinder,

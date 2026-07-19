@@ -759,6 +759,28 @@ pub trait RuntimeService: Send + Sync {
         Ok(cocli_driver_core::McpInventory::default())
     }
 
+    /// Applies an already-approved MCP plan through runtime-specific writers.
+    /// Implementations must enforce per-source CAS and atomic backup/write
+    /// semantics; the default is deliberately unsupported.
+    async fn apply_mcp(
+        &self,
+        _request: cocli_driver_core::McpApplyExecutionRequest,
+    ) -> Result<cocli_driver_core::McpApplyExecutionResult, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "MCP configuration apply is not supported".to_owned(),
+        ))
+    }
+
+    /// Restores opaque backups produced by [`RuntimeService::apply_mcp`].
+    async fn rollback_mcp(
+        &self,
+        _request: cocli_driver_core::McpRollbackExecutionRequest,
+    ) -> Result<cocli_driver_core::McpRollbackExecutionResult, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "MCP configuration rollback is not supported".to_owned(),
+        ))
+    }
+
     /// Returns skill compatibility for one runtime name.
     fn skill_compatibility(&self, _runtime: &str) -> RuntimeSkillCompatibility {
         RuntimeSkillCompatibility::Unknown
@@ -908,10 +930,12 @@ pub(crate) struct AppState {
     deliveries: Arc<DeliveryCoordinator>,
     _delivery_worker: Arc<DeliveryWorker>,
     skill_mutation_locks: SkillMutationLocks,
+    mcp_apply_locks: McpApplyLocks,
     bridge_mutation_lock: Arc<Mutex<()>>,
 }
 
 type SkillMutationLocks = Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>;
+type McpApplyLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 
 /// Tuning for the local SQLite-backed delivery worker.
 #[derive(Clone, Copy, Debug)]
@@ -1419,6 +1443,7 @@ fn router_with_delivery_config_and_live_events(
             deliveries,
             _delivery_worker: delivery_worker,
             skill_mutation_locks: Arc::new(Mutex::new(HashMap::new())),
+            mcp_apply_locks: Arc::new(Mutex::new(HashMap::new())),
             bridge_mutation_lock: Arc::new(Mutex::new(())),
         })
 }
@@ -4142,12 +4167,14 @@ impl From<StoreError> for ApiError {
             }
             StoreError::McpProfileNotFound(_)
             | StoreError::McpProfileBindingNotFound(_)
-            | StoreError::McpPlanNotFound(_) => Some(StatusCode::NOT_FOUND),
+            | StoreError::McpPlanNotFound(_)
+            | StoreError::McpApplyRunNotFound(_) => Some(StatusCode::NOT_FOUND),
             StoreError::McpProfileVersionConflict { .. }
             | StoreError::McpProfileBindingVersionConflict { .. } => Some(StatusCode::CONFLICT),
             StoreError::InvalidMcpProfile(_)
             | StoreError::InvalidMcpBindingTarget(_)
-            | StoreError::InvalidMcpPlanDecision(_) => Some(StatusCode::BAD_REQUEST),
+            | StoreError::InvalidMcpPlanDecision(_)
+            | StoreError::InvalidMcpApplyRun(_) => Some(StatusCode::BAD_REQUEST),
             StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
                 Some(StatusCode::CONFLICT)
             }

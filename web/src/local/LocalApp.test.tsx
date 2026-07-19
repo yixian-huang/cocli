@@ -47,6 +47,9 @@ function jsonResponse(body: unknown, status = 200) {
 }
 
 describe('LocalApp', () => {
+  let mcpApplyRequest: Record<string, unknown> | null = null
+  let mcpRollbackRequested = false
+
   afterEach(() => {
     vi.unstubAllGlobals()
   })
@@ -78,6 +81,8 @@ describe('LocalApp', () => {
       path: string
       version: number
     } | null = null
+    mcpApplyRequest = null
+    mcpRollbackRequested = false
     localStorage.clear()
     window.matchMedia = vi.fn().mockReturnValue({
       matches: false,
@@ -351,6 +356,85 @@ describe('LocalApp', () => {
       if (path === '/api/runtimes/mcp/plans/plan-1/reject' && init?.method === 'POST') {
         mcpPlanDecision = 'rejected'
         return (fetch as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>)('/api/runtimes/mcp/plans', { method: 'POST' })
+      }
+      if (path === '/api/runtimes/mcp/plans/plan-1/apply' && init?.method === 'POST') {
+        mcpApplyRequest = JSON.parse(String(init.body))
+        return jsonResponse({
+          run: {
+            id: 'apply-run-1',
+            planId: 'plan-1',
+            planHash: 'plan-hash-1',
+            observationHash: 'obs-hash-1',
+            configHash: 'config-hash-1',
+            actor: 'desktop-user',
+            status: 'verified',
+            confirmHighRisk: true,
+            requestedAt: '2026-07-19T09:12:00Z',
+            completedAt: '2026-07-19T09:13:00Z',
+            actions: [{
+              actionIndex: 0,
+              runtime: 'cursor',
+              serverId: 'srv-docs',
+              status: 'blocked',
+              reason: 'approval_required action is never executed by apply',
+            }],
+            reloads: [{
+              runtime: 'cursor',
+              status: 'deferred',
+              reason: 'active sessions were not restarted',
+            }],
+            verification: {
+              status: 'matched',
+              observationHash: 'obs-hash-after',
+              mismatches: [],
+            },
+            staleReasons: [],
+            canRollback: true,
+          },
+        })
+      }
+      if (path === '/api/runtimes/mcp/apply-runs/apply-run-1/rollback' && init?.method === 'POST') {
+        mcpRollbackRequested = true
+        return jsonResponse({
+          run: {
+            id: 'apply-run-1',
+            planId: 'plan-1',
+            planHash: 'plan-hash-1',
+            observationHash: 'obs-hash-1',
+            configHash: 'config-hash-1',
+            actor: 'desktop-user',
+            status: 'rolled_back',
+            confirmHighRisk: true,
+            requestedAt: '2026-07-19T09:12:00Z',
+            completedAt: '2026-07-19T09:14:00Z',
+            actions: [{
+              actionIndex: 0,
+              runtime: 'cursor',
+              serverId: 'srv-docs',
+              status: 'rolled_back',
+              reason: 'backup restored',
+              backup: {
+                id: 'backup-1',
+                runtime: 'cursor',
+                sourcePath: '/tmp/cursor.json',
+                backupPath: '/tmp/backup.json',
+                sourceHash: 'source-hash-1',
+                backupHash: 'backup-hash-1',
+                appliedHash: 'applied-hash-1',
+                sourceExisted: true,
+              },
+            }],
+            reloads: [],
+            verification: {
+              status: 'matched',
+              observationHash: 'obs-hash-rollback',
+              mismatches: [],
+            },
+            staleReasons: [],
+            canRollback: false,
+            rollbackStatus: 'rolled_back',
+          },
+        })
       }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
       if (path === '/api/agents' && !init?.method) {
@@ -924,7 +1008,7 @@ describe('LocalApp', () => {
     expect(screen.getByRole('row', { name: /cursor D✓ C✓ L✓ E✓ P× A· H× S· I·/ })).toBeInTheDocument()
     expect(screen.getByText(/cursor-agent mcp list-tools/)).toBeInTheDocument()
     expect(screen.getByText(/approval_missing/)).toBeInTheDocument()
-    expect(screen.getByText(/zero-write preview/)).toBeInTheDocument()
+    expect(screen.getByText(/Phase 2B applies only valid approvals/)).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Profiles' })).toBeInTheDocument()
     expect(screen.getByText('Ops baseline')).toBeInTheDocument()
     expect(screen.getAllByText(/machine:machine-local/).length).toBeGreaterThan(0)
@@ -944,6 +1028,33 @@ describe('LocalApp', () => {
     expect(await screen.findByText(/Approval status: approved/)).toBeInTheDocument()
     expect(screen.getByText('approved but not applied')).toBeInTheDocument()
     expect(screen.getByText(/Approval expires:/)).toBeInTheDocument()
+    expect(screen.getByText(/Manual, blocked, auth-required, and unsupported actions are never executed/)).toBeInTheDocument()
+    expect(screen.getByText(/0 executable action/)).toBeInTheDocument()
+
+    const applyButton = screen.getByRole('button', { name: 'Apply approved plan' })
+    expect(applyButton).toBeDisabled()
+    fireEvent.click(screen.getByLabelText(/I confirm high-risk MCP configuration changes/))
+    expect(applyButton).toBeEnabled()
+    fireEvent.click(applyButton)
+
+    expect(await screen.findByText(/Apply status: verified/)).toBeInTheDocument()
+    expect(screen.getByText(/blocked · cursor · srv-docs/)).toBeInTheDocument()
+    expect(screen.getByText(/approval_required action is never executed by apply/)).toBeInTheDocument()
+    expect(screen.getByText(/deferred · cursor/)).toBeInTheDocument()
+    expect(screen.getByText(/active sessions were not restarted/)).toBeInTheDocument()
+    expect(screen.getByText(/Verify: matched/)).toBeInTheDocument()
+    expect(mcpApplyRequest).toMatchObject({
+      planHash: 'plan-hash-1',
+      observationHash: 'obs-hash-1',
+      configHash: 'config-hash-1',
+      confirmHighRisk: true,
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Rollback' }))
+    expect(await screen.findByText(/Apply status: rolled_back/)).toBeInTheDocument()
+    expect(screen.getByText(/Rollback status: rolled_back/)).toBeInTheDocument()
+    expect(screen.getByText(/backup restored/)).toBeInTheDocument()
+    expect(mcpRollbackRequested).toBe(true)
   })
 
   it('creates, assigns, updates, and links local tasks', async () => {

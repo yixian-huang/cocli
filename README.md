@@ -139,8 +139,19 @@ not applied”. See [docs/mcp-governance-phase-2a.md](docs/mcp-governance-phase-
 
 Phase 2A never writes Codex, Cursor, Claude, or Grok configuration, never
 performs OAuth/authentication or Runtime approval, and accepts secret
-references only. Phase 2B is reserved for explicit apply/reload/verify,
-adapter writers, backup/rollback, and post-apply drift verification.
+references only.
+
+Phase 2B adds an explicitly confirmed apply flow for a still-current approval.
+The API rechecks the plan, desired configuration, observation hashes, and
+expiry immediately before dispatch. Supported Cursor/Claude JSON adapters use
+per-source locks, compare-and-swap checks, pre-write backups, and atomic
+`mcpServers` subtree updates while preserving unrelated user configuration.
+Codex/Grok TOML, tool-policy, authentication, and unresolved secret-reference
+actions return structured blocked/manual results instead of pretending to
+succeed. Active sessions are not restarted: reload is recorded as deferred,
+then a fresh inventory verifies desired state. Apply runs, per-action outcomes,
+backups, verification, and rollback remain durable and auditable. See
+[docs/mcp-governance-phase-2b.md](docs/mcp-governance-phase-2b.md).
 
 ## Repository layout
 

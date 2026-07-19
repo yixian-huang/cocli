@@ -1445,6 +1445,12 @@ textarea::placeholder {
   color: var(--warning);
 }
 
+.mcp-apply-boundary {
+  margin: 0 0 var(--space-3);
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .mcp-plan-actions article.risk-high,
 .mcp-plan-actions article.risk-critical {
   border-color: color-mix(in srgb, var(--danger) 50%, var(--line));
@@ -1479,10 +1485,62 @@ textarea::placeholder {
   margin-top: var(--space-4);
 }
 
+.mcp-apply-controls,
+.mcp-apply-run {
+  margin-top: var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+}
+
+.mcp-apply-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3);
+}
+
+.mcp-apply-controls p {
+  margin: var(--space-1) 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.mcp-apply-controls > span {
+  color: var(--muted);
+  font-family: var(--font-signal);
+  font-size: 9px;
+}
+
+.mcp-high-risk-confirm {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text);
+  font-size: 11px;
+}
+
+.mcp-apply-run {
+  padding: var(--space-4);
+}
+
+.mcp-apply-run h3,
+.mcp-apply-run h4 {
+  margin: 0;
+}
+
+.mcp-apply-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4);
+}
+
 @media (max-width: 800px) {
   .mcp-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .mcp-finding-list li { grid-template-columns: 1fr; gap: var(--space-1); }
   .mcp-plan-actions dl div { grid-template-columns: 1fr; gap: var(--space-1); }
+  .mcp-apply-columns { grid-template-columns: 1fr; }
 }
 
 .workspace-heading {

@@ -62,12 +62,15 @@ package-manager direction.
   dry-run plans; and record hash-bound approve/reject decisions that become
   stale after desired-state or observation drift. Approval authorizes a future
   operation only and is never treated as applied.
-- **Phase 2B — apply, reload, verify, and recovery (planned):** introduce
-  Runtime adapter writers, pre-write backups, rollback, explicit apply and
-  reload controls, and post-apply verification against fresh native evidence.
+- **Phase 2B — apply, reload, verify, and recovery (complete):** consume only
+  live, hash-matching approvals; isolate Runtime adapter writers behind CAS,
+  per-source locks, pre-write backups, and atomic subtree updates; preserve
+  action-level partial-failure evidence; defer active-session reloads; verify
+  against a fresh inventory; and expose audited rollback.
 
 MCP governance does not introduce a Gateway or Registry and is not a secret
-store. Phase 2A contains no Runtime configuration writer or apply endpoint.
+store. Phase 2B keeps unsupported/authentication actions blocked and never
+restarts an active Runtime session without separate future authorization.
 
 ## Beta milestones
 

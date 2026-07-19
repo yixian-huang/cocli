@@ -607,6 +607,117 @@ pub struct McpPlan {
     pub applied: bool,
 }
 
+/// Runtime-neutral request passed to an MCP configuration applier only after
+/// the API has revalidated the durable approval and all plan base hashes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpApplyExecutionRequest {
+    pub run_id: String,
+    pub plan: McpPlan,
+    pub actor: String,
+    pub confirm_high_risk: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpApplyActionStatus {
+    Applied,
+    Skipped,
+    Blocked,
+    Failed,
+    Verified,
+    RolledBack,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpReloadStatus {
+    NotRequired,
+    Reloaded,
+    Deferred,
+    Blocked,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpVerificationStatus {
+    Matched,
+    Mismatched,
+    Blocked,
+    Failed,
+}
+
+/// Opaque backup metadata. Backup contents never cross the adapter boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpBackupDescriptor {
+    pub id: String,
+    pub runtime: String,
+    pub source_path: String,
+    pub backup_path: String,
+    pub source_hash: String,
+    pub backup_hash: String,
+    pub applied_hash: String,
+    pub source_existed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpApplyActionResult {
+    pub action_index: usize,
+    pub runtime: String,
+    pub server_id: String,
+    pub status: McpApplyActionStatus,
+    pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup: Option<McpBackupDescriptor>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before_source_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after_source_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpReloadResult {
+    pub runtime: String,
+    pub status: McpReloadStatus,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpVerificationResult {
+    pub status: McpVerificationStatus,
+    pub observation_hash: String,
+    #[serde(default)]
+    pub mismatches: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpApplyExecutionResult {
+    pub actions: Vec<McpApplyActionResult>,
+    pub reloads: Vec<McpReloadResult>,
+    pub verification: McpVerificationResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRollbackExecutionRequest {
+    pub run_id: String,
+    pub actor: String,
+    pub backups: Vec<McpBackupDescriptor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpRollbackExecutionResult {
+    pub actions: Vec<McpApplyActionResult>,
+    pub verification: McpVerificationResult,
+}
+
 #[must_use]
 pub fn hash_mcp_observation(inventory: &McpInventory) -> String {
     let mut servers = inventory

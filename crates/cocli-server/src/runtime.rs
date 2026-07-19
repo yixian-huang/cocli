@@ -561,6 +561,20 @@ impl RuntimeService for LocalRuntimeService {
         Ok(crate::mcp::inspect(&self.catalog, &self.config).await)
     }
 
+    async fn apply_mcp(
+        &self,
+        request: cocli_driver_core::McpApplyExecutionRequest,
+    ) -> Result<cocli_driver_core::McpApplyExecutionResult, RuntimeError> {
+        Ok(crate::mcp::apply(&self.catalog, &self.config, request).await)
+    }
+
+    async fn rollback_mcp(
+        &self,
+        request: cocli_driver_core::McpRollbackExecutionRequest,
+    ) -> Result<cocli_driver_core::McpRollbackExecutionResult, RuntimeError> {
+        Ok(crate::mcp::rollback(&self.catalog, &self.config, request).await)
+    }
+
     fn skill_compatibility(&self, runtime: &str) -> RuntimeSkillCompatibility {
         crate::skills::compatibility(&self.registry, runtime)
     }

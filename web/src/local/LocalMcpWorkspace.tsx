@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import {
   localApi,
+  type McpApplyRun,
   type McpDoctorReport,
   type McpEffectiveDesiredState,
   type McpPlanAction,
@@ -58,15 +59,26 @@ function actionEvidence(action: McpPlanAction): string {
   return action.evidence.map((evidence) => `${evidence.source}: ${evidence.detail}`).join(' · ')
 }
 
+function isExecutableAction(action: McpPlanAction): boolean {
+  return !action.blocked
+    && action.kind !== 'approval_required'
+    && action.kind !== 'authentication_required'
+    && action.kind !== 'manual_unsupported'
+}
+
 export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
   const [report, setReport] = useState<McpDoctorReport | null>(null)
   const [profiles, setProfiles] = useState<McpProfile[]>([])
   const [bindings, setBindings] = useState<McpProfileBinding[]>([])
   const [effective, setEffective] = useState<McpEffectiveDesiredState | null>(null)
   const [planView, setPlanView] = useState<McpPlanView | null>(null)
+  const [applyRun, setApplyRun] = useState<McpApplyRun | null>(null)
   const [loading, setLoading] = useState(true)
   const [planning, setPlanning] = useState(false)
   const [decisionBusy, setDecisionBusy] = useState(false)
+  const [applying, setApplying] = useState(false)
+  const [rollingBack, setRollingBack] = useState(false)
+  const [confirmHighRisk, setConfirmHighRisk] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
@@ -111,6 +123,8 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
   const generatePlan = async () => {
     setPlanning(true)
     setError(null)
+    setApplyRun(null)
+    setConfirmHighRisk(false)
     try {
       setPlanView(await localApi.createMcpPlan())
     } catch (nextError) {
@@ -129,10 +143,51 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
         ? await localApi.approveMcpPlan(planView.plan.id, planView.plan.planHash)
         : await localApi.rejectMcpPlan(planView.plan.id, planView.plan.planHash, 'Rejected from desktop preview')
       setPlanView(next)
+      setConfirmHighRisk(false)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : t('mcpPlanError'))
     } finally {
       setDecisionBusy(false)
+    }
+  }
+
+  const highRiskPlan = planView?.plan.actions.some((action) => action.risk === 'high' || action.risk === 'critical') ?? false
+  const executableActionCount = planView?.plan.actions.filter(isExecutableAction).length ?? 0
+  const canApplyPlan = planView?.approvalStatus === 'approved'
+    && planView.staleReasons.length === 0
+    && planView.approvedButNotApplied
+    && (!highRiskPlan || confirmHighRisk)
+
+  const applyPlan = async () => {
+    if (!planView) return
+    setApplying(true)
+    setError(null)
+    try {
+      const next = await localApi.applyMcpPlan(planView.plan.id, {
+        planHash: planView.plan.planHash,
+        observationHash: planView.plan.observationHash,
+        configHash: planView.plan.configHash,
+        confirmHighRisk,
+      })
+      setApplyRun(next.run)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpApplyError'))
+    } finally {
+      setApplying(false)
+    }
+  }
+
+  const rollbackApplyRun = async () => {
+    if (!applyRun) return
+    setRollingBack(true)
+    setError(null)
+    try {
+      const next = await localApi.rollbackMcpApplyRun(applyRun.id)
+      setApplyRun(next.run)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpRollbackError'))
+    } finally {
+      setRollingBack(false)
     }
   }
 
@@ -347,6 +402,7 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                   {planView.decision?.expiresAt && <span>{t('mcpApprovalExpires')}: {new Date(planView.decision.expiresAt).toLocaleString()}</span>}
                   {planView.approvedButNotApplied && <strong>{t('mcpApprovedNotApplied')}</strong>}
                 </div>
+                <p className="mcp-apply-boundary">{t('mcpApplyBoundary')}</p>
                 {planView.staleReasons.length > 0 && (
                   <ul className="mcp-conflict-list">
                     {planView.staleReasons.map((reason) => <li key={reason}>{reason}</li>)}
@@ -368,6 +424,7 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                         <div><dt>{t('mcpAfter')}</dt><dd>{summaryLabel(action.after)}</dd></div>
                         <div><dt>{t('mcpEvidence')}</dt><dd>{actionEvidence(action)}</dd></div>
                         <div><dt>{t('mcpExpectedHashes')}</dt><dd>{action.expectedSourceHash ?? 'unknown'} / {action.expectedSchemaHash ?? 'unknown'}</dd></div>
+                        <div><dt>{t('mcpExecution')}</dt><dd>{isExecutableAction(action) ? t('mcpExecutableAction') : t('mcpNonExecutableAction')}</dd></div>
                       </dl>
                     </article>
                   ))}
@@ -380,6 +437,95 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                     {t('mcpRejectPlan')}
                   </button>
                 </div>
+                <div className="mcp-apply-controls" aria-label={t('mcpApplyControls')}>
+                  <div>
+                    <strong>{t('mcpApplyPreview')}</strong>
+                    <p>{t('mcpApplyPreviewDetail', { count: executableActionCount })}</p>
+                  </div>
+                  {highRiskPlan && (
+                    <label className="mcp-high-risk-confirm">
+                      <input
+                        type="checkbox"
+                        checked={confirmHighRisk}
+                        onChange={(event) => setConfirmHighRisk(event.currentTarget.checked)}
+                      />
+                      <span>{t('mcpConfirmHighRisk')}</span>
+                    </label>
+                  )}
+                  <button type="button" className="primary-action" onClick={() => void applyPlan()} disabled={applying || !canApplyPlan}>
+                    {applying ? t('mcpApplying') : t('mcpApplyApprovedPlan')}
+                  </button>
+                  {planView.approvalStatus !== 'approved' && <span>{t('mcpApplyNeedsApproval')}</span>}
+                  {planView.approvalStatus === 'approved' && planView.staleReasons.length > 0 && <span>{t('mcpApplyStale')}</span>}
+                </div>
+                {applyRun && (
+                  <section className="mcp-apply-run" aria-labelledby="mcp-apply-run-title">
+                    <div className="workspace-section-title">
+                      <div>
+                        <h3 id="mcp-apply-run-title">{t('mcpApplyRun')}</h3>
+                        <p>{t('mcpApplyRunDescription')}</p>
+                      </div>
+                      {applyRun.canRollback && (
+                        <button type="button" className="secondary-action" onClick={() => void rollbackApplyRun()} disabled={rollingBack}>
+                          {rollingBack ? t('mcpRollingBack') : t('mcpRollback')}
+                        </button>
+                      )}
+                    </div>
+                    <div className="mcp-plan-status">
+                      <span>{t('mcpApplyRunId')}: {applyRun.id}</span>
+                      <span>{t('mcpApplyStatus')}: {applyRun.status}</span>
+                      <span>{t('mcpPlanHash')}: {applyRun.planHash}</span>
+                      <span>{t('mcpExpectedHashes')}: {applyRun.observationHash} / {applyRun.configHash}</span>
+                      {applyRun.rollbackStatus && <span>{t('mcpRollbackStatus')}: {applyRun.rollbackStatus}</span>}
+                    </div>
+                    {applyRun.staleReasons.length > 0 && (
+                      <ul className="mcp-conflict-list">
+                        {applyRun.staleReasons.map((reason) => <li key={reason}>{reason}</li>)}
+                      </ul>
+                    )}
+                    <div className="mcp-apply-columns">
+                      <div>
+                        <h4>{t('mcpApplyActions')}</h4>
+                        <ul className="mcp-conflict-list">
+                          {applyRun.actions.map((action) => (
+                            <li key={`${action.actionIndex}-${action.runtime}-${action.serverId}`}>
+                              <strong>{action.status} · {action.runtime} · {action.serverId}</strong>
+                              <span>{action.reason}{action.backup ? ` · backup=${action.backup.id}` : ''}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div>
+                        <h4>{t('mcpReloadAndVerify')}</h4>
+                        <ul className="mcp-conflict-list">
+                          {applyRun.reloads.map((reload) => (
+                            <li key={`${reload.runtime}-${reload.status}`}>
+                              <strong>{reload.status} · {reload.runtime}</strong>
+                              <span>{reload.reason}</span>
+                            </li>
+                          ))}
+                          <li>
+                            <strong>{t('mcpVerify')}: {applyRun.verification.status}</strong>
+                            <span>{applyRun.verification.mismatches.join(' · ') || applyRun.verification.observationHash}</span>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                    {(applyRun.rollbackActions?.length ?? 0) > 0 && (
+                      <div>
+                        <h4>{t('mcpRollback')}</h4>
+                        <ul className="mcp-conflict-list">
+                          {applyRun.rollbackActions?.map((action) => (
+                            <li key={`rollback-${action.actionIndex}-${action.runtime}-${action.serverId}`}>
+                              <strong>{action.status} · {action.runtime}</strong>
+                              <span>{action.reason}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </section>
+                )}
               </>
             ) : <p>{t('mcpNoPlan')}</p>}
           </section>

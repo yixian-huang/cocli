@@ -2,21 +2,29 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chrono::Utc;
 use cocli_api::RuntimeInfo;
 use cocli_driver_core::{
-    McpBinding, McpCanonicalDefinition, McpDiagnostic, McpDiagnosticSeverity, McpEvidence,
-    McpInventory, McpSecretRef, McpServer, McpStartupState, McpTransport, ObservedMcpInstance,
+    hash_mcp_observation, McpApplyActionResult, McpApplyActionStatus, McpApplyExecutionRequest,
+    McpApplyExecutionResult, McpApprovalMode, McpBackupDescriptor, McpBinding,
+    McpCanonicalDefinition, McpDiagnostic, McpDiagnosticSeverity, McpEvidence, McpInventory,
+    McpPlanAction, McpPlanActionKind, McpReloadResult, McpReloadStatus, McpRiskLevel,
+    McpRollbackExecutionRequest, McpRollbackExecutionResult, McpSecretRef, McpServer,
+    McpStartupState, McpTransport, McpVerificationResult, McpVerificationStatus,
+    ObservedMcpInstance,
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
+use uuid::Uuid;
 
 use crate::runtime::LocalRuntimeConfig;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CONFIG_BYTES: u64 = 1024 * 1024;
+const STALE_APPLY_LOCK: chrono::Duration = chrono::Duration::minutes(15);
 
 #[derive(Clone, Debug)]
 struct CommandOutput {
@@ -112,6 +120,728 @@ pub async fn inspect(catalog: &[RuntimeInfo], config: &LocalRuntimeConfig) -> Mc
     }
 
     aggregate.finalize()
+}
+
+pub async fn apply(
+    catalog: &[RuntimeInfo],
+    config: &LocalRuntimeConfig,
+    request: McpApplyExecutionRequest,
+) -> McpApplyExecutionResult {
+    let before = inspect(catalog, config).await;
+    if hash_mcp_observation(&before) != request.plan.observation_hash {
+        return blocked_execution(
+            &request,
+            "observation changed before the configuration lock was acquired",
+        );
+    }
+
+    let backup_root = config
+        .workspace_root
+        .parent()
+        .unwrap_or(&config.workspace_root)
+        .join("mcp-backups")
+        .join(&request.run_id);
+    let mut actions = Vec::with_capacity(request.plan.actions.len());
+    let mut changed_runtimes = HashSet::new();
+    for (action_index, action) in request.plan.actions.iter().enumerate() {
+        let result = apply_action(config, &request, action_index, action, &backup_root).await;
+        if result.status == McpApplyActionStatus::Applied {
+            changed_runtimes.insert(result.runtime.clone());
+        }
+        actions.push(result);
+    }
+
+    let mut reloads = changed_runtimes
+        .into_iter()
+        .map(|runtime| McpReloadResult {
+            runtime,
+            status: McpReloadStatus::Deferred,
+            reason: "configuration is visible to new Runtime sessions; active sessions were not restarted"
+                .to_owned(),
+        })
+        .collect::<Vec<_>>();
+    reloads.sort_by(|left, right| left.runtime.cmp(&right.runtime));
+    let after = inspect(catalog, config).await;
+    let verification = verify_plan(&request, &actions, &after);
+    if verification.status == McpVerificationStatus::Matched {
+        for action in &mut actions {
+            if action.status == McpApplyActionStatus::Applied {
+                action.status = McpApplyActionStatus::Verified;
+            }
+        }
+    }
+    McpApplyExecutionResult {
+        actions,
+        reloads,
+        verification,
+    }
+}
+
+pub async fn rollback(
+    catalog: &[RuntimeInfo],
+    config: &LocalRuntimeConfig,
+    request: McpRollbackExecutionRequest,
+) -> McpRollbackExecutionResult {
+    let mut actions = Vec::with_capacity(request.backups.len());
+    for (action_index, backup) in request.backups.iter().enumerate() {
+        let status = rollback_backup(backup).await;
+        actions.push(McpApplyActionResult {
+            action_index,
+            runtime: backup.runtime.clone(),
+            server_id: String::new(),
+            status: status.0,
+            reason: status.1,
+            backup: Some(backup.clone()),
+            before_source_hash: None,
+            after_source_hash: None,
+        });
+    }
+    let inventory = inspect(catalog, config).await;
+    let failed = actions
+        .iter()
+        .any(|action| action.status != McpApplyActionStatus::RolledBack);
+    McpRollbackExecutionResult {
+        actions,
+        verification: McpVerificationResult {
+            status: if failed {
+                McpVerificationStatus::Failed
+            } else {
+                McpVerificationStatus::Matched
+            },
+            observation_hash: hash_mcp_observation(&inventory),
+            mismatches: if failed {
+                vec!["one or more backups could not be restored".to_owned()]
+            } else {
+                Vec::new()
+            },
+        },
+    }
+}
+
+fn blocked_execution(request: &McpApplyExecutionRequest, reason: &str) -> McpApplyExecutionResult {
+    McpApplyExecutionResult {
+        actions: request
+            .plan
+            .actions
+            .iter()
+            .enumerate()
+            .map(|(action_index, action)| McpApplyActionResult {
+                action_index,
+                runtime: action.runtime.clone(),
+                server_id: action.server_id.clone(),
+                status: McpApplyActionStatus::Blocked,
+                reason: reason.to_owned(),
+                backup: None,
+                before_source_hash: None,
+                after_source_hash: None,
+            })
+            .collect(),
+        reloads: Vec::new(),
+        verification: McpVerificationResult {
+            status: McpVerificationStatus::Blocked,
+            observation_hash: String::new(),
+            mismatches: vec![reason.to_owned()],
+        },
+    }
+}
+
+async fn apply_action(
+    config: &LocalRuntimeConfig,
+    request: &McpApplyExecutionRequest,
+    action_index: usize,
+    action: &McpPlanAction,
+    backup_root: &Path,
+) -> McpApplyActionResult {
+    let mut result = McpApplyActionResult {
+        action_index,
+        runtime: action.runtime.clone(),
+        server_id: action.server_id.clone(),
+        status: McpApplyActionStatus::Blocked,
+        reason: String::new(),
+        backup: None,
+        before_source_hash: None,
+        after_source_hash: None,
+    };
+    if action.blocked
+        || matches!(
+            action.kind,
+            McpPlanActionKind::ApprovalRequired
+                | McpPlanActionKind::AuthenticationRequired
+                | McpPlanActionKind::ManualUnsupported
+        )
+    {
+        result.status = McpApplyActionStatus::Skipped;
+        "plan action is manual, blocked, authentication-required, or unsupported"
+            .clone_into(&mut result.reason);
+        return result;
+    }
+    if action.risk >= McpRiskLevel::High && !request.confirm_high_risk {
+        "high-risk action requires explicit second confirmation".clone_into(&mut result.reason);
+        return result;
+    }
+    if !matches!(action.runtime.as_str(), "cursor" | "claude") {
+        "Runtime writer is not supported without a reliable native adapter"
+            .clone_into(&mut result.reason);
+        return result;
+    }
+    let desired = request
+        .plan
+        .effective_desired_state
+        .servers
+        .iter()
+        .find(|server| {
+            server.desired.runtime == action.runtime && server.desired.server_id == action.server_id
+        });
+    if desired.is_some_and(|server| !server.desired.secret_refs.is_empty()) {
+        "secure secret resolver is unavailable; secret reference action is blocked"
+            .clone_into(&mut result.reason);
+        return result;
+    }
+    if desired.is_some_and(|server| {
+        !server.desired.allow_tools.is_empty()
+            || !server.desired.deny_tools.is_empty()
+            || server.desired.approval_mode != McpApprovalMode::Manual
+    }) {
+        "Runtime tool policy writer is unavailable".clone_into(&mut result.reason);
+        return result;
+    }
+
+    let path = action_config_path(config, action);
+    if path.extension().and_then(|value| value.to_str()) != Some("json") {
+        "only isolated JSON Runtime adapters are supported in this phase"
+            .clone_into(&mut result.reason);
+        return result;
+    }
+    let Some(parent) = path.parent() else {
+        "configuration path has no parent".clone_into(&mut result.reason);
+        return result;
+    };
+    if tokio::fs::create_dir_all(parent).await.is_err() {
+        "configuration parent could not be prepared".clone_into(&mut result.reason);
+        return result;
+    }
+    let lock_path = path.with_extension("json.cocli-mcp.lock");
+    if acquire_apply_lock(&lock_path).await.is_err() {
+        "configuration is locked by another apply operation".clone_into(&mut result.reason);
+        return result;
+    }
+
+    let outcome = mutate_json_config(&path, backup_root, action, desired).await;
+    let _ = tokio::fs::remove_file(&lock_path).await;
+    match outcome {
+        Ok((backup, before_hash, after_hash)) => {
+            result.status = McpApplyActionStatus::Applied;
+            "configuration subtree updated atomically; reload is handled separately"
+                .clone_into(&mut result.reason);
+            result.backup = Some(backup);
+            result.before_source_hash = Some(before_hash);
+            result.after_source_hash = Some(after_hash);
+        }
+        Err(reason) => result.reason = reason,
+    }
+    result
+}
+
+fn action_config_path(config: &LocalRuntimeConfig, action: &McpPlanAction) -> PathBuf {
+    if let Some(path) = action
+        .evidence
+        .iter()
+        .find(|item| item.source == "config")
+        .and_then(|item| item.source_path.as_deref())
+    {
+        return PathBuf::from(path);
+    }
+    match action.runtime.as_str() {
+        "claude" => config.workspace_root.join(".claude").join("mcp.json"),
+        _ => config.workspace_root.join(".cursor").join("mcp.json"),
+    }
+}
+
+async fn mutate_json_config(
+    path: &Path,
+    backup_root: &Path,
+    action: &McpPlanAction,
+    desired: Option<&cocli_driver_core::McpEffectiveServer>,
+) -> Result<(McpBackupDescriptor, String, String), String> {
+    let source = match tokio::fs::read(path).await {
+        Ok(source) => source,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err("configuration could not be read".to_owned()),
+    };
+    if source.len() as u64 > MAX_CONFIG_BYTES {
+        return Err("configuration exceeds the safe write limit".to_owned());
+    }
+    let source_existed = !source.is_empty() || tokio::fs::metadata(path).await.is_ok();
+    let before_hash = sha256_bytes(&source);
+    let mut root: Value = if source.is_empty() {
+        serde_json::json!({})
+    } else {
+        serde_json::from_slice(&source)
+            .map_err(|_| "configuration contains invalid JSON; no write was attempted".to_owned())?
+    };
+    if json_contains_secret_material(&root) {
+        return Err(
+            "source configuration contains inline credential material; backup and apply are blocked"
+                .to_owned(),
+        );
+    }
+    let root_object = root
+        .as_object_mut()
+        .ok_or_else(|| "configuration root must be a JSON object".to_owned())?;
+    let key = ["mcpServers", "mcp_servers", "mcp"]
+        .into_iter()
+        .find(|key| root_object.get(*key).is_some())
+        .unwrap_or("mcpServers")
+        .to_owned();
+    if !root_object.contains_key(&key) {
+        root_object.insert(key.clone(), serde_json::json!({}));
+    }
+    let servers = root_object
+        .get_mut(&key)
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "MCP configuration entry must be a JSON object".to_owned())?;
+    if action.kind == McpPlanActionKind::AddConfigure
+        && action.before.configured == Some(false)
+        && desired.is_some_and(|server| servers.contains_key(&server.desired.alias))
+    {
+        return Err(
+            "configuration alias appeared after planning; CAS rejected add/configure".to_owned(),
+        );
+    }
+    let current_alias = find_server_alias(servers, action).or_else(|| {
+        desired
+            .map(|server| server.desired.alias.as_str())
+            .filter(|alias| servers.contains_key(*alias))
+            .map(ToOwned::to_owned)
+    });
+    if let (Some(alias), Some(expected)) = (
+        current_alias.as_deref(),
+        action.before.endpoint_fingerprint.as_deref(),
+    ) {
+        let current = servers
+            .get(alias)
+            .and_then(|value| server_from_value(alias, value))
+            .map(|server| endpoint_fingerprint(&server.definition));
+        if current.as_deref() != Some(expected) {
+            return Err(
+                "configuration source changed after planning; CAS rejected the write".to_owned(),
+            );
+        }
+    }
+    match action.kind {
+        McpPlanActionKind::Remove => {
+            let alias = current_alias.ok_or_else(|| {
+                "configured server no longer exists; CAS rejected removal".to_owned()
+            })?;
+            servers.remove(&alias);
+        }
+        McpPlanActionKind::AddConfigure | McpPlanActionKind::Update => {
+            let desired = desired.ok_or_else(|| "desired server is unavailable".to_owned())?;
+            let definition = desired
+                .desired
+                .definition
+                .as_ref()
+                .ok_or_else(|| "desired definition is unavailable".to_owned())?;
+            let alias = current_alias.unwrap_or_else(|| desired.desired.alias.clone());
+            servers.insert(
+                alias,
+                definition_json(definition, desired.desired.desired_enabled),
+            );
+        }
+        McpPlanActionKind::Enable | McpPlanActionKind::Disable => {
+            let alias =
+                current_alias.ok_or_else(|| "configured server no longer exists".to_owned())?;
+            let object = servers
+                .get_mut(&alias)
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| "configured server entry is invalid".to_owned())?;
+            object.remove("enabled");
+            object.insert(
+                "disabled".to_owned(),
+                Value::Bool(action.kind == McpPlanActionKind::Disable),
+            );
+        }
+        McpPlanActionKind::ApprovalRequired
+        | McpPlanActionKind::AuthenticationRequired
+        | McpPlanActionKind::ManualUnsupported => {
+            return Err("non-executable action reached the writer".to_owned());
+        }
+    }
+    let next = serde_json::to_vec_pretty(&root)
+        .map_err(|_| "configuration could not be serialized".to_owned())?;
+    let after_hash = sha256_bytes(&next);
+    if before_hash == after_hash {
+        return Err("configuration already matches the requested action".to_owned());
+    }
+    let mut backup = write_backup(backup_root, path, &source, source_existed, &before_hash).await?;
+    let current = match tokio::fs::read(path).await {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err("configuration could not be re-read before replace".to_owned()),
+    };
+    if sha256_bytes(&current) != before_hash {
+        return Err("configuration changed after backup; CAS rejected atomic replace".to_owned());
+    }
+    atomic_write(path, &next).await?;
+    backup.applied_hash.clone_from(&after_hash);
+    Ok((backup, before_hash, after_hash))
+}
+
+fn json_contains_secret_material(value: &Value) -> bool {
+    match value {
+        Value::Object(object) => object.iter().any(|(key, value)| {
+            (key.eq_ignore_ascii_case("env")
+                && value.as_object().is_some_and(|env| !env.is_empty()))
+                || (secret_like(key) && value.as_str().is_some_and(|secret| !secret.is_empty()))
+                || json_contains_secret_material(value)
+        }),
+        Value::Array(values) => values.iter().any(json_contains_secret_material),
+        Value::String(value) => secret_like(value) || redact_url(value) != *value,
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn find_server_alias(
+    servers: &serde_json::Map<String, Value>,
+    action: &McpPlanAction,
+) -> Option<String> {
+    servers.iter().find_map(|(alias, value)| {
+        let definition = server_from_value(alias, value)?;
+        let fingerprint = endpoint_fingerprint(&definition.definition);
+        let id = server_id(&fingerprint);
+        (id == action.server_id
+            || action.before.endpoint_fingerprint.as_deref() == Some(fingerprint.as_str()))
+        .then(|| alias.clone())
+    })
+}
+
+fn definition_json(definition: &McpCanonicalDefinition, enabled: bool) -> Value {
+    let mut value = serde_json::Map::new();
+    match definition.transport {
+        McpTransport::Stdio => {
+            value.insert("type".to_owned(), Value::String("stdio".to_owned()));
+        }
+        McpTransport::Sse => {
+            value.insert("type".to_owned(), Value::String("sse".to_owned()));
+        }
+        McpTransport::StreamableHttp => {
+            value.insert(
+                "type".to_owned(),
+                Value::String("streamable-http".to_owned()),
+            );
+        }
+        McpTransport::Http => {
+            value.insert("type".to_owned(), Value::String("http".to_owned()));
+        }
+        McpTransport::Unknown => {}
+    }
+    if let Some(command) = &definition.command {
+        value.insert("command".to_owned(), Value::String(command.clone()));
+    }
+    if !definition.args.is_empty() {
+        value.insert(
+            "args".to_owned(),
+            Value::Array(
+                definition
+                    .args
+                    .iter()
+                    .map(|value| Value::String(value.clone()))
+                    .collect(),
+            ),
+        );
+    }
+    if let Some(endpoint) = &definition.endpoint {
+        value.insert("url".to_owned(), Value::String(endpoint.clone()));
+    }
+    value.insert("disabled".to_owned(), Value::Bool(!enabled));
+    Value::Object(value)
+}
+
+async fn write_backup(
+    backup_root: &Path,
+    source_path: &Path,
+    source: &[u8],
+    source_existed: bool,
+    source_hash: &str,
+) -> Result<McpBackupDescriptor, String> {
+    tokio::fs::create_dir_all(backup_root)
+        .await
+        .map_err(|_| "backup directory could not be prepared".to_owned())?;
+    let id = Uuid::new_v4().to_string();
+    let backup_path = backup_root.join(format!("{id}.backup"));
+    atomic_write(&backup_path, source).await?;
+    Ok(McpBackupDescriptor {
+        id,
+        runtime: runtime_for_path(source_path).to_owned(),
+        source_path: source_path.display().to_string(),
+        backup_path: backup_path.display().to_string(),
+        source_hash: source_hash.to_owned(),
+        backup_hash: sha256_bytes(source),
+        applied_hash: String::new(),
+        source_existed,
+    })
+}
+
+fn runtime_for_path(path: &Path) -> &'static str {
+    let text = path.to_string_lossy();
+    if text.contains("claude") || text.ends_with(".mcp-config.json") {
+        "claude"
+    } else {
+        "cursor"
+    }
+}
+
+async fn atomic_write(path: &Path, content: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "atomic write target has no parent".to_owned())?;
+    tokio::fs::create_dir_all(parent)
+        .await
+        .map_err(|_| "atomic write parent could not be prepared".to_owned())?;
+    let temporary = parent.join(format!(".cocli-mcp-{}.tmp", Uuid::new_v4()));
+    let mut file = tokio::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .await
+        .map_err(|_| "atomic write temporary file could not be created".to_owned())?;
+    file.write_all(content)
+        .await
+        .map_err(|_| "atomic write temporary file failed".to_owned())?;
+    file.sync_all()
+        .await
+        .map_err(|_| "atomic write temporary file could not be synced".to_owned())?;
+    drop(file);
+    set_private_permissions(&temporary).await?;
+    if let Err(error) = tokio::fs::rename(&temporary, path).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(format!("atomic replace failed: {}", error.kind()));
+    }
+    if let Ok(directory) = tokio::fs::File::open(parent).await {
+        let _ = directory.sync_all().await;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn set_private_permissions(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .await
+        .map_err(|_| "atomic write permissions could not be secured".to_owned())
+}
+
+#[cfg(not(unix))]
+async fn set_private_permissions(path: &Path) -> Result<(), String> {
+    let mut permissions = tokio::fs::metadata(path)
+        .await
+        .map_err(|_| "atomic write permissions could not be read".to_owned())?
+        .permissions();
+    permissions.set_readonly(false);
+    tokio::fs::set_permissions(path, permissions)
+        .await
+        .map_err(|_| "atomic write permissions could not be secured".to_owned())
+}
+
+async fn acquire_apply_lock(path: &Path) -> Result<(), ()> {
+    for attempt in 0..2 {
+        match tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .await
+        {
+            Ok(mut file) => {
+                let marker = Utc::now().to_rfc3339();
+                file.write_all(marker.as_bytes()).await.map_err(|_| ())?;
+                file.sync_all().await.map_err(|_| ())?;
+                return Ok(());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                let stale = tokio::fs::read_to_string(path)
+                    .await
+                    .ok()
+                    .and_then(|value| chrono::DateTime::parse_from_rfc3339(value.trim()).ok())
+                    .is_some_and(|created_at| {
+                        Utc::now().signed_duration_since(created_at.with_timezone(&Utc))
+                            > STALE_APPLY_LOCK
+                    });
+                if stale {
+                    let _ = tokio::fs::remove_file(path).await;
+                    continue;
+                }
+                return Err(());
+            }
+            Err(_) => return Err(()),
+        }
+    }
+    Err(())
+}
+
+async fn rollback_backup(backup: &McpBackupDescriptor) -> (McpApplyActionStatus, String) {
+    let backup_path = Path::new(&backup.backup_path);
+    let source_path = Path::new(&backup.source_path);
+    let bytes = match tokio::fs::read(backup_path).await {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return (
+                McpApplyActionStatus::Blocked,
+                "backup is unavailable".to_owned(),
+            )
+        }
+    };
+    if sha256_bytes(&bytes) != backup.backup_hash {
+        return (
+            McpApplyActionStatus::Blocked,
+            "backup checksum mismatch".to_owned(),
+        );
+    }
+    let lock_path = source_path.with_extension("json.cocli-mcp.lock");
+    if acquire_apply_lock(&lock_path).await.is_err() {
+        return (
+            McpApplyActionStatus::Blocked,
+            "configuration is locked by another apply or rollback operation".to_owned(),
+        );
+    }
+    let current = match tokio::fs::read(source_path).await {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => {
+            let _ = tokio::fs::remove_file(&lock_path).await;
+            return (
+                McpApplyActionStatus::Blocked,
+                "configuration could not be read before rollback".to_owned(),
+            );
+        }
+    };
+    let current_hash = sha256_bytes(&current);
+    if current_hash == backup.source_hash {
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        return (
+            McpApplyActionStatus::RolledBack,
+            "backup was already restored".to_owned(),
+        );
+    }
+    if current_hash != backup.applied_hash {
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        return (
+            McpApplyActionStatus::Blocked,
+            "configuration changed after apply; rollback CAS rejected restore".to_owned(),
+        );
+    }
+    let restored = if backup.source_existed {
+        atomic_write(source_path, &bytes).await
+    } else {
+        match tokio::fs::remove_file(source_path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("rollback remove failed: {}", error.kind())),
+        }
+    };
+    let _ = tokio::fs::remove_file(&lock_path).await;
+    match restored {
+        Ok(()) => (
+            McpApplyActionStatus::RolledBack,
+            "backup restored atomically".to_owned(),
+        ),
+        Err(reason) => (McpApplyActionStatus::Failed, reason),
+    }
+}
+
+fn verify_plan(
+    request: &McpApplyExecutionRequest,
+    results: &[McpApplyActionResult],
+    inventory: &McpInventory,
+) -> McpVerificationResult {
+    let mut mismatches = results
+        .iter()
+        .filter(|result| {
+            matches!(
+                result.status,
+                McpApplyActionStatus::Skipped
+                    | McpApplyActionStatus::Blocked
+                    | McpApplyActionStatus::Failed
+            )
+        })
+        .map(|result| {
+            format!(
+                "{}/{} was not applied: {}",
+                result.runtime, result.server_id, result.reason
+            )
+        })
+        .collect::<Vec<_>>();
+    for result in results.iter().filter(|result| {
+        matches!(
+            result.status,
+            McpApplyActionStatus::Applied | McpApplyActionStatus::Verified
+        )
+    }) {
+        let action = &request.plan.actions[result.action_index];
+        let desired = request
+            .plan
+            .effective_desired_state
+            .servers
+            .iter()
+            .find(|server| {
+                server.desired.runtime == action.runtime
+                    && server.desired.server_id == action.server_id
+            });
+        let observation = inventory.observations.iter().find(|observation| {
+            observation.runtime == action.runtime
+                && (observation.server_id == action.server_id
+                    || desired.is_some_and(|server| observation.alias == server.desired.alias))
+        });
+        match action.kind {
+            McpPlanActionKind::Remove if observation.is_some_and(|item| item.configured) => {
+                mismatches.push(format!(
+                    "{}/{} remains configured",
+                    action.runtime, action.server_id
+                ));
+            }
+            McpPlanActionKind::Remove => {}
+            _ => {
+                let expected_enabled = desired.map(|server| server.desired.desired_enabled);
+                if observation.map_or(true, |item| {
+                    !item.configured
+                        || expected_enabled.is_some_and(|expected| item.enabled != Some(expected))
+                }) {
+                    mismatches.push(format!(
+                        "{}/{} does not match desired configuration",
+                        action.runtime, action.server_id
+                    ));
+                }
+            }
+        }
+    }
+    let applied = results.iter().any(|result| {
+        matches!(
+            result.status,
+            McpApplyActionStatus::Applied | McpApplyActionStatus::Verified
+        )
+    });
+    let failed = results
+        .iter()
+        .any(|result| result.status == McpApplyActionStatus::Failed);
+    McpVerificationResult {
+        status: if failed {
+            McpVerificationStatus::Failed
+        } else if !applied && !mismatches.is_empty() {
+            McpVerificationStatus::Blocked
+        } else if mismatches.is_empty() {
+            McpVerificationStatus::Matched
+        } else {
+            McpVerificationStatus::Mismatched
+        },
+        observation_hash: hash_mcp_observation(inventory),
+        mismatches,
+    }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex(hasher.finalize().as_slice())
 }
 
 fn target_runtimes(catalog: &[RuntimeInfo]) -> Vec<String> {
@@ -1761,6 +2491,9 @@ fn looks_unauthorized(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cocli_driver_core::{
+        McpBindingTargetType, McpDesiredServer, McpEffectiveServer, McpStateSummary,
+    };
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -1818,6 +2551,236 @@ mod tests {
         assert!(!response.contains("api_key=secret"));
         assert!(!response.contains("hyphen-secret"));
         assert!(response.contains("mcp_plaintext_secret"));
+    }
+
+    fn test_action(kind: McpPlanActionKind, path: &Path) -> McpPlanAction {
+        McpPlanAction {
+            kind,
+            runtime: "cursor".to_owned(),
+            scope: "machine".to_owned(),
+            target: "machine:test".to_owned(),
+            server_id: "mcp:test".to_owned(),
+            server_fingerprint: "test".to_owned(),
+            before: McpStateSummary {
+                configured: Some(false),
+                enabled: Some(false),
+                endpoint_fingerprint: None,
+                allow_tools: Vec::new(),
+                deny_tools: Vec::new(),
+                approval_mode: None,
+                secret_ref_count: 0,
+            },
+            after: McpStateSummary {
+                configured: Some(true),
+                enabled: Some(true),
+                endpoint_fingerprint: None,
+                allow_tools: Vec::new(),
+                deny_tools: Vec::new(),
+                approval_mode: Some(McpApprovalMode::Manual),
+                secret_ref_count: 0,
+            },
+            risk: McpRiskLevel::Medium,
+            reason: "test".to_owned(),
+            evidence: vec![evidence("config", "test config", Some(path), false, false)],
+            expected_source_hash: Some("test".to_owned()),
+            expected_schema_hash: None,
+            blocked: false,
+        }
+    }
+
+    fn test_desired() -> McpEffectiveServer {
+        McpEffectiveServer {
+            desired: McpDesiredServer {
+                server_id: "mcp:test".to_owned(),
+                runtime: "cursor".to_owned(),
+                alias: "docs".to_owned(),
+                definition: Some(McpCanonicalDefinition {
+                    transport: McpTransport::Stdio,
+                    command: Some("/bin/docs".to_owned()),
+                    args: vec!["--safe".to_owned()],
+                    endpoint: None,
+                }),
+                desired_enabled: true,
+                allow_tools: Vec::new(),
+                deny_tools: Vec::new(),
+                approval_mode: McpApprovalMode::Manual,
+                risk_override: None,
+                secret_refs: Vec::new(),
+            },
+            source_profile_ids: vec!["profile".to_owned()],
+            source_profile_names: vec!["development".to_owned()],
+            inherited_from: McpBindingTargetType::Machine,
+            high_risk_context: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn json_writer_preserves_unrelated_config_and_rollback_restores_original() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        let original = br#"{"editor":{"theme":"dark"},"mcpServers":{}}"#;
+        tokio::fs::write(&path, original)
+            .await
+            .expect("seed config");
+
+        let action = test_action(McpPlanActionKind::AddConfigure, &path);
+        let desired = test_desired();
+        let (backup, _, _) =
+            mutate_json_config(&path, &temp.path().join("backups"), &action, Some(&desired))
+                .await
+                .expect("apply config");
+        let applied: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.expect("read applied config"))
+                .expect("parse applied config");
+        assert_eq!(applied["editor"]["theme"], "dark");
+        assert_eq!(applied["mcpServers"]["docs"]["command"], "/bin/docs");
+
+        let rolled_back = rollback_backup(&backup).await;
+        assert_eq!(rolled_back.0, McpApplyActionStatus::RolledBack);
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read restored config"),
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn json_writer_rejects_compare_and_swap_drift_without_mutation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        let original = br#"{"mcpServers":{"docs":{"command":"/bin/changed"}}}"#;
+        tokio::fs::write(&path, original)
+            .await
+            .expect("seed config");
+        let mut action = test_action(McpPlanActionKind::Update, &path);
+        action.before.endpoint_fingerprint = Some("planned-fingerprint".to_owned());
+
+        let error = mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            &action,
+            Some(&test_desired()),
+        )
+        .await
+        .expect_err("CAS drift must block");
+        assert!(error.contains("CAS rejected"));
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read unchanged config"),
+            original
+        );
+        assert!(!temp.path().join("backups").exists());
+    }
+
+    #[tokio::test]
+    async fn rollback_cas_preserves_configuration_changed_after_apply() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        tokio::fs::write(&path, br#"{"mcpServers":{}}"#)
+            .await
+            .expect("seed config");
+        let (backup, _, _) = mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            &test_action(McpPlanActionKind::AddConfigure, &path),
+            Some(&test_desired()),
+        )
+        .await
+        .expect("apply config");
+        let external = br#"{"mcpServers":{},"externalEdit":true}"#;
+        tokio::fs::write(&path, external)
+            .await
+            .expect("external edit");
+
+        let result = rollback_backup(&backup).await;
+        assert_eq!(result.0, McpApplyActionStatus::Blocked);
+        assert!(result.1.contains("rollback CAS rejected"));
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read preserved edit"),
+            external
+        );
+    }
+
+    #[tokio::test]
+    async fn add_configure_cas_never_overwrites_alias_created_after_planning() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        let external = br#"{"mcpServers":{"docs":{"command":"/bin/external"}}}"#;
+        tokio::fs::write(&path, external)
+            .await
+            .expect("external alias");
+
+        let error = mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            &test_action(McpPlanActionKind::AddConfigure, &path),
+            Some(&test_desired()),
+        )
+        .await
+        .expect_err("late alias must reject add/configure");
+        assert!(error.contains("alias appeared after planning"));
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read preserved alias"),
+            external
+        );
+        assert!(!temp.path().join("backups").exists());
+    }
+
+    #[tokio::test]
+    async fn json_writer_refuses_to_back_up_inline_secret_material() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        let original = br#"{"mcpServers":{"docs":{"command":"/bin/docs","env":{"API_TOKEN":"must-not-persist"}}}}"#;
+        tokio::fs::write(&path, original)
+            .await
+            .expect("seed config");
+
+        let error = mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            &test_action(McpPlanActionKind::AddConfigure, &path),
+            Some(&test_desired()),
+        )
+        .await
+        .expect_err("plaintext secrets must block backup and apply");
+        assert_eq!(
+            error,
+            "source configuration contains inline credential material; backup and apply are blocked"
+        );
+        assert_eq!(
+            tokio::fs::read(&path).await.expect("read unchanged config"),
+            original
+        );
+        assert!(!temp.path().join("backups").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_lock_recovers_stale_crash_marker_but_preserves_live_lock() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let lock_path = temp.path().join("config.cocli-mcp.lock");
+        tokio::fs::write(
+            &lock_path,
+            (Utc::now() - chrono::Duration::minutes(20)).to_rfc3339(),
+        )
+        .await
+        .expect("write stale lock");
+        acquire_apply_lock(&lock_path)
+            .await
+            .expect("stale lock should recover");
+        assert!(acquire_apply_lock(&lock_path).await.is_err());
     }
 
     #[test]

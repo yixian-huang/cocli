@@ -16,6 +16,8 @@ pub use memory::{
     MemoryDocument, MemoryDocumentEntry, MemoryMoveResult, MemoryNamespace, MemoryScope,
     MemoryTopic,
 };
+mod mcp_apply;
+pub use mcp_apply::{McpApplyRun, McpApplyRunStatus, NewMcpApplyRun};
 mod mcp_governance;
 pub use mcp_governance::{
     McpPlanDecision, McpPlanDecisionStatus, NewMcpPlanDecision, NewMcpProfile,
@@ -214,6 +216,12 @@ pub enum StoreError {
     /// An MCP plan decision did not match the persisted dry-run plan contract.
     #[error("invalid MCP plan decision: {0}")]
     InvalidMcpPlanDecision(String),
+    /// An MCP apply run is invalid or contains unsafe persisted material.
+    #[error("invalid MCP apply run: {0}")]
+    InvalidMcpApplyRun(String),
+    /// A requested MCP apply run does not exist.
+    #[error("MCP apply run not found: {0}")]
+    McpApplyRunNotFound(Uuid),
 }
 
 /// A local conversation channel.
@@ -3658,6 +3666,11 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             13,
             "mcp_governance_phase_2a",
             include_str!("../migrations/0013_mcp_governance_phase_2a.sql"),
+        ),
+        (
+            14,
+            "mcp_governance_phase_2b",
+            include_str!("../migrations/0014_mcp_governance_phase_2b.sql"),
         ),
     ] {
         let already_applied: bool =

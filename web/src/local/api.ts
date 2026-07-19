@@ -473,6 +473,97 @@ export interface McpPlanView {
   approvedButNotApplied: boolean
 }
 
+export type McpApplyActionStatus =
+  | 'applied'
+  | 'skipped'
+  | 'blocked'
+  | 'failed'
+  | 'verified'
+  | 'rolled_back'
+
+export type McpReloadStatus = 'not_required' | 'reloaded' | 'deferred' | 'blocked' | 'failed'
+export type McpVerificationStatus = 'matched' | 'mismatched' | 'blocked' | 'failed'
+export type McpApplyRunStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'blocked'
+  | 'failed'
+  | 'verified'
+  | 'rolled_back'
+  | 'partial'
+
+export interface McpBackupDescriptor {
+  id: string
+  runtime: string
+  sourcePath: string
+  backupPath: string
+  sourceHash: string
+  backupHash: string
+  appliedHash: string
+  sourceExisted: boolean
+}
+
+export interface McpApplyActionResult {
+  actionIndex: number
+  runtime: string
+  serverId: string
+  status: McpApplyActionStatus
+  reason: string
+  backup?: McpBackupDescriptor
+  beforeSourceHash?: string
+  afterSourceHash?: string
+}
+
+export interface McpReloadResult {
+  runtime: string
+  status: McpReloadStatus
+  reason: string
+}
+
+export interface McpVerificationResult {
+  status: McpVerificationStatus
+  observationHash: string
+  mismatches: string[]
+}
+
+export interface McpApplyRun {
+  id: string
+  planId: string
+  planHash: string
+  observationHash: string
+  configHash: string
+  actor: string
+  status: McpApplyRunStatus
+  confirmHighRisk: boolean
+  requestedAt: string
+  completedAt?: string
+  actions: McpApplyActionResult[]
+  reloads: McpReloadResult[]
+  verification: McpVerificationResult
+  staleReasons: string[]
+  canRollback: boolean
+  rollbackStatus?: McpApplyRunStatus
+  rollbackActor?: string
+  rollbackActions: McpApplyActionResult[]
+}
+
+export interface McpApplyPlanRequest {
+  planHash: string
+  observationHash: string
+  configHash: string
+  actor?: string
+  confirmHighRisk: boolean
+}
+
+export interface McpRollbackRunRequest {
+  actor?: string
+}
+
+export interface McpApplyRunView {
+  run: McpApplyRun
+}
+
 export interface SkillFileEntry {
   name: string
   isDir: boolean
@@ -759,6 +850,16 @@ export const localApi = {
     request<McpPlanView>(`/api/runtimes/mcp/plans/${planId}/reject`, {
       method: 'POST',
       body: JSON.stringify({ planHash, actor, reason }),
+    }),
+  applyMcpPlan: (planId: string, input: McpApplyPlanRequest) =>
+    request<McpApplyRunView>(`/api/runtimes/mcp/plans/${planId}/apply`, {
+      method: 'POST',
+      body: JSON.stringify({ actor: 'desktop-user', ...input }),
+    }),
+  rollbackMcpApplyRun: (runId: string, input: McpRollbackRunRequest = {}) =>
+    request<McpApplyRunView>(`/api/runtimes/mcp/apply-runs/${runId}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify({ actor: 'desktop-user', ...input }),
     }),
   inspectAgentSkills: (agentId: string) =>
     request<{ summary: SkillDoctorSummary; inventory: AgentSkillInventory }>(
