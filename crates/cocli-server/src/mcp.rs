@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use chrono::Utc;
-use cocli_api::RuntimeInfo;
+use cocli_api::{McpApplyJournalSink, RuntimeInfo};
 use cocli_driver_core::{
     hash_mcp_capabilities, hash_mcp_observation, McpApplyActionResult, McpApplyActionStatus,
     McpApplyExecutionRequest, McpApplyExecutionResult, McpApplyJournalEntry, McpApplyJournalPhase,
@@ -179,10 +179,18 @@ pub async fn capabilities(
     catalog: &[RuntimeInfo],
     config: &LocalRuntimeConfig,
 ) -> McpCapabilitySnapshot {
-    let mut runtimes = target_runtimes(catalog)
-        .into_iter()
-        .map(|runtime| runtime_capability(catalog, config, &runtime))
-        .collect::<Vec<_>>();
+    capabilities_with_runner(catalog, config, &SystemCommandRunner).await
+}
+
+async fn capabilities_with_runner(
+    catalog: &[RuntimeInfo],
+    config: &LocalRuntimeConfig,
+    runner: &dyn CommandRunner,
+) -> McpCapabilitySnapshot {
+    let mut runtimes = Vec::new();
+    for runtime in target_runtimes(catalog) {
+        runtimes.push(runtime_capability(catalog, config, &runtime, runner).await);
+    }
     runtimes.sort_by(|left, right| left.runtime.cmp(&right.runtime));
     let mut snapshot = McpCapabilitySnapshot {
         hash: String::new(),
@@ -231,10 +239,11 @@ pub async fn preflight(
     }
 }
 
-fn runtime_capability(
+async fn runtime_capability(
     catalog: &[RuntimeInfo],
     config: &LocalRuntimeConfig,
     runtime: &str,
+    runner: &dyn CommandRunner,
 ) -> McpRuntimeCapability {
     let info = catalog.iter().find(|entry| entry.name == runtime);
     let binary_path = info.and_then(|entry| entry.binary.clone());
@@ -253,6 +262,55 @@ fn runtime_capability(
         support,
         reason: reason.to_owned(),
         evidence: evidence(reason),
+    };
+    let codex_writer_contract = if runtime == "codex" {
+        match binary_path.as_deref() {
+            Some(binary) => {
+                let add = runner
+                    .run(
+                        Path::new(binary),
+                        &["mcp", "add", "--help"],
+                        &config.workspace_root,
+                        PROBE_TIMEOUT,
+                    )
+                    .await;
+                let remove = runner
+                    .run(
+                        Path::new(binary),
+                        &["mcp", "remove", "--help"],
+                        &config.workspace_root,
+                        PROBE_TIMEOUT,
+                    )
+                    .await;
+                if command_help_proves(&add, "add") && command_help_proves(&remove, "remove") {
+                    (
+                        McpCapabilitySupport::Supported,
+                        "native CLI independently proves bounded mcp add and remove contracts",
+                    )
+                } else if matches!(add, CommandOutcome::Missing)
+                    || matches!(remove, CommandOutcome::Missing)
+                {
+                    (
+                        McpCapabilitySupport::Unsupported,
+                        "native CLI disappeared during capability negotiation",
+                    )
+                } else {
+                    (
+                        McpCapabilitySupport::Unknown,
+                        "native CLI add/remove help probes were incomplete, malformed, timed out, or unsuccessful",
+                    )
+                }
+            }
+            None => (
+                McpCapabilitySupport::Unsupported,
+                "Codex native CLI is unavailable",
+            ),
+        }
+    } else {
+        (
+            McpCapabilitySupport::Unsupported,
+            "native writer contract is not applicable",
+        )
     };
     let mut operations = BTreeMap::new();
     let (adapter, schema, destination, subtree, reload_strategy) = match runtime {
@@ -275,11 +333,7 @@ fn runtime_capability(
             McpReloadStrategy::NewSessionOnly,
         ),
         "claude" => (
-            if installed {
-                "claude_native_cli"
-            } else {
-                "claude_structured_json_fallback"
-            },
+            "claude_structured_json_fallback",
             "claude.mcpServers.v1",
             ".mcp.json",
             "mcpServers",
@@ -309,9 +363,10 @@ fn runtime_capability(
         ),
     );
     let structured_writer = matches!(runtime, "cursor" | "claude");
-    let native_writer = runtime == "codex" && installed;
-    let write_support = if structured_writer || native_writer {
+    let write_support = if structured_writer {
         McpCapabilitySupport::Supported
+    } else if runtime == "codex" {
+        codex_writer_contract.0
     } else if runtime == "grok" {
         McpCapabilitySupport::ReadOnly
     } else {
@@ -326,8 +381,8 @@ fn runtime_capability(
             operation,
             detail(
                 write_support,
-                if native_writer {
-                    "native CLI contract is version-bound and guarded by source CAS and backup"
+                if runtime == "codex" {
+                    codex_writer_contract.1
                 } else if structured_writer {
                     "controlled structured fallback preserves fields outside the MCP subtree"
                 } else {
@@ -402,6 +457,21 @@ fn runtime_capability(
     }
 }
 
+fn command_help_proves(outcome: &CommandOutcome, subcommand: &str) -> bool {
+    let CommandOutcome::Output(output) = outcome else {
+        return false;
+    };
+    if !output.success {
+        return false;
+    }
+    let text = format!("{}\n{}", output.stdout, output.stderr).to_ascii_lowercase();
+    let tokens = text
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '-')
+        .filter(|token| !token.is_empty())
+        .collect::<HashSet<_>>();
+    tokens.contains("usage") && tokens.contains(subcommand)
+}
+
 fn preflight_action(
     plan: &McpPlan,
     snapshot: &McpCapabilitySnapshot,
@@ -441,10 +511,22 @@ fn preflight_action(
             | McpPlanActionKind::AuthenticationRequired
             | McpPlanActionKind::ManualUnsupported
     );
+    let source_proven = authoritative_source_hash(action)
+        .as_deref()
+        .is_some_and(|hash| action.expected_source_hash.as_deref() == Some(hash));
+    let write_requires_source = matches!(
+        action.kind,
+        McpPlanActionKind::AddConfigure
+            | McpPlanActionKind::Enable
+            | McpPlanActionKind::Disable
+            | McpPlanActionKind::Update
+            | McpPlanActionKind::Remove
+    );
     let executable = executable_kind
         && !action.blocked
         && support == McpCapabilitySupport::Supported
-        && snapshot.hash == plan.capability_hash;
+        && snapshot.hash == plan.capability_hash
+        && (!write_requires_source || source_proven);
     let idempotency_key = sha256_bytes(
         format!(
             "{}:{action_index}:{}:{}",
@@ -459,11 +541,14 @@ fn preflight_action(
         operation,
         support,
         executable,
-        reason: if action.runtime == "codex"
+        reason: if write_requires_source && !source_proven {
+            "no authoritative configuration source hash proves a safe write destination".to_owned()
+        } else if action.runtime == "codex"
             && matches!(
                 action.kind,
                 McpPlanActionKind::Update | McpPlanActionKind::Enable | McpPlanActionKind::Disable
-            ) {
+            )
+        {
             "Codex native adapter does not expose a transactionally safe update or enable/disable contract"
                 .to_owned()
         } else if !executable_kind || action.blocked {
@@ -485,11 +570,35 @@ fn preflight_action(
     }
 }
 
+fn authoritative_source_hash(action: &McpPlanAction) -> Option<String> {
+    action
+        .evidence
+        .iter()
+        .filter(|item| item.source == "config")
+        .find_map(|item| {
+            let value = item.detail.split("source_sha256=").nth(1)?;
+            let hash = value.split_whitespace().next()?;
+            (hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .then(|| hash.to_ascii_lowercase())
+        })
+}
+
 pub async fn apply(
     catalog: &[RuntimeInfo],
     config: &LocalRuntimeConfig,
     request: McpApplyExecutionRequest,
+    sink: &dyn McpApplyJournalSink,
 ) -> McpApplyExecutionResult {
+    let recovering = request.resume_journal.iter().any(|entry| {
+        matches!(
+            entry.phase,
+            McpApplyJournalPhase::BackedUp
+                | McpApplyJournalPhase::Written
+                | McpApplyJournalPhase::ReloadPending
+                | McpApplyJournalPhase::Reloaded
+                | McpApplyJournalPhase::Verified
+        )
+    });
     let capability_snapshot = capabilities(catalog, config).await;
     if capability_snapshot.hash != request.capability_hash
         || request.plan.capability_hash != request.capability_hash
@@ -500,7 +609,8 @@ pub async fn apply(
         );
     }
     let before = inspect(catalog, config).await;
-    if hash_mcp_observation(&before) != request.plan.observation_hash {
+    let observation_drift = hash_mcp_observation(&before) != request.plan.observation_hash;
+    if observation_drift && !recovering {
         return blocked_execution(
             &request,
             "observation changed before the configuration lock was acquired",
@@ -514,7 +624,11 @@ pub async fn apply(
         .join("mcp-backups")
         .join(&request.run_id);
     let preflight = preflight(catalog, config, &request.plan).await;
-    if !preflight.stale_reasons.is_empty() {
+    if preflight
+        .stale_reasons
+        .iter()
+        .any(|reason| reason != "observation_drift" || !recovering)
+    {
         return blocked_execution(&request, "adapter preflight detected stale plan inputs");
     }
     let mut actions = Vec::with_capacity(request.plan.actions.len());
@@ -525,7 +639,16 @@ pub async fn apply(
         .max()
         .unwrap_or(0);
     let mut changed_runtimes = HashSet::new();
-    for (action_index, action) in request.plan.actions.iter().enumerate() {
+    let mut source_hashes = HashMap::<PathBuf, String>::new();
+    let mut execution_actions = Vec::with_capacity(request.plan.actions.len());
+    for (action_index, planned_action) in request.plan.actions.iter().enumerate() {
+        let source_path = action_config_path(config, planned_action);
+        let execution_action = action_with_chained_source_hash(
+            planned_action,
+            source_hashes.get(&source_path).map(String::as_str),
+        );
+        execution_actions.push(execution_action);
+        let action = &execution_actions[action_index];
         let preflight_action = preflight
             .actions
             .iter()
@@ -534,27 +657,67 @@ pub async fn apply(
             || sha256_bytes(format!("{}:{action_index}", request.plan.plan_hash).as_bytes()),
             |item| item.idempotency_key.clone(),
         );
-        sequence += 1;
-        journal.push(journal_entry(
-            sequence,
+        if durable_checkpoint(
+            sink,
+            &request.run_id,
+            &mut journal,
+            &mut sequence,
             action_index,
             action,
             &idempotency_key,
             McpApplyJournalPhase::Preflight,
             None,
             "adapter capability and approved hashes were revalidated",
-        ));
-        let resumed_written = request.resume_journal.iter().rev().find(|entry| {
-            entry.idempotency_key == idempotency_key
-                && matches!(
-                    entry.phase,
-                    McpApplyJournalPhase::Written
-                        | McpApplyJournalPhase::ReloadPending
-                        | McpApplyJournalPhase::Reloaded
-                        | McpApplyJournalPhase::Verified
+        )
+        .await
+        .is_err()
+        {
+            actions.push(McpApplyActionResult {
+                action_index,
+                runtime: action.runtime.clone(),
+                server_id: action.server_id.clone(),
+                status: McpApplyActionStatus::Blocked,
+                reason: "durable preflight checkpoint failed; no mutation was attempted".to_owned(),
+                backup: None,
+                before_source_hash: None,
+                after_source_hash: None,
+            });
+            continue;
+        }
+        let resume_state = recover_resume_state(&request.resume_journal, &idempotency_key).await;
+        let result = if let Ok(Some(entry)) = resume_state {
+            if let Some(backup) = entry.backup.as_ref() {
+                release_owned_apply_lock(backup, &request.run_id).await;
+            }
+            if entry.phase == McpApplyJournalPhase::BackedUp
+                && durable_checkpoint(
+                    sink,
+                    &request.run_id,
+                    &mut journal,
+                    &mut sequence,
+                    action_index,
+                    action,
+                    &idempotency_key,
+                    McpApplyJournalPhase::Written,
+                    entry.backup.clone(),
+                    "source hash proves the staged mutation completed before interruption",
                 )
-        });
-        let result = if let Some(entry) = resumed_written {
+                .await
+                .is_err()
+            {
+                actions.push(McpApplyActionResult {
+                    action_index,
+                    runtime: action.runtime.clone(),
+                    server_id: action.server_id.clone(),
+                    status: McpApplyActionStatus::Failed,
+                    reason: "applied source was recovered, but the written checkpoint still failed"
+                        .to_owned(),
+                    backup: entry.backup.clone(),
+                    before_source_hash: entry.backup.as_ref().map(|item| item.source_hash.clone()),
+                    after_source_hash: entry.backup.as_ref().map(|item| item.applied_hash.clone()),
+                });
+                continue;
+            }
             McpApplyActionResult {
                 action_index,
                 runtime: action.runtime.clone(),
@@ -566,6 +729,44 @@ pub async fn apply(
                 before_source_hash: entry.backup.as_ref().map(|item| item.source_hash.clone()),
                 after_source_hash: entry.backup.as_ref().map(|item| item.applied_hash.clone()),
             }
+        } else if let Err(reason) = resume_state {
+            McpApplyActionResult {
+                action_index,
+                runtime: action.runtime.clone(),
+                server_id: action.server_id.clone(),
+                status: McpApplyActionStatus::Blocked,
+                reason,
+                backup: None,
+                before_source_hash: None,
+                after_source_hash: None,
+            }
+        } else if observation_drift {
+            McpApplyActionResult {
+                action_index,
+                runtime: action.runtime.clone(),
+                server_id: action.server_id.clone(),
+                status: McpApplyActionStatus::Blocked,
+                reason:
+                    "observation drift blocks actions not proven written by the durable journal"
+                        .to_owned(),
+                backup: None,
+                before_source_hash: None,
+                after_source_hash: None,
+            }
+        } else if preflight_action.is_some_and(|item| !item.executable) {
+            McpApplyActionResult {
+                action_index,
+                runtime: action.runtime.clone(),
+                server_id: action.server_id.clone(),
+                status: McpApplyActionStatus::Blocked,
+                reason: preflight_action.map_or_else(
+                    || "adapter preflight did not authorize execution".to_owned(),
+                    |item| item.reason.clone(),
+                ),
+                backup: None,
+                before_source_hash: None,
+                after_source_hash: None,
+            }
         } else {
             apply_action(
                 catalog,
@@ -574,55 +775,35 @@ pub async fn apply(
                 action_index,
                 action,
                 &backup_root,
+                &idempotency_key,
+                sink,
+                &mut journal,
+                &mut sequence,
             )
             .await
         };
         if result.status == McpApplyActionStatus::Applied {
             changed_runtimes.insert(result.runtime.clone());
-            sequence += 1;
-            journal.push(journal_entry(
-                sequence,
-                action_index,
-                action,
-                &idempotency_key,
-                McpApplyJournalPhase::Locked,
-                None,
-                "exclusive destination lock was acquired",
-            ));
-            sequence += 1;
-            journal.push(journal_entry(
-                sequence,
-                action_index,
-                action,
-                &idempotency_key,
-                McpApplyJournalPhase::BackedUp,
-                result.backup.clone(),
-                "source backup was checksummed before mutation",
-            ));
-            sequence += 1;
-            journal.push(journal_entry(
-                sequence,
-                action_index,
-                action,
-                &idempotency_key,
-                McpApplyJournalPhase::Written,
-                result.backup.clone(),
-                "configuration mutation completed with source CAS and atomic replace",
-            ));
+            if let Some(hash) = result.after_source_hash.as_ref() {
+                source_hashes.insert(source_path, hash.clone());
+            }
         } else if matches!(
             result.status,
             McpApplyActionStatus::Failed | McpApplyActionStatus::Blocked
         ) {
-            sequence += 1;
-            journal.push(journal_entry(
-                sequence,
+            let _ = durable_checkpoint(
+                sink,
+                &request.run_id,
+                &mut journal,
+                &mut sequence,
                 action_index,
                 action,
                 &idempotency_key,
                 McpApplyJournalPhase::Failed,
                 result.backup.clone(),
                 &result.reason,
-            ));
+            )
+            .await;
         }
         actions.push(result);
     }
@@ -637,22 +818,25 @@ pub async fn apply(
         })
         .collect::<Vec<_>>();
     reloads.sort_by(|left, right| left.runtime.cmp(&right.runtime));
-    for (action_index, action) in request.plan.actions.iter().enumerate() {
+    for (action_index, action) in execution_actions.iter().enumerate() {
         if actions
             .get(action_index)
             .is_some_and(|result| result.status == McpApplyActionStatus::Applied)
         {
-            sequence += 1;
             let idempotency_key = preflight.actions[action_index].idempotency_key.clone();
-            journal.push(journal_entry(
-                sequence,
+            let _ = durable_checkpoint(
+                sink,
+                &request.run_id,
+                &mut journal,
+                &mut sequence,
                 action_index,
                 action,
                 &idempotency_key,
                 McpApplyJournalPhase::ReloadPending,
                 actions[action_index].backup.clone(),
                 "active sessions were not restarted; new session activation is required",
-            ));
+            )
+            .await;
         }
     }
     let after = inspect(catalog, config).await;
@@ -661,16 +845,19 @@ pub async fn apply(
         for action in &mut actions {
             if action.status == McpApplyActionStatus::Applied {
                 action.status = McpApplyActionStatus::Verified;
-                sequence += 1;
-                journal.push(journal_entry(
-                    sequence,
+                let _ = durable_checkpoint(
+                    sink,
+                    &request.run_id,
+                    &mut journal,
+                    &mut sequence,
                     action.action_index,
-                    &request.plan.actions[action.action_index],
+                    &execution_actions[action.action_index],
                     &preflight.actions[action.action_index].idempotency_key,
                     McpApplyJournalPhase::Verified,
                     action.backup.clone(),
                     "fresh inventory and structured readback match desired configuration",
-                ));
+                )
+                .await;
             }
         }
     }
@@ -680,6 +867,112 @@ pub async fn apply(
         verification,
         journal,
     }
+}
+
+fn action_with_chained_source_hash(
+    action: &McpPlanAction,
+    current_source_hash: Option<&str>,
+) -> McpPlanAction {
+    let mut action = action.clone();
+    if let Some(hash) = current_source_hash {
+        action.expected_source_hash = Some(hash.to_owned());
+    }
+    action
+}
+
+async fn recover_resume_state(
+    journal: &[McpApplyJournalEntry],
+    idempotency_key: &str,
+) -> Result<Option<McpApplyJournalEntry>, String> {
+    if let Some(entry) = journal.iter().rev().find(|entry| {
+        entry.idempotency_key == idempotency_key
+            && matches!(
+                entry.phase,
+                McpApplyJournalPhase::Written
+                    | McpApplyJournalPhase::ReloadPending
+                    | McpApplyJournalPhase::Reloaded
+                    | McpApplyJournalPhase::Verified
+            )
+    }) {
+        return Ok(Some(entry.clone()));
+    }
+    let Some(entry) = journal.iter().rev().find(|entry| {
+        entry.idempotency_key == idempotency_key && entry.phase == McpApplyJournalPhase::BackedUp
+    }) else {
+        return Ok(None);
+    };
+    let Some(backup) = entry.backup.as_ref() else {
+        return Err("interrupted backup checkpoint has no recovery descriptor".to_owned());
+    };
+    if backup.applied_hash.is_empty() {
+        return Err("interrupted backup checkpoint has no expected applied hash".to_owned());
+    }
+    let current = match tokio::fs::read(&backup.source_path).await {
+        Ok(current) => current,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(_) => return Err("interrupted destination could not be read for recovery".to_owned()),
+    };
+    let current_hash = sha256_bytes(&current);
+    if current_hash == backup.applied_hash {
+        Ok(Some(entry.clone()))
+    } else if current_hash == backup.source_hash {
+        Ok(None)
+    } else {
+        Err("interrupted destination differs from both backup and expected applied hashes; manual recovery is required".to_owned())
+    }
+}
+
+async fn release_owned_apply_lock(backup: &McpBackupDescriptor, owner: &str) {
+    let source_path = Path::new(&backup.source_path);
+    let lock_path = if source_path.extension().and_then(|value| value.to_str()) == Some("toml") {
+        source_path.with_extension("toml.cocli-mcp.lock")
+    } else {
+        source_path.with_extension("json.cocli-mcp.lock")
+    };
+    let owned = tokio::fs::read_to_string(&lock_path)
+        .await
+        .ok()
+        .is_some_and(|marker| marker.lines().nth(1).is_some_and(|value| value == owner));
+    if owned {
+        let _ = tokio::fs::remove_file(lock_path).await;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn durable_checkpoint(
+    sink: &dyn McpApplyJournalSink,
+    run_id: &str,
+    journal: &mut Vec<McpApplyJournalEntry>,
+    sequence: &mut u64,
+    action_index: usize,
+    action: &McpPlanAction,
+    idempotency_key: &str,
+    phase: McpApplyJournalPhase,
+    backup: Option<McpBackupDescriptor>,
+    reason: &str,
+) -> Result<(), String> {
+    if journal
+        .iter()
+        .any(|entry| entry.idempotency_key == idempotency_key && entry.phase == phase)
+    {
+        return Ok(());
+    }
+    let next_sequence = *sequence + 1;
+    let entry = journal_entry(
+        next_sequence,
+        action_index,
+        action,
+        idempotency_key,
+        phase,
+        backup,
+        reason,
+    );
+    sink.checkpoint(run_id, &entry)
+        .await
+        .map_err(|_| "durable apply journal checkpoint failed".to_owned())?;
+    *sequence = next_sequence;
+    journal.push(entry);
+    Ok(())
 }
 
 fn journal_entry(
@@ -780,6 +1073,7 @@ fn blocked_execution(request: &McpApplyExecutionRequest, reason: &str) -> McpApp
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_action(
     catalog: &[RuntimeInfo],
     config: &LocalRuntimeConfig,
@@ -787,6 +1081,10 @@ async fn apply_action(
     action_index: usize,
     action: &McpPlanAction,
     backup_root: &Path,
+    idempotency_key: &str,
+    sink: &dyn McpApplyJournalSink,
+    journal: &mut Vec<McpApplyJournalEntry>,
+    sequence: &mut u64,
 ) -> McpApplyActionResult {
     let mut result = McpApplyActionResult {
         action_index,
@@ -862,8 +1160,20 @@ async fn apply_action(
     }
 
     if action.runtime == "codex" {
-        return apply_codex_native(catalog, config, action_index, action, desired, backup_root)
-            .await;
+        return apply_codex_native(
+            catalog,
+            config,
+            &request.run_id,
+            action_index,
+            action,
+            desired,
+            backup_root,
+            idempotency_key,
+            sink,
+            journal,
+            sequence,
+        )
+        .await;
     }
 
     let path = action_config_path(config, action);
@@ -881,12 +1191,47 @@ async fn apply_action(
         return result;
     }
     let lock_path = path.with_extension("json.cocli-mcp.lock");
-    if acquire_apply_lock(&lock_path).await.is_err() {
+    if acquire_apply_lock(&lock_path, &request.run_id)
+        .await
+        .is_err()
+    {
         "configuration is locked by another apply operation".clone_into(&mut result.reason);
         return result;
     }
+    if durable_checkpoint(
+        sink,
+        &request.run_id,
+        journal,
+        sequence,
+        action_index,
+        action,
+        idempotency_key,
+        McpApplyJournalPhase::Locked,
+        None,
+        "exclusive destination lock was acquired",
+    )
+    .await
+    .is_err()
+    {
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        "durable lock checkpoint failed; no configuration write was attempted"
+            .clone_into(&mut result.reason);
+        return result;
+    }
 
-    let outcome = mutate_json_config(&path, backup_root, action, desired).await;
+    let outcome = mutate_json_config(
+        &path,
+        backup_root,
+        &request.run_id,
+        action_index,
+        action,
+        desired,
+        idempotency_key,
+        sink,
+        journal,
+        sequence,
+    )
+    .await;
     let _ = tokio::fs::remove_file(&lock_path).await;
     match outcome {
         Ok((backup, before_hash, after_hash)) => {
@@ -897,18 +1242,42 @@ async fn apply_action(
             result.before_source_hash = Some(before_hash);
             result.after_source_hash = Some(after_hash);
         }
-        Err(reason) => result.reason = reason,
+        Err(reason) => {
+            if let Some(backup) = journal
+                .iter()
+                .rev()
+                .find(|entry| {
+                    entry.idempotency_key == idempotency_key
+                        && entry.phase == McpApplyJournalPhase::BackedUp
+                })
+                .and_then(|entry| entry.backup.clone())
+            {
+                result.before_source_hash = Some(backup.source_hash.clone());
+                result.after_source_hash = Some(backup.applied_hash.clone());
+                result.backup = Some(backup);
+            }
+            if reason.contains("recovery is required") {
+                result.status = McpApplyActionStatus::Failed;
+            }
+            result.reason = reason;
+        }
     }
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_codex_native(
     catalog: &[RuntimeInfo],
     config: &LocalRuntimeConfig,
+    run_id: &str,
     action_index: usize,
     action: &McpPlanAction,
     desired: Option<&cocli_driver_core::McpEffectiveServer>,
     backup_root: &Path,
+    idempotency_key: &str,
+    sink: &dyn McpApplyJournalSink,
+    journal: &mut Vec<McpApplyJournalEntry>,
+    sequence: &mut u64,
 ) -> McpApplyActionResult {
     let mut result = McpApplyActionResult {
         action_index,
@@ -953,20 +1322,45 @@ async fn apply_codex_native(
             return result;
         }
     };
-    if source.len() as u64 > MAX_CONFIG_BYTES || contains_secret_bytes(&source) {
+    if source.len() as u64 > MAX_CONFIG_BYTES || toml_contains_secret_material(&source) {
         "Codex source is too large or contains inline credential material"
             .clone_into(&mut result.reason);
         return result;
     }
     let before_hash = sha256_bytes(&source);
-    if action.expected_source_hash.is_none() {
+    let Some(expected_source_hash) = action.expected_source_hash.as_deref() else {
         "Codex plan has no authoritative source evidence; native apply is blocked"
+            .clone_into(&mut result.reason);
+        return result;
+    };
+    if expected_source_hash != before_hash {
+        "Codex source hash changed after planning; native apply CAS rejected the write"
             .clone_into(&mut result.reason);
         return result;
     }
     let lock_path = path.with_extension("toml.cocli-mcp.lock");
-    if acquire_apply_lock(&lock_path).await.is_err() {
+    if acquire_apply_lock(&lock_path, run_id).await.is_err() {
         "Codex configuration is locked by another apply operation".clone_into(&mut result.reason);
+        return result;
+    }
+    if durable_checkpoint(
+        sink,
+        run_id,
+        journal,
+        sequence,
+        action_index,
+        action,
+        idempotency_key,
+        McpApplyJournalPhase::Locked,
+        None,
+        "exclusive destination lock was acquired",
+    )
+    .await
+    .is_err()
+    {
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        "durable lock checkpoint failed; no native command was attempted"
+            .clone_into(&mut result.reason);
         return result;
     }
     let source_existed = tokio::fs::metadata(&path).await.is_ok();
@@ -1001,8 +1395,18 @@ async fn apply_codex_native(
             .clone_into(&mut result.reason);
         return result;
     };
+    if alias.is_empty()
+        || !alias
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        "Codex server alias cannot be isolated safely by the native adapter"
+            .clone_into(&mut result.reason);
+        return result;
+    }
     let args = match action.kind {
-        McpPlanActionKind::Remove => vec!["mcp".to_owned(), "remove".to_owned(), alias],
+        McpPlanActionKind::Remove => vec!["mcp".to_owned(), "remove".to_owned(), alias.clone()],
         McpPlanActionKind::AddConfigure => {
             let Some(definition) = desired.and_then(|server| server.desired.definition.as_ref())
             else {
@@ -1014,7 +1418,7 @@ async fn apply_codex_native(
                 vec![
                     "mcp".to_owned(),
                     "add".to_owned(),
-                    alias,
+                    alias.clone(),
                     "--url".to_owned(),
                     endpoint.clone(),
                 ]
@@ -1022,7 +1426,7 @@ async fn apply_codex_native(
                 let mut args = vec![
                     "mcp".to_owned(),
                     "add".to_owned(),
-                    alias,
+                    alias.clone(),
                     "--".to_owned(),
                     command.clone(),
                 ];
@@ -1036,60 +1440,135 @@ async fn apply_codex_native(
         }
         _ => unreachable!(),
     };
+    let staging_home = backup_root.join(format!("codex-native-stage-{}", Uuid::new_v4()));
+    if tokio::fs::create_dir_all(&staging_home).await.is_err() {
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        "Codex native staging home could not be prepared".clone_into(&mut result.reason);
+        return result;
+    }
+    let staging_path = staging_home.join("config.toml");
+    if source_existed && atomic_write(&staging_path, &source).await.is_err() {
+        let _ = tokio::fs::remove_dir_all(&staging_home).await;
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        "Codex source could not be copied into isolated staging".clone_into(&mut result.reason);
+        return result;
+    }
     let output = tokio::time::timeout(
         PROBE_TIMEOUT,
         Command::new(binary)
             .args(&args)
             .current_dir(&config.workspace_root)
-            .env("CODEX_HOME", codex_home)
+            .env("CODEX_HOME", &staging_home)
             .stdin(Stdio::null())
             .output(),
     )
     .await;
     let succeeded = matches!(output, Ok(Ok(ref output)) if output.status.success());
     if !succeeded {
-        let _ = restore_backup_unchecked(&backup).await;
+        let _ = tokio::fs::remove_dir_all(&staging_home).await;
         let _ = tokio::fs::remove_file(&lock_path).await;
-        "Codex native MCP command failed or timed out; backup was restored"
+        "Codex native MCP command failed or timed out; real configuration was not touched"
             .clone_into(&mut result.reason);
         return result;
     }
-    let after = tokio::fs::read(&path).await.unwrap_or_default();
+    let after = tokio::fs::read(&staging_path).await.unwrap_or_default();
+    let parsed = std::str::from_utf8(&after)
+        .ok()
+        .and_then(|text| parse_toml_servers(text).ok());
+    let native_change_proven = parsed.as_ref().is_some_and(|servers| match action.kind {
+        McpPlanActionKind::AddConfigure => servers.iter().any(|server| server.alias == alias),
+        McpPlanActionKind::Remove => servers.iter().all(|server| server.alias != alias),
+        _ => false,
+    });
+    if !native_change_proven
+        || toml_contains_secret_material(&after)
+        || !toml_changes_only_server(&source, &after, &alias)
+    {
+        let _ = tokio::fs::remove_dir_all(&staging_home).await;
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        "Codex native output could not be safely validated; real configuration was not touched"
+            .clone_into(&mut result.reason);
+        return result;
+    }
     let after_hash = sha256_bytes(&after);
     if before_hash == after_hash {
+        let _ = tokio::fs::remove_dir_all(&staging_home).await;
         let _ = tokio::fs::remove_file(&lock_path).await;
         "Codex native command did not produce a provable source change"
             .clone_into(&mut result.reason);
         return result;
     }
+    let current = tokio::fs::read(&path).await.unwrap_or_default();
+    if sha256_bytes(&current) != before_hash {
+        let _ = tokio::fs::remove_dir_all(&staging_home).await;
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        "Codex source changed during native staging; CAS rejected atomic replace"
+            .clone_into(&mut result.reason);
+        return result;
+    }
     let mut backup = backup;
     backup.applied_hash.clone_from(&after_hash);
+    if durable_checkpoint(
+        sink,
+        run_id,
+        journal,
+        sequence,
+        action_index,
+        action,
+        idempotency_key,
+        McpApplyJournalPhase::BackedUp,
+        Some(backup.clone()),
+        "source backup and expected applied hash were durably recorded before mutation",
+    )
+    .await
+    .is_err()
+    {
+        let _ = tokio::fs::remove_dir_all(&staging_home).await;
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        result.backup = Some(backup);
+        "durable backup checkpoint failed; real configuration was not touched"
+            .clone_into(&mut result.reason);
+        return result;
+    }
+    if let Err(reason) = atomic_write(&path, &after).await {
+        let _ = tokio::fs::remove_dir_all(&staging_home).await;
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        result.reason = reason;
+        return result;
+    }
+    let _ = tokio::fs::remove_dir_all(&staging_home).await;
+    if durable_checkpoint(
+        sink,
+        run_id,
+        journal,
+        sequence,
+        action_index,
+        action,
+        idempotency_key,
+        McpApplyJournalPhase::Written,
+        Some(backup.clone()),
+        "configuration mutation completed with source CAS and atomic replace",
+    )
+    .await
+    .is_err()
+    {
+        let _ = tokio::fs::remove_file(&lock_path).await;
+        result.status = McpApplyActionStatus::Failed;
+        result.backup = Some(backup);
+        result.before_source_hash = Some(before_hash);
+        result.after_source_hash = Some(after_hash);
+        "configuration changed, but the written checkpoint failed; recovery is required"
+            .clone_into(&mut result.reason);
+        return result;
+    }
     let _ = tokio::fs::remove_file(&lock_path).await;
     result.status = McpApplyActionStatus::Applied;
-    "Codex native MCP command completed under isolated CODEX_HOME and source CAS"
+    "Codex native MCP command completed in staging and was atomically installed under source CAS"
         .clone_into(&mut result.reason);
     result.before_source_hash = Some(before_hash);
     result.after_source_hash = Some(after_hash);
     result.backup = Some(backup);
     result
-}
-
-async fn restore_backup_unchecked(backup: &McpBackupDescriptor) -> Result<(), String> {
-    let bytes = tokio::fs::read(&backup.backup_path)
-        .await
-        .map_err(|_| "backup is unavailable".to_owned())?;
-    if sha256_bytes(&bytes) != backup.backup_hash {
-        return Err("backup checksum mismatch".to_owned());
-    }
-    if backup.source_existed {
-        atomic_write(Path::new(&backup.source_path), &bytes).await
-    } else {
-        match tokio::fs::remove_file(&backup.source_path).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(format!("backup restore failed: {}", error.kind())),
-        }
-    }
 }
 
 fn contains_secret_bytes(source: &[u8]) -> bool {
@@ -1101,9 +1580,149 @@ fn contains_secret_bytes(source: &[u8]) -> bool {
         "access_token",
         "client_secret",
         "password",
+        "authorization",
     ]
     .iter()
     .any(|marker| text.contains(marker))
+}
+
+fn toml_contains_secret_material(source: &[u8]) -> bool {
+    if contains_secret_bytes(source) {
+        return true;
+    }
+    let Ok(text) = std::str::from_utf8(source) else {
+        return true;
+    };
+    let mut sensitive_table = false;
+    for raw_line in text.lines() {
+        let line = toml_without_comment(raw_line).trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            sensitive_table = toml_key_path_is_sensitive(line.trim_matches(['[', ']']));
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let sensitive_key = toml_key_path_is_sensitive(key);
+        if ((sensitive_table || sensitive_key) && !value.trim().is_empty()) || secret_like(key) {
+            return true;
+        }
+        if let Some(value) = toml_string(value.trim()) {
+            if redact_url(&value) != value || redact_text(&value) != value {
+                return true;
+            }
+        }
+        let array = parse_toml_string_array(value.trim());
+        if !array.is_empty() && redact_args(&array) != array {
+            return true;
+        }
+    }
+    false
+}
+
+fn toml_without_comment(line: &str) -> &str {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if quote == Some('"') && character == '\\' {
+            escaped = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            }
+            continue;
+        }
+        if character == '#' && quote.is_none() {
+            return &line[..index];
+        }
+    }
+    line
+}
+
+fn toml_key_path_is_sensitive(path: &str) -> bool {
+    let mut segment = String::new();
+    let mut segments = Vec::new();
+    let mut quote = None;
+    let mut escaped = false;
+    let mut had_escape = false;
+    for character in path.chars() {
+        if escaped {
+            // Escaped key names are intentionally treated as ambiguous below rather than decoded.
+            segment.push(character);
+            escaped = false;
+            continue;
+        }
+        if quote == Some('"') && character == '\\' {
+            escaped = true;
+            had_escape = true;
+            continue;
+        }
+        if matches!(character, '\'' | '"') {
+            if quote == Some(character) {
+                quote = None;
+            } else if quote.is_none() {
+                quote = Some(character);
+            } else {
+                segment.push(character);
+            }
+            continue;
+        }
+        if character == '.' && quote.is_none() {
+            segments.push(std::mem::take(&mut segment));
+        } else if !character.is_whitespace() || quote.is_some() {
+            segment.push(character);
+        }
+    }
+    segments.push(segment);
+    had_escape
+        || escaped
+        || quote.is_some()
+        || segments.into_iter().any(|segment| {
+            matches!(
+                segment.to_ascii_lowercase().as_str(),
+                "env" | "headers" | "authentication"
+            )
+        })
+}
+
+fn toml_changes_only_server(before: &[u8], after: &[u8], alias: &str) -> bool {
+    let (Ok(before), Ok(after)) = (std::str::from_utf8(before), std::str::from_utf8(after)) else {
+        return false;
+    };
+    toml_without_server(before, alias) == toml_without_server(after, alias)
+}
+
+fn toml_without_server(text: &str, alias: &str) -> String {
+    let mut retained = Vec::new();
+    let mut skip = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(section) = trimmed
+            .strip_prefix('[')
+            .and_then(|value| value.strip_suffix(']'))
+        {
+            skip = ["mcp_servers.", "mcpServers.", "mcp."]
+                .into_iter()
+                .any(|prefix| {
+                    section
+                        .strip_prefix(prefix)
+                        .is_some_and(|rest| rest == alias || rest.starts_with(&format!("{alias}.")))
+                });
+        }
+        if !skip {
+            retained.push(line.trim_end());
+        }
+    }
+    retained.join("\n").trim().to_owned()
 }
 
 fn action_config_path(config: &LocalRuntimeConfig, action: &McpPlanAction) -> PathBuf {
@@ -1122,11 +1741,18 @@ fn action_config_path(config: &LocalRuntimeConfig, action: &McpPlanAction) -> Pa
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn mutate_json_config(
     path: &Path,
     backup_root: &Path,
+    run_id: &str,
+    action_index: usize,
     action: &McpPlanAction,
     desired: Option<&cocli_driver_core::McpEffectiveServer>,
+    idempotency_key: &str,
+    sink: &dyn McpApplyJournalSink,
+    journal: &mut Vec<McpApplyJournalEntry>,
+    sequence: &mut u64,
 ) -> Result<(McpBackupDescriptor, String, String), String> {
     let source = match tokio::fs::read(path).await {
         Ok(source) => source,
@@ -1138,6 +1764,14 @@ async fn mutate_json_config(
     }
     let source_existed = !source.is_empty() || tokio::fs::metadata(path).await.is_ok();
     let before_hash = sha256_bytes(&source);
+    let expected_source_hash = action.expected_source_hash.as_deref().ok_or_else(|| {
+        "plan has no authoritative source hash; structured write is blocked".to_owned()
+    })?;
+    if expected_source_hash != before_hash {
+        return Err(
+            "configuration source hash changed after planning; CAS rejected the write".to_owned(),
+        );
+    }
     let mut root: Value = if source.is_empty() {
         serde_json::json!({})
     } else {
@@ -1208,10 +1842,12 @@ async fn mutate_json_config(
                 .as_ref()
                 .ok_or_else(|| "desired definition is unavailable".to_owned())?;
             let alias = current_alias.unwrap_or_else(|| desired.desired.alias.clone());
-            servers.insert(
-                alias,
-                definition_json(definition, desired.desired.desired_enabled),
-            );
+            let next = definition_json(definition, desired.desired.desired_enabled);
+            if let Some(existing) = servers.get_mut(&alias) {
+                merge_owned_server_fields(existing, next)?;
+            } else {
+                servers.insert(alias, next);
+            }
         }
         McpPlanActionKind::Enable | McpPlanActionKind::Disable => {
             let alias =
@@ -1239,6 +1875,20 @@ async fn mutate_json_config(
         return Err("configuration already matches the requested action".to_owned());
     }
     let mut backup = write_backup(backup_root, path, &source, source_existed, &before_hash).await?;
+    backup.applied_hash.clone_from(&after_hash);
+    durable_checkpoint(
+        sink,
+        run_id,
+        journal,
+        sequence,
+        action_index,
+        action,
+        idempotency_key,
+        McpApplyJournalPhase::BackedUp,
+        Some(backup.clone()),
+        "source backup and expected applied hash were durably recorded before mutation",
+    )
+    .await?;
     let current = match tokio::fs::read(path).await {
         Ok(current) => current,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
@@ -1248,8 +1898,48 @@ async fn mutate_json_config(
         return Err("configuration changed after backup; CAS rejected atomic replace".to_owned());
     }
     atomic_write(path, &next).await?;
-    backup.applied_hash.clone_from(&after_hash);
+    durable_checkpoint(
+        sink,
+        run_id,
+        journal,
+        sequence,
+        action_index,
+        action,
+        idempotency_key,
+        McpApplyJournalPhase::Written,
+        Some(backup.clone()),
+        "configuration mutation completed with source CAS and atomic replace",
+    )
+    .await
+    .map_err(|_| {
+        "configuration changed, but the written checkpoint failed; recovery is required".to_owned()
+    })?;
     Ok((backup, before_hash, after_hash))
+}
+
+fn merge_owned_server_fields(existing: &mut Value, desired: Value) -> Result<(), String> {
+    let existing = existing
+        .as_object_mut()
+        .ok_or_else(|| "configured server entry cannot be round-tripped safely".to_owned())?;
+    let desired = desired
+        .as_object()
+        .ok_or_else(|| "desired server entry is invalid".to_owned())?;
+    for key in [
+        "type",
+        "transport",
+        "command",
+        "args",
+        "url",
+        "endpoint",
+        "enabled",
+        "disabled",
+    ] {
+        existing.remove(key);
+    }
+    for (key, value) in desired {
+        existing.insert(key.clone(), value.clone());
+    }
+    Ok(())
 }
 
 fn json_contains_secret_material(value: &Value) -> bool {
@@ -1409,7 +2099,7 @@ async fn set_private_permissions(path: &Path) -> Result<(), String> {
         .map_err(|_| "atomic write permissions could not be secured".to_owned())
 }
 
-async fn acquire_apply_lock(path: &Path) -> Result<(), ()> {
+async fn acquire_apply_lock(path: &Path, owner: &str) -> Result<(), ()> {
     for attempt in 0..2 {
         match tokio::fs::OpenOptions::new()
             .write(true)
@@ -1418,21 +2108,28 @@ async fn acquire_apply_lock(path: &Path) -> Result<(), ()> {
             .await
         {
             Ok(mut file) => {
-                let marker = Utc::now().to_rfc3339();
+                let marker = format!("{}\n{owner}", Utc::now().to_rfc3339());
                 file.write_all(marker.as_bytes()).await.map_err(|_| ())?;
                 file.sync_all().await.map_err(|_| ())?;
                 return Ok(());
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
-                let stale = tokio::fs::read_to_string(path)
-                    .await
-                    .ok()
+                let marker = tokio::fs::read_to_string(path).await.ok();
+                let owned_by_resume = marker.as_deref().is_some_and(|value| {
+                    value
+                        .lines()
+                        .nth(1)
+                        .is_some_and(|existing| existing == owner)
+                });
+                let stale = marker
+                    .as_deref()
+                    .and_then(|value| value.lines().next())
                     .and_then(|value| chrono::DateTime::parse_from_rfc3339(value.trim()).ok())
                     .is_some_and(|created_at| {
                         Utc::now().signed_duration_since(created_at.with_timezone(&Utc))
                             > STALE_APPLY_LOCK
                     });
-                if stale {
+                if owned_by_resume || stale {
                     let _ = tokio::fs::remove_file(path).await;
                     continue;
                 }
@@ -1462,8 +2159,15 @@ async fn rollback_backup(backup: &McpBackupDescriptor) -> (McpApplyActionStatus,
             "backup checksum mismatch".to_owned(),
         );
     }
-    let lock_path = source_path.with_extension("json.cocli-mcp.lock");
-    if acquire_apply_lock(&lock_path).await.is_err() {
+    let lock_path = if source_path.extension().and_then(|value| value.to_str()) == Some("toml") {
+        source_path.with_extension("toml.cocli-mcp.lock")
+    } else {
+        source_path.with_extension("json.cocli-mcp.lock")
+    };
+    if acquire_apply_lock(&lock_path, &format!("rollback:{}", backup.id))
+        .await
+        .is_err()
+    {
         return (
             McpApplyActionStatus::Blocked,
             "configuration is locked by another apply or rollback operation".to_owned(),
@@ -1820,6 +2524,7 @@ async fn discover_config(
             path,
             workspace_scope,
             definitions,
+            &sha256_bytes(&bytes),
             observed_at,
         )),
         Err(message) => ConfigRead::Diagnostic(diagnostic(
@@ -2042,13 +2747,20 @@ fn snapshot_config(
     path: &Path,
     workspace_scope: Option<&Path>,
     definitions: Vec<ServerDefinition>,
+    source_hash: &str,
     observed_at: &str,
 ) -> Snapshot {
     let mut snapshot = Snapshot::default();
     for definition in definitions {
         let fingerprint = endpoint_fingerprint(&definition.definition);
         let server_id = server_id(&fingerprint);
-        let evidence = evidence("config", "configured MCP server", Some(path), false, false);
+        let evidence = evidence(
+            "config",
+            &format!("configured MCP server; source_sha256={source_hash}"),
+            Some(path),
+            false,
+            false,
+        );
         if definition.plaintext_secret {
             snapshot.diagnostics.push(diagnostic(
                 "mcp_plaintext_secret",
@@ -3318,6 +4030,7 @@ mod tests {
             Path::new("/tmp/mcp.json"),
             Some(Path::new("/tmp")),
             parsed,
+            "0000000000000000000000000000000000000000000000000000000000000000",
             "2026-07-19T00:00:00Z",
         );
         assert_eq!(snapshot.bindings[0].workspace.as_deref(), Some("/tmp"));
@@ -3365,7 +4078,7 @@ mod tests {
             risk: McpRiskLevel::Medium,
             reason: "test".to_owned(),
             evidence: vec![evidence("config", "test config", Some(path), false, false)],
-            expected_source_hash: Some("test".to_owned()),
+            expected_source_hash: Some(sha256_bytes(&std::fs::read(path).unwrap_or_default())),
             expected_schema_hash: None,
             blocked: false,
         }
@@ -3397,6 +4110,29 @@ mod tests {
         }
     }
 
+    async fn test_mutate_json_config(
+        path: &Path,
+        backup_root: &Path,
+        action: &McpPlanAction,
+        desired: Option<&McpEffectiveServer>,
+    ) -> Result<(McpBackupDescriptor, String, String), String> {
+        let mut journal = Vec::new();
+        let mut sequence = 0;
+        mutate_json_config(
+            path,
+            backup_root,
+            "test-run",
+            0,
+            action,
+            desired,
+            "test-idempotency-key",
+            &cocli_api::NoMcpApplyJournalSink,
+            &mut journal,
+            &mut sequence,
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn json_writer_preserves_unrelated_config_and_rollback_restores_original() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -3412,7 +4148,7 @@ mod tests {
         let action = test_action(McpPlanActionKind::AddConfigure, &path);
         let desired = test_desired();
         let (backup, _, _) =
-            mutate_json_config(&path, &temp.path().join("backups"), &action, Some(&desired))
+            test_mutate_json_config(&path, &temp.path().join("backups"), &action, Some(&desired))
                 .await
                 .expect("apply config");
         let applied: Value =
@@ -3427,6 +4163,110 @@ mod tests {
             tokio::fs::read(&path).await.expect("read restored config"),
             original
         );
+        let repeated = rollback_backup(&backup).await;
+        assert_eq!(repeated.0, McpApplyActionStatus::RolledBack);
+        assert_eq!(repeated.1, "backup was already restored");
+    }
+
+    #[tokio::test]
+    async fn json_writer_preserves_unknown_fields_inside_managed_server() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        let original = br#"{"mcpServers":{"docs":{"command":"/bin/old","vendorExtension":{"keep":true},"customFlag":7}}}"#;
+        tokio::fs::write(&path, original)
+            .await
+            .expect("seed config");
+        let action = test_action(McpPlanActionKind::Update, &path);
+
+        test_mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            &action,
+            Some(&test_desired()),
+        )
+        .await
+        .expect("update config");
+
+        let applied: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.expect("read applied config"))
+                .expect("parse applied config");
+        assert_eq!(applied["mcpServers"]["docs"]["command"], "/bin/docs");
+        assert_eq!(
+            applied["mcpServers"]["docs"]["vendorExtension"]["keep"],
+            true
+        );
+        assert_eq!(applied["mcpServers"]["docs"]["customFlag"], 7);
+    }
+
+    #[tokio::test]
+    async fn same_source_actions_follow_a_durable_hash_chain() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        tokio::fs::write(&path, br#"{"mcpServers":{}}"#)
+            .await
+            .expect("seed config");
+        let first = test_action(McpPlanActionKind::AddConfigure, &path);
+        let planned_second = test_action(McpPlanActionKind::Disable, &path);
+        let (_, _, first_hash) = test_mutate_json_config(
+            &path,
+            &temp.path().join("backups-first"),
+            &first,
+            Some(&test_desired()),
+        )
+        .await
+        .expect("first action");
+        assert_ne!(
+            planned_second.expected_source_hash.as_deref(),
+            Some(first_hash.as_str())
+        );
+        let chained = action_with_chained_source_hash(&planned_second, Some(&first_hash));
+        test_mutate_json_config(
+            &path,
+            &temp.path().join("backups-second"),
+            &chained,
+            Some(&test_desired()),
+        )
+        .await
+        .expect("second action uses first action hash");
+        let applied: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.expect("read chained config"))
+                .expect("parse chained config");
+        assert_eq!(applied["mcpServers"]["docs"]["disabled"], true);
+    }
+
+    #[tokio::test]
+    async fn file_level_source_hash_cas_rejects_unrelated_drift() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        tokio::fs::write(&path, br#"{"mcpServers":{},"editor":{"theme":"dark"}}"#)
+            .await
+            .expect("seed config");
+        let action = test_action(McpPlanActionKind::AddConfigure, &path);
+        let drifted = br#"{"mcpServers":{},"editor":{"theme":"light"}}"#;
+        tokio::fs::write(&path, drifted)
+            .await
+            .expect("external edit");
+
+        let error = test_mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            &action,
+            Some(&test_desired()),
+        )
+        .await
+        .expect_err("file-level drift must reject write");
+        assert!(error.contains("source hash changed"));
+        assert_eq!(tokio::fs::read(&path).await.expect("unchanged"), drifted);
+        assert!(!temp.path().join("backups").exists());
     }
 
     #[tokio::test]
@@ -3443,7 +4283,7 @@ mod tests {
         let mut action = test_action(McpPlanActionKind::Update, &path);
         action.before.endpoint_fingerprint = Some("planned-fingerprint".to_owned());
 
-        let error = mutate_json_config(
+        let error = test_mutate_json_config(
             &path,
             &temp.path().join("backups"),
             &action,
@@ -3469,7 +4309,7 @@ mod tests {
         tokio::fs::write(&path, br#"{"mcpServers":{}}"#)
             .await
             .expect("seed config");
-        let (backup, _, _) = mutate_json_config(
+        let (backup, _, _) = test_mutate_json_config(
             &path,
             &temp.path().join("backups"),
             &test_action(McpPlanActionKind::AddConfigure, &path),
@@ -3503,7 +4343,7 @@ mod tests {
             .await
             .expect("external alias");
 
-        let error = mutate_json_config(
+        let error = test_mutate_json_config(
             &path,
             &temp.path().join("backups"),
             &test_action(McpPlanActionKind::AddConfigure, &path),
@@ -3531,7 +4371,7 @@ mod tests {
             .await
             .expect("seed config");
 
-        let error = mutate_json_config(
+        let error = test_mutate_json_config(
             &path,
             &temp.path().join("backups"),
             &test_action(McpPlanActionKind::AddConfigure, &path),
@@ -3560,10 +4400,15 @@ mod tests {
         )
         .await
         .expect("write stale lock");
-        acquire_apply_lock(&lock_path)
+        acquire_apply_lock(&lock_path, "first-owner")
             .await
             .expect("stale lock should recover");
-        assert!(acquire_apply_lock(&lock_path).await.is_err());
+        assert!(acquire_apply_lock(&lock_path, "second-owner")
+            .await
+            .is_err());
+        acquire_apply_lock(&lock_path, "first-owner")
+            .await
+            .expect("same durable run may reclaim its interrupted lock");
     }
 
     #[test]
@@ -3613,6 +4458,7 @@ mod tests {
             Path::new("/tmp/codex.toml"),
             None,
             vec![definition],
+            "1111111111111111111111111111111111111111111111111111111111111111",
             observed_at,
         ));
         aggregate.extend(snapshot_config(
@@ -3620,6 +4466,7 @@ mod tests {
             Path::new("/tmp/cursor.json"),
             Some(Path::new("/tmp")),
             vec![alternate],
+            "2222222222222222222222222222222222222222222222222222222222222222",
             observed_at,
         ));
 
@@ -3652,6 +4499,100 @@ mod tests {
             vec!["--token", "<redacted>", "--safe"]
         );
         assert_eq!(parsed[0].desired_enabled, Some(true));
+    }
+
+    #[test]
+    fn codex_toml_backup_guard_rejects_env_userinfo_and_unrelated_rewrites() {
+        assert!(toml_contains_secret_material(
+            br#"[mcp_servers.docs.env]
+CUSTOM = "canary-value""#
+        ));
+        assert!(toml_contains_secret_material(
+            br#"[mcp_servers.docs]
+url = "https://user:pass@example.test/mcp""#
+        ));
+        assert!(toml_contains_secret_material(
+            br#"[mcp_servers.docs]
+"env" = { CUSTOM = "canary-value" }"#
+        ));
+        assert!(toml_contains_secret_material(
+            br#"[mcp_servers.docs]
+env.CUSTOM = "canary-value""#
+        ));
+        assert!(toml_contains_secret_material(
+            br#"[mcp_servers.docs."env"]
+CUSTOM = "canary-value""#
+        ));
+        assert!(toml_contains_secret_material(
+            br#"[mcp_servers.docs.env] # runtime credential map
+CUSTOM = "canary-value""#
+        ));
+        assert!(!toml_contains_secret_material(
+            br#"[mcp_servers.docs] # https://example.test/#fragment
+command = "/bin/docs#stable""#
+        ));
+        assert!(!toml_contains_secret_material(
+            br#"model = "gpt-test"
+[mcp_servers.docs]
+command = "/bin/docs""#
+        ));
+        let before = br#"model = "gpt-test"
+[mcp_servers.docs]
+command = "/bin/old""#;
+        let safe_after = br#"model = "gpt-test"
+[mcp_servers.docs]
+command = "/bin/new""#;
+        let unsafe_after = br#"model = "changed"
+[mcp_servers.docs]
+command = "/bin/new""#;
+        assert!(toml_changes_only_server(before, safe_after, "docs"));
+        assert!(!toml_changes_only_server(before, unsafe_after, "docs"));
+    }
+
+    #[tokio::test]
+    async fn codex_native_blocks_plaintext_before_backup_or_command() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = LocalRuntimeConfig::new(temp.path().join("workspace"), String::new());
+        let path = config.workspace_root.join(".codex/config.toml");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create config parent");
+        tokio::fs::write(
+            &path,
+            br#"[mcp_servers.docs.env]
+CUSTOM = "phase2c-secret-canary""#,
+        )
+        .await
+        .expect("seed unsafe config");
+        let mut action = test_action(McpPlanActionKind::AddConfigure, &path);
+        "codex".clone_into(&mut action.runtime);
+        let mut desired = test_desired();
+        "codex".clone_into(&mut desired.desired.runtime);
+        let mut runtime = runtime_info("codex");
+        runtime.binary = Some("/bin/false".to_owned());
+        let backup_root = temp.path().join("backups");
+        let mut journal = Vec::new();
+        let mut sequence = 0;
+
+        let result = apply_codex_native(
+            &[runtime],
+            &config,
+            "test-run",
+            0,
+            &action,
+            Some(&desired),
+            &backup_root,
+            "test-idempotency-key",
+            &cocli_api::NoMcpApplyJournalSink,
+            &mut journal,
+            &mut sequence,
+        )
+        .await;
+
+        assert_eq!(result.status, McpApplyActionStatus::Blocked);
+        assert!(result.reason.contains("inline credential material"));
+        assert!(!backup_root.exists());
+        assert!(journal.is_empty());
     }
 
     #[test]
@@ -3714,6 +4655,31 @@ mod tests {
     struct FakeRunner {
         outcomes: Mutex<HashMap<String, VecDeque<CommandOutcome>>>,
         calls: Mutex<Vec<String>>,
+    }
+
+    struct PhaseFailJournalSink {
+        fail_phase: McpApplyJournalPhase,
+        persisted: Mutex<Vec<McpApplyJournalEntry>>,
+    }
+
+    #[async_trait::async_trait]
+    impl McpApplyJournalSink for PhaseFailJournalSink {
+        async fn checkpoint(
+            &self,
+            _run_id: &str,
+            entry: &McpApplyJournalEntry,
+        ) -> Result<(), cocli_api::RuntimeError> {
+            if entry.phase == self.fail_phase {
+                return Err(cocli_api::RuntimeError::Delivery(
+                    "simulated journal interruption".to_owned(),
+                ));
+            }
+            self.persisted
+                .lock()
+                .expect("persisted journal mutex")
+                .push(entry.clone());
+            Ok(())
+        }
     }
 
     impl FakeRunner {
@@ -3796,6 +4762,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn codex_writer_requires_proven_native_help_contract() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let config = LocalRuntimeConfig::new(temp.path().to_path_buf(), String::new());
+        let codex = runtime_info("codex");
+        let supported_runner = FakeRunner::default()
+            .with(
+                &["mcp", "add", "--help"],
+                CommandOutcome::Output(CommandOutput {
+                    success: true,
+                    stdout: "Usage: codex mcp add NAME".to_owned(),
+                    stderr: String::new(),
+                }),
+            )
+            .with(
+                &["mcp", "remove", "--help"],
+                CommandOutcome::Output(CommandOutput {
+                    success: true,
+                    stdout: "Usage: codex mcp remove NAME".to_owned(),
+                    stderr: String::new(),
+                }),
+            );
+        let supported =
+            capabilities_with_runner(&[codex.clone()], &config, &supported_runner).await;
+        let supported_codex = supported
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.runtime == "codex")
+            .expect("Codex capability");
+        assert_eq!(
+            supported_codex.operations[&McpCapabilityOperation::AddConfigure].support,
+            McpCapabilitySupport::Supported
+        );
+
+        for outcome in [
+            CommandOutcome::Timeout,
+            CommandOutcome::Output(CommandOutput {
+                success: false,
+                stdout: String::new(),
+                stderr: "failed".to_owned(),
+            }),
+            CommandOutcome::Output(CommandOutput {
+                success: true,
+                stdout: "Commands: list get".to_owned(),
+                stderr: String::new(),
+            }),
+        ] {
+            let runner = FakeRunner::default()
+                .with(&["mcp", "add", "--help"], outcome.clone())
+                .with(&["mcp", "remove", "--help"], outcome);
+            let snapshot = capabilities_with_runner(&[codex.clone()], &config, &runner).await;
+            let codex_capability = snapshot
+                .runtimes
+                .iter()
+                .find(|runtime| runtime.runtime == "codex")
+                .expect("Codex capability");
+            assert_eq!(
+                codex_capability.operations[&McpCapabilityOperation::AddConfigure].support,
+                McpCapabilitySupport::Unknown
+            );
+        }
+
+        let mut missing = codex;
+        missing.binary = None;
+        missing.installed = false;
+        let snapshot = capabilities_with_runner(&[missing], &config, &FakeRunner::default()).await;
+        let codex_capability = snapshot
+            .runtimes
+            .iter()
+            .find(|runtime| runtime.runtime == "codex")
+            .expect("Codex capability");
+        assert_eq!(
+            codex_capability.operations[&McpCapabilityOperation::AddConfigure].support,
+            McpCapabilitySupport::Unsupported
+        );
+    }
+
+    #[tokio::test]
     async fn missing_binary_degrades_discovery_without_claiming_native_verification() {
         let temp = tempfile::tempdir().expect("temp dir");
         let config = LocalRuntimeConfig::new(temp.path().to_path_buf(), String::new());
@@ -3813,6 +4856,126 @@ mod tests {
             McpCapabilitySupport::ReadOnly
         );
         assert!(cursor.binary_version.is_none());
+    }
+
+    #[tokio::test]
+    async fn resume_skips_only_journaled_completed_non_idempotent_writes() {
+        let entry = |sequence, phase, key: &str| McpApplyJournalEntry {
+            sequence,
+            action_index: 0,
+            runtime: "cursor".to_owned(),
+            server_id: "docs".to_owned(),
+            idempotency_key: key.to_owned(),
+            phase,
+            attempt: 1,
+            expected_source_hash: Some("before".to_owned()),
+            expected_schema_hash: Some("schema".to_owned()),
+            backup: None,
+            reason: "test checkpoint".to_owned(),
+            evidence: Vec::new(),
+        };
+        let journal = vec![
+            entry(1, McpApplyJournalPhase::BackedUp, "idem"),
+            entry(2, McpApplyJournalPhase::Written, "idem"),
+            entry(3, McpApplyJournalPhase::Written, "other"),
+        ];
+        assert_eq!(
+            recover_resume_state(&journal, "idem")
+                .await
+                .expect("written checkpoint")
+                .map(|entry| entry.sequence),
+            Some(2)
+        );
+        assert!(recover_resume_state(&journal[..1], "idem").await.is_err());
+        assert!(recover_resume_state(&journal, "missing")
+            .await
+            .expect("missing key")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn backup_checkpoint_failure_prevents_configuration_write() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        let original = br#"{"mcpServers":{}}"#;
+        tokio::fs::write(&path, original)
+            .await
+            .expect("seed config");
+        let action = test_action(McpPlanActionKind::AddConfigure, &path);
+        let sink = PhaseFailJournalSink {
+            fail_phase: McpApplyJournalPhase::BackedUp,
+            persisted: Mutex::new(Vec::new()),
+        };
+        let mut journal = Vec::new();
+        let mut sequence = 0;
+
+        let error = mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            "test-run",
+            0,
+            &action,
+            Some(&test_desired()),
+            "idem",
+            &sink,
+            &mut journal,
+            &mut sequence,
+        )
+        .await
+        .expect_err("backup checkpoint interruption must abort");
+        assert!(error.contains("journal checkpoint failed"));
+        assert_eq!(tokio::fs::read(&path).await.expect("unchanged"), original);
+        assert!(journal.is_empty());
+    }
+
+    #[tokio::test]
+    async fn written_checkpoint_crash_is_recovered_without_repeating_mutation() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let path = temp.path().join(".cursor/mcp.json");
+        tokio::fs::create_dir_all(path.parent().expect("parent"))
+            .await
+            .expect("create parent");
+        tokio::fs::write(&path, br#"{"mcpServers":{}}"#)
+            .await
+            .expect("seed config");
+        let action = test_action(McpPlanActionKind::AddConfigure, &path);
+        let sink = PhaseFailJournalSink {
+            fail_phase: McpApplyJournalPhase::Written,
+            persisted: Mutex::new(Vec::new()),
+        };
+        let mut journal = Vec::new();
+        let mut sequence = 0;
+
+        let error = mutate_json_config(
+            &path,
+            &temp.path().join("backups"),
+            "test-run",
+            0,
+            &action,
+            Some(&test_desired()),
+            "idem",
+            &sink,
+            &mut journal,
+            &mut sequence,
+        )
+        .await
+        .expect_err("written checkpoint interruption must surface recovery");
+        assert!(error.contains("recovery is required"));
+        assert_eq!(journal.len(), 1);
+        assert_eq!(journal[0].phase, McpApplyJournalPhase::BackedUp);
+        let recovered = recover_resume_state(&journal, "idem")
+            .await
+            .expect("hash-based recovery")
+            .expect("completed write");
+        assert_eq!(recovered.phase, McpApplyJournalPhase::BackedUp);
+        let applied = tokio::fs::read(&path).await.expect("read applied source");
+        assert_eq!(
+            sha256_bytes(&applied),
+            recovered.backup.expect("backup descriptor").applied_hash
+        );
     }
 
     #[tokio::test]
@@ -3864,13 +5027,20 @@ mod tests {
         let mut runtime = runtime_info("codex");
         runtime.binary = Some(binary.display().to_string());
         runtime.version = Some("test".to_owned());
+        let mut journal = Vec::new();
+        let mut sequence = 0;
         let result = apply_codex_native(
             &[runtime],
             &config,
+            "test-run",
             0,
             &action,
             Some(&desired),
             &temp.path().join("backups"),
+            "test-idempotency-key",
+            &cocli_api::NoMcpApplyJournalSink,
+            &mut journal,
+            &mut sequence,
         )
         .await;
         assert_eq!(result.status, McpApplyActionStatus::Applied);
@@ -3882,9 +5052,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runner_covers_missing_timeout_bad_json_and_partial_success() {
+    async fn runner_covers_timeout_nonzero_bad_json_and_partial_success() {
         let runner = FakeRunner::default()
             .with(&["mcp", "list"], CommandOutcome::Timeout)
+            .with(
+                &["mcp", "list"],
+                CommandOutcome::Output(CommandOutput {
+                    success: false,
+                    stdout: String::new(),
+                    stderr: "simulated failure".to_owned(),
+                }),
+            )
             .with(
                 &["mcp", "list", "--json"],
                 CommandOutcome::Output(CommandOutput {
@@ -3903,7 +5081,11 @@ mod tests {
             );
         let observed_at = "2026-07-19T00:00:00Z";
         let snapshots = run_probes(
-            &[runtime_info("cursor"), runtime_info("grok")],
+            &[
+                runtime_info("cursor"),
+                runtime_info("claude"),
+                runtime_info("grok"),
+            ],
             &["cursor".to_owned(), "claude".to_owned(), "grok".to_owned()],
             Path::new("/tmp"),
             observed_at,
@@ -3919,7 +5101,7 @@ mod tests {
         assert!(inventory
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "mcp_probe_command_missing"
+            .any(|diagnostic| diagnostic.code == "mcp_probe_failed"
                 && diagnostic.runtime == "claude"));
         assert!(inventory
             .diagnostics

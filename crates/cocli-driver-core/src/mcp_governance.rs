@@ -1358,7 +1358,16 @@ pub fn mcp_definition_fingerprint(definition: &McpCanonicalDefinition) -> String
 }
 
 fn source_hash(observation: &ObservedMcpInstance) -> Option<String> {
-    if observation.evidence.is_empty() {
+    if let Some(hash) = observation.evidence.iter().find_map(|item| {
+        item.detail
+            .split("source_sha256=")
+            .nth(1)
+            .and_then(|value| value.split_whitespace().next())
+            .filter(|value| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+            .map(ToOwned::to_owned)
+    }) {
+        Some(hash)
+    } else if observation.evidence.is_empty() {
         None
     } else {
         Some(hash_value(&Value::Array(stable_evidence(

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,8 +15,9 @@ use cocli_api::{
 };
 use cocli_driver_core::{
     McpApplyActionResult, McpApplyActionStatus, McpApplyExecutionRequest, McpApplyExecutionResult,
-    McpBackupDescriptor, McpReloadResult, McpReloadStatus, McpRollbackExecutionRequest,
-    McpRollbackExecutionResult, McpVerificationResult, McpVerificationStatus,
+    McpApplyJournalEntry, McpApplyJournalPhase, McpBackupDescriptor, McpCapabilitySnapshot,
+    McpReloadResult, McpReloadStatus, McpReloadStrategy, McpRollbackExecutionRequest,
+    McpRollbackExecutionResult, McpRuntimeCapability, McpVerificationResult, McpVerificationStatus,
 };
 use cocli_store::{
     Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewMcpApplyRun, NewSkillLibrary,
@@ -42,6 +43,16 @@ struct ApplyMcpRuntime {
     apply_calls: AtomicUsize,
     rollback_calls: AtomicUsize,
     applied: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+struct MutableCapabilityRuntime {
+    version: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct PartialMcpRuntime {
+    rollback_backup_count: AtomicUsize,
 }
 
 #[async_trait]
@@ -152,6 +163,7 @@ impl RuntimeService for ApplyMcpRuntime {
     async fn apply_mcp(
         &self,
         _request: McpApplyExecutionRequest,
+        _journal: Arc<dyn cocli_api::McpApplyJournalSink>,
     ) -> Result<McpApplyExecutionResult, RuntimeError> {
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         self.applied.store(true, Ordering::SeqCst);
@@ -215,6 +227,138 @@ impl RuntimeService for ApplyMcpRuntime {
             verification: McpVerificationResult {
                 status: McpVerificationStatus::Matched,
                 observation_hash: "rollback-observation".to_owned(),
+                mismatches: Vec::new(),
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
+            },
+        })
+    }
+}
+
+#[async_trait]
+impl RuntimeService for MutableCapabilityRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        Ok(McpInventory::default())
+    }
+
+    async fn inspect_mcp_capabilities(&self) -> Result<McpCapabilitySnapshot, RuntimeError> {
+        let mut snapshot = McpCapabilitySnapshot {
+            hash: String::new(),
+            observed_at: "2026-07-19T00:00:00Z".to_owned(),
+            runtimes: vec![McpRuntimeCapability {
+                runtime: "codex".to_owned(),
+                adapter: "codex_native_cli".to_owned(),
+                binary_path: Some("/tmp/fake-codex".to_owned()),
+                binary_version: Some(format!("1.{}", self.version.load(Ordering::SeqCst))),
+                config_schema_version: "codex.mcp_servers.v1".to_owned(),
+                destination: "/tmp/config.toml".to_owned(),
+                allowed_subtree: "mcp_servers".to_owned(),
+                reload_strategy: McpReloadStrategy::NewSessionOnly,
+                operations: BTreeMap::new(),
+            }],
+        };
+        snapshot.hash = cocli_driver_core::hash_mcp_capabilities(&snapshot);
+        Ok(snapshot)
+    }
+}
+
+#[async_trait]
+impl RuntimeService for PartialMcpRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        Ok(McpInventory::default())
+    }
+
+    async fn apply_mcp(
+        &self,
+        _request: McpApplyExecutionRequest,
+        _journal: Arc<dyn cocli_api::McpApplyJournalSink>,
+    ) -> Result<McpApplyExecutionResult, RuntimeError> {
+        Ok(McpApplyExecutionResult {
+            actions: vec![
+                McpApplyActionResult {
+                    action_index: 0,
+                    runtime: "cursor".to_owned(),
+                    server_id: "docs".to_owned(),
+                    status: McpApplyActionStatus::Verified,
+                    reason: "cursor verified".to_owned(),
+                    backup: Some(McpBackupDescriptor {
+                        id: "cursor-backup".to_owned(),
+                        runtime: "cursor".to_owned(),
+                        source_path: "/tmp/cursor.json".to_owned(),
+                        backup_path: "/tmp/cursor.backup".to_owned(),
+                        source_hash: "before".to_owned(),
+                        backup_hash: "before".to_owned(),
+                        applied_hash: "after".to_owned(),
+                        source_existed: true,
+                    }),
+                    before_source_hash: Some("before".to_owned()),
+                    after_source_hash: Some("after".to_owned()),
+                },
+                McpApplyActionResult {
+                    action_index: 1,
+                    runtime: "claude".to_owned(),
+                    server_id: "ops".to_owned(),
+                    status: McpApplyActionStatus::Failed,
+                    reason: "claude CAS conflict".to_owned(),
+                    backup: None,
+                    before_source_hash: None,
+                    after_source_hash: None,
+                },
+            ],
+            reloads: Vec::new(),
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Mismatched,
+                observation_hash: "partial".to_owned(),
+                mismatches: vec!["claude/ops was not applied".to_owned()],
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
+            },
+            journal: Vec::new(),
+        })
+    }
+
+    async fn rollback_mcp(
+        &self,
+        request: McpRollbackExecutionRequest,
+    ) -> Result<McpRollbackExecutionResult, RuntimeError> {
+        self.rollback_backup_count
+            .store(request.backups.len(), Ordering::SeqCst);
+        let actions = request
+            .backups
+            .into_iter()
+            .enumerate()
+            .map(|(action_index, backup)| McpApplyActionResult {
+                action_index,
+                runtime: backup.runtime.clone(),
+                server_id: "docs".to_owned(),
+                status: McpApplyActionStatus::RolledBack,
+                reason: "cursor compensation completed".to_owned(),
+                backup: Some(backup),
+                before_source_hash: None,
+                after_source_hash: None,
+            })
+            .collect();
+        Ok(McpRollbackExecutionResult {
+            actions,
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Matched,
+                observation_hash: "rollback".to_owned(),
                 mismatches: Vec::new(),
                 written_config_hashes: Default::default(),
                 session_effective: Default::default(),
@@ -421,6 +565,65 @@ fn mcp_profile_body(name: &str, enabled: bool) -> Value {
             }]
         }]
     })
+}
+
+#[tokio::test]
+async fn mcp_capability_version_drift_invalidates_plan_approval() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(MutableCapabilityRuntime::default());
+    let app = router(store, runtime.clone());
+    let (capability_status, capabilities) = json_request(
+        app.clone(),
+        "GET",
+        "/api/runtimes/mcp/capabilities",
+        json!({}),
+    )
+    .await;
+    assert_eq!(capability_status, StatusCode::OK);
+    assert_eq!(capabilities["runtimes"][0]["binaryVersion"], "1.0");
+
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let plan_hash = plan["planHash"].as_str().expect("plan hash");
+    let (preflight_status, preflight) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/preflight"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preflight_status, StatusCode::OK);
+    assert_eq!(preflight["capabilityHash"], plan["capabilityHash"]);
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+
+    runtime.version.store(1, Ordering::SeqCst);
+    let (stale_status, stale) = json_request(
+        app,
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::OK);
+    assert_eq!(stale["approvalStatus"], "stale");
+    assert!(stale["staleReasons"]
+        .as_array()
+        .expect("stale reasons")
+        .iter()
+        .any(|reason| reason == "adapter_capability_or_version_drift"));
 }
 
 #[tokio::test]
@@ -677,7 +880,7 @@ async fn mcp_approval_becomes_stale_after_observation_drift() {
         .iter()
         .any(|reason| reason == "observation_drift"));
     let (apply_status, recovered) = json_request(
-        app,
+        app.clone(),
         "POST",
         &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
         json!({
@@ -696,6 +899,130 @@ async fn mcp_approval_becomes_stale_after_observation_drift() {
         recovered["run"]["recoveryReason"],
         "observation or desired configuration drifted during an interrupted apply"
     );
+    let (manual_status, manual) = json_request(
+        app,
+        "POST",
+        &format!(
+            "/api/runtimes/mcp/apply-runs/{}/manual-recovery",
+            interrupted.id
+        ),
+        json!({
+            "actor": "recovery-operator",
+            "reason": "configuration requires operator inspection"
+        }),
+    )
+    .await;
+    assert_eq!(manual_status, StatusCode::OK);
+    assert_eq!(manual["run"]["status"], "recovery_required");
+    assert!(manual["run"]["journal"]
+        .as_array()
+        .expect("journal")
+        .iter()
+        .any(|entry| entry["phase"] == "recovery_required"));
+}
+
+#[tokio::test]
+async fn interrupted_post_write_observation_drift_reaches_runtime_recovery() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(ApplyMcpRuntime::default());
+    let app = router(store.clone(), runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan["planHash"],
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    let decision = store
+        .get_mcp_plan_decision(plan_id)
+        .await
+        .expect("read approval")
+        .expect("approval exists");
+    let run = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan_id.to_owned(),
+            approval_id: decision.id,
+            plan_hash: plan["planHash"].as_str().unwrap_or_default().to_owned(),
+            observation_hash: plan["observationHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            config_hash: plan["configHash"].as_str().unwrap_or_default().to_owned(),
+            capability_hash: plan["capabilityHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            actor: "api-test".to_owned(),
+            confirm_high_risk: false,
+        })
+        .await
+        .expect("create interrupted run");
+    let backup = McpBackupDescriptor {
+        id: "interrupted-backup".to_owned(),
+        runtime: "cursor".to_owned(),
+        source_path: "/tmp/interrupted-config.json".to_owned(),
+        backup_path: "/tmp/interrupted-backup.json".to_owned(),
+        source_hash: "before".to_owned(),
+        backup_hash: "before".to_owned(),
+        applied_hash: "after".to_owned(),
+        source_existed: true,
+    };
+    store
+        .checkpoint_mcp_apply_run(
+            run.id,
+            McpApplyJournalPhase::BackedUp,
+            &McpApplyJournalEntry {
+                sequence: 1,
+                action_index: 0,
+                runtime: "cursor".to_owned(),
+                server_id: "docs".to_owned(),
+                idempotency_key: "interrupted-write".to_owned(),
+                phase: McpApplyJournalPhase::BackedUp,
+                attempt: 1,
+                expected_source_hash: Some("before".to_owned()),
+                expected_schema_hash: None,
+                backup: Some(backup),
+                reason: "backup persisted before simulated restart".to_owned(),
+                evidence: Vec::new(),
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("checkpoint interrupted backup");
+    runtime.applied.store(true, Ordering::SeqCst);
+
+    let (status, recovered) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan["planHash"],
+            "observationHash": plan["observationHash"],
+            "configHash": plan["configHash"],
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(runtime.apply_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recovered["run"]["status"], "verified");
+    assert!(recovered["run"]["canRollback"].as_bool().unwrap_or(false));
+    assert!(recovered["run"]["journal"]
+        .as_array()
+        .expect("journal")
+        .iter()
+        .any(|entry| entry["phase"] == "backed_up"));
 }
 
 #[tokio::test]
@@ -810,6 +1137,66 @@ async fn mcp_apply_api_revalidates_hashes_is_idempotent_and_rolls_back() {
     .await;
     assert_eq!(repeated_rollback["run"]["rollbackStatus"], "rolled_back");
     assert_eq!(runtime.rollback_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn mcp_partial_saga_rolls_back_only_successful_runtime_and_preserves_failure() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(PartialMcpRuntime::default());
+    let app = router(store, runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan["planHash"],
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    let (apply_status, partial) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan["planHash"],
+            "observationHash": plan["observationHash"],
+            "configHash": plan["configHash"],
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(partial["run"]["status"], "partial");
+    assert_eq!(partial["run"]["actions"][1]["status"], "failed");
+    assert_eq!(
+        partial["run"]["actions"][1]["reason"],
+        "claude CAS conflict"
+    );
+    let run_id = partial["run"]["id"].as_str().expect("run id");
+    let (rollback_status, rolled_back) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/apply-runs/{run_id}/rollback"),
+        json!({ "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK);
+    assert_eq!(runtime.rollback_backup_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rolled_back["run"]["rollbackActions"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(rolled_back["run"]["actions"][1]["status"], "failed");
 }
 
 #[tokio::test]

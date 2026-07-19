@@ -16,11 +16,11 @@ use cocli_agent::state::Idle;
 use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
-    LiveEvent, LiveEventSink, RuntimeBridgeTokenProvider, RuntimeError, RuntimeForkResult,
-    RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo, RuntimeKnowledgeProvider,
-    RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot, RuntimeRecoveryProbeResult,
-    RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus, RuntimeSkill,
-    RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
+    LiveEvent, LiveEventSink, McpApplyJournalSink, RuntimeBridgeTokenProvider, RuntimeError,
+    RuntimeForkResult, RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo,
+    RuntimeKnowledgeProvider, RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot,
+    RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus,
+    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -577,8 +577,9 @@ impl RuntimeService for LocalRuntimeService {
     async fn apply_mcp(
         &self,
         request: cocli_driver_core::McpApplyExecutionRequest,
+        journal: Arc<dyn McpApplyJournalSink>,
     ) -> Result<cocli_driver_core::McpApplyExecutionResult, RuntimeError> {
-        Ok(crate::mcp::apply(&self.catalog, &self.config, request).await)
+        Ok(crate::mcp::apply(&self.catalog, &self.config, request, journal.as_ref()).await)
     }
 
     async fn rollback_mcp(

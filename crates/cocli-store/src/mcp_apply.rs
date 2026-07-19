@@ -223,29 +223,80 @@ impl Store {
     ) -> Result<McpApplyRun, StoreError> {
         ensure_redacted(result)?;
         let status = apply_status(result);
-        let completed_at = Utc::now();
-        let changed = query(
-            "UPDATE mcp_apply_runs SET status = ?, completed_at = ?, actions_json = ?, \
-             reloads_json = ?, verification_json = ?, journal_json = ?, recovery_reason = NULL \
-             WHERE id = ? AND status IN ('running', 'preflight', 'locked', 'backed_up', \
-             'written', 'reload_pending', 'reloaded', 'recovery_required')",
-        )
-        .bind(status.as_str())
-        .bind(completed_at)
-        .bind(serde_json::to_string(&result.actions)?)
-        .bind(serde_json::to_string(&result.reloads)?)
-        .bind(serde_json::to_string(&result.verification)?)
-        .bind(serde_json::to_string(&result.journal)?)
-        .bind(run_id)
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
-        if changed == 0 && self.get_mcp_apply_run(run_id).await?.is_none() {
-            return Err(StoreError::McpApplyRunNotFound(run_id));
-        }
-        self.get_mcp_apply_run(run_id)
+        let recovery_reason = if status == McpApplyRunStatus::RecoveryRequired {
+            result
+                .actions
+                .iter()
+                .find(|action| action.reason.contains("recovery is required"))
+                .map(|action| action.reason.clone())
+        } else {
+            None
+        };
+        let completed_at = (status != McpApplyRunStatus::RecoveryRequired).then(Utc::now);
+        for _ in 0..3 {
+            let Some(current) = self.get_mcp_apply_run(run_id).await? else {
+                return Err(StoreError::McpApplyRunNotFound(run_id));
+            };
+            if matches!(
+                current.status,
+                McpApplyRunStatus::Completed | McpApplyRunStatus::RolledBack
+            ) || current.completed_at.is_some()
+            {
+                return Ok(current);
+            }
+            let concurrent_recovery = current.journal.iter().any(|entry| {
+                entry.phase == McpApplyJournalPhase::RecoveryRequired
+                    && !result.journal.iter().any(|returned| {
+                        returned.idempotency_key == entry.idempotency_key
+                            && returned.phase == entry.phase
+                            && returned.action_index == entry.action_index
+                    })
+            });
+            if concurrent_recovery {
+                return Ok(current);
+            }
+            let mut journal = current.journal;
+            for entry in &result.journal {
+                if !journal.iter().any(|existing| {
+                    existing.idempotency_key == entry.idempotency_key
+                        && existing.phase == entry.phase
+                        && existing.action_index == entry.action_index
+                }) {
+                    journal.push(entry.clone());
+                }
+            }
+            journal.sort_by_key(|entry| entry.sequence);
+            ensure_redacted(&journal)?;
+            let changed = query(
+                "UPDATE mcp_apply_runs SET status = ?, completed_at = ?, actions_json = ?, \
+                 reloads_json = ?, verification_json = ?, journal_json = ?, recovery_reason = ?, \
+                 attempt = attempt + 1 WHERE id = ? AND attempt = ? AND status IN ('running', \
+                 'preflight', 'locked', 'backed_up', 'written', 'reload_pending', 'reloaded', \
+                 'recovery_required', 'failed', 'blocked', 'partial', 'verified') \
+                 AND completed_at IS NULL",
+            )
+            .bind(status.as_str())
+            .bind(completed_at)
+            .bind(serde_json::to_string(&result.actions)?)
+            .bind(serde_json::to_string(&result.reloads)?)
+            .bind(serde_json::to_string(&result.verification)?)
+            .bind(serde_json::to_string(&journal)?)
+            .bind(recovery_reason.as_deref())
+            .bind(run_id)
+            .bind(current.attempt)
+            .execute(&self.pool)
             .await?
-            .ok_or(StoreError::McpApplyRunNotFound(run_id))
+            .rows_affected();
+            if changed == 1 {
+                return self
+                    .get_mcp_apply_run(run_id)
+                    .await?
+                    .ok_or(StoreError::McpApplyRunNotFound(run_id));
+            }
+        }
+        Err(StoreError::InvalidMcpApplyRun(
+            "apply run changed concurrently during completion".to_owned(),
+        ))
     }
 
     pub async fn fail_interrupted_mcp_apply_run(
@@ -311,11 +362,45 @@ impl Store {
         } else {
             McpApplyRunStatus::Failed
         };
+        let mut run = self
+            .get_mcp_apply_run(run_id)
+            .await?
+            .ok_or(StoreError::McpApplyRunNotFound(run_id))?;
+        let sequence = run
+            .journal
+            .iter()
+            .map(|entry| entry.sequence)
+            .max()
+            .unwrap_or(0);
+        for (offset, action) in result.actions.iter().enumerate() {
+            run.journal.push(McpApplyJournalEntry {
+                sequence: sequence + offset as u64 + 1,
+                action_index: action.action_index,
+                runtime: action.runtime.clone(),
+                server_id: action.server_id.clone(),
+                idempotency_key: format!(
+                    "rollback:{run_id}:{}:{}",
+                    action.runtime, action.action_index
+                ),
+                phase: if action.status == McpApplyActionStatus::RolledBack {
+                    McpApplyJournalPhase::RolledBack
+                } else {
+                    McpApplyJournalPhase::RecoveryRequired
+                },
+                attempt: run.attempt.max(1) as u32,
+                expected_source_hash: action.before_source_hash.clone(),
+                expected_schema_hash: None,
+                backup: action.backup.clone(),
+                reason: action.reason.clone(),
+                evidence: Vec::new(),
+            });
+        }
+        ensure_redacted(&run.journal)?;
         let completed_at = Utc::now();
         let changed = query(
             "UPDATE mcp_apply_runs SET status = CASE WHEN ? THEN 'rolled_back' ELSE status END, \
              rollback_status = ?, rollback_actor = ?, rollback_at = ?, \
-             rollback_actions_json = ?, verification_json = ? WHERE id = ?",
+             rollback_actions_json = ?, verification_json = ?, journal_json = ? WHERE id = ?",
         )
         .bind(rollback_status == McpApplyRunStatus::RolledBack)
         .bind(rollback_status.as_str())
@@ -323,6 +408,7 @@ impl Store {
         .bind(completed_at)
         .bind(serde_json::to_string(&result.actions)?)
         .bind(serde_json::to_string(&result.verification)?)
+        .bind(serde_json::to_string(&run.journal)?)
         .bind(run_id)
         .execute(&self.pool)
         .await?
@@ -355,6 +441,11 @@ impl Store {
         let Some(mut run) = self.get_mcp_apply_run(run_id).await? else {
             return Err(StoreError::McpApplyRunNotFound(run_id));
         };
+        if run.completed_at.is_some() && phase != McpApplyJournalPhase::RollingBack {
+            return Err(StoreError::InvalidMcpApplyRun(
+                "completed apply run cannot accept new checkpoints".to_owned(),
+            ));
+        }
         if !run.journal.iter().any(|existing| {
             existing.idempotency_key == entry.idempotency_key
                 && existing.phase == entry.phase
@@ -372,14 +463,15 @@ impl Store {
         let changed = query(
             "UPDATE mcp_apply_runs SET status = ?, journal_json = ?, preflight_json = ?, \
              recovery_reason = COALESCE(?, recovery_reason), attempt = attempt + 1 \
-             WHERE id = ? AND status NOT IN ('verified', 'completed', 'blocked', 'failed', \
-             'partial', 'rolled_back')",
+             WHERE id = ? AND status NOT IN ('completed', 'rolled_back') \
+             AND (completed_at IS NULL OR ?)",
         )
         .bind(next_status.as_str())
         .bind(serde_json::to_string(&run.journal)?)
         .bind(serde_json::to_string(&preflight_value)?)
         .bind(recovery_reason)
         .bind(run_id)
+        .bind(phase == McpApplyJournalPhase::RollingBack)
         .execute(&self.pool)
         .await?
         .rows_affected();
@@ -440,6 +532,11 @@ impl Store {
         let Some(mut run) = self.get_mcp_apply_run(run_id).await? else {
             return Err(StoreError::McpApplyRunNotFound(run_id));
         };
+        if run.completed_at.is_some() {
+            return Err(StoreError::InvalidMcpApplyRun(
+                "completed apply run cannot enter manual recovery".to_owned(),
+            ));
+        }
         let sequence = run
             .journal
             .iter()
@@ -468,7 +565,8 @@ impl Store {
         ensure_redacted(&run.journal)?;
         let changed = query(
             "UPDATE mcp_apply_runs SET status = 'recovery_required', journal_json = ?, \
-             stale_reasons_json = ?, recovery_reason = ? WHERE id = ?",
+             stale_reasons_json = ?, recovery_reason = ?, attempt = attempt + 1 \
+             WHERE id = ? AND completed_at IS NULL",
         )
         .bind(serde_json::to_string(&run.journal)?)
         .bind(serde_json::to_string(&run.stale_reasons)?)
@@ -503,6 +601,12 @@ fn status_for_phase(phase: McpApplyJournalPhase) -> McpApplyRunStatus {
 }
 
 fn apply_status(result: &McpApplyExecutionResult) -> McpApplyRunStatus {
+    if result.actions.iter().any(|action| {
+        action.status == McpApplyActionStatus::Failed
+            && action.reason.contains("recovery is required")
+    }) {
+        return McpApplyRunStatus::RecoveryRequired;
+    }
     let applied = result.actions.iter().any(|action| {
         matches!(
             action.status,
@@ -537,11 +641,14 @@ fn apply_status(result: &McpApplyExecutionResult) -> McpApplyRunStatus {
 fn apply_run_from_row(row: SqliteRow) -> Result<McpApplyRun, StoreError> {
     let actions: Vec<McpApplyActionResult> =
         serde_json::from_str(&row.try_get::<String, _>("actions_json")?)?;
+    let journal: Vec<McpApplyJournalEntry> =
+        serde_json::from_str(&row.try_get::<String, _>("journal_json")?)?;
     let rollback_status = row
         .try_get::<Option<String>, _>("rollback_status")?
         .map(|status| McpApplyRunStatus::parse(&status))
         .transpose()?;
-    let can_rollback = actions.iter().any(|action| action.backup.is_some())
+    let can_rollback = (actions.iter().any(|action| action.backup.is_some())
+        || journal.iter().any(|entry| entry.backup.is_some()))
         && rollback_status != Some(McpApplyRunStatus::RolledBack);
     Ok(McpApplyRun {
         id: row.try_get("id")?,
@@ -559,7 +666,7 @@ fn apply_run_from_row(row: SqliteRow) -> Result<McpApplyRun, StoreError> {
         reloads: serde_json::from_str(&row.try_get::<String, _>("reloads_json")?)?,
         verification: serde_json::from_str(&row.try_get::<String, _>("verification_json")?)?,
         stale_reasons: serde_json::from_str(&row.try_get::<String, _>("stale_reasons_json")?)?,
-        journal: serde_json::from_str(&row.try_get::<String, _>("journal_json")?)?,
+        journal,
         preflight: serde_json::from_str(&row.try_get::<String, _>("preflight_json")?)?,
         recovery_reason: row.try_get("recovery_reason")?,
         attempt: row.try_get("attempt")?,

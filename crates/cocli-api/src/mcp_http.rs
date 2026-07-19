@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -23,6 +24,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use super::{ApiError, AppState};
+use crate::{McpApplyJournalSink, RuntimeError};
 
 pub(super) fn router() -> Router<AppState> {
     Router::new()
@@ -357,6 +359,29 @@ struct ApplyRunView {
     run: McpApplyRun,
 }
 
+#[derive(Clone)]
+struct StoreMcpApplyJournalSink {
+    store: cocli_store::Store,
+}
+
+#[async_trait::async_trait]
+impl McpApplyJournalSink for StoreMcpApplyJournalSink {
+    async fn checkpoint(
+        &self,
+        run_id: &str,
+        entry: &McpApplyJournalEntry,
+    ) -> Result<(), RuntimeError> {
+        let run_id = Uuid::parse_str(run_id).map_err(|_| {
+            RuntimeError::Delivery("MCP journal run identifier is invalid".to_owned())
+        })?;
+        self.store
+            .checkpoint_mcp_apply_run(run_id, entry.phase, entry, None, None)
+            .await
+            .map(|_| ())
+            .map_err(|_| RuntimeError::Delivery("MCP journal checkpoint failed".to_owned()))
+    }
+}
+
 async fn apply_plan(
     State(state): State<AppState>,
     Path(plan_id): Path<String>,
@@ -385,10 +410,24 @@ async fn apply_plan(
         }));
     }
     let (observation_hash, config_hash, capability_hash) = current_hashes(&state, &plan).await?;
-    if observation_hash != plan.observation_hash
-        || config_hash != plan.config_hash
+    let recovering = existing.as_ref().is_some_and(|run| {
+        is_active_apply_status(run.status)
+            && run.journal.iter().any(|entry| {
+                matches!(
+                    entry.phase,
+                    McpApplyJournalPhase::BackedUp
+                        | McpApplyJournalPhase::Written
+                        | McpApplyJournalPhase::ReloadPending
+                        | McpApplyJournalPhase::Reloaded
+                        | McpApplyJournalPhase::Verified
+                )
+            })
+    });
+    let observation_drift = observation_hash != plan.observation_hash;
+    let unrecoverable_drift = config_hash != plan.config_hash
         || capability_hash != plan.capability_hash
-    {
+        || (observation_drift && !recovering);
+    if unrecoverable_drift {
         if let Some(existing) = existing
             .as_ref()
             .filter(|run| is_active_apply_status(run.status))
@@ -416,7 +455,11 @@ async fn apply_plan(
         ));
     }
     let preflight = state.runtime.preflight_mcp(&plan).await?;
-    if !preflight.stale_reasons.is_empty() {
+    if preflight
+        .stale_reasons
+        .iter()
+        .any(|reason| reason != "observation_drift" || !recovering)
+    {
         return Err(ApiError::conflict(
             "MCP adapter preflight is stale; regenerate and approve the plan",
         ));
@@ -448,41 +491,32 @@ async fn apply_plan(
     };
     let run = checkpoint_preflight(&state, run, &preflight).await?;
     let capability_hash = plan.capability_hash.clone();
+    let journal_sink: Arc<dyn McpApplyJournalSink> = Arc::new(StoreMcpApplyJournalSink {
+        store: state.store.clone(),
+    });
     let execution = match state
         .runtime
-        .apply_mcp(McpApplyExecutionRequest {
-            run_id: run.id.to_string(),
-            plan,
-            actor: request.actor,
-            confirm_high_risk: request.confirm_high_risk,
-            capability_hash,
-            resume_journal: run.journal.clone(),
-        })
+        .apply_mcp(
+            McpApplyExecutionRequest {
+                run_id: run.id.to_string(),
+                plan,
+                actor: request.actor,
+                confirm_high_risk: request.confirm_high_risk,
+                capability_hash,
+                resume_journal: run.journal.clone(),
+            },
+            journal_sink,
+        )
         .await
     {
         Ok(result) => result,
         Err(error) => failed_execution(&run, error),
     };
-    checkpoint_execution(&state, run.id, &execution).await?;
     let run = state
         .store
         .complete_mcp_apply_run(run.id, &execution)
         .await?;
     Ok(Json(ApplyRunView { run }))
-}
-
-async fn checkpoint_execution(
-    state: &AppState,
-    run_id: Uuid,
-    execution: &McpApplyExecutionResult,
-) -> Result<(), ApiError> {
-    for entry in &execution.journal {
-        state
-            .store
-            .checkpoint_mcp_apply_run(run_id, entry.phase, entry, None, None)
-            .await?;
-    }
-    Ok(())
 }
 
 async fn checkpoint_preflight(
@@ -651,7 +685,6 @@ async fn rollback_apply_run(
             | McpApplyRunStatus::Running
             | McpApplyRunStatus::Preflight
             | McpApplyRunStatus::Locked
-            | McpApplyRunStatus::RollingBack
     ) {
         return Err(ApiError::conflict(
             "MCP apply run must finish before rollback",
@@ -660,11 +693,17 @@ async fn rollback_apply_run(
     if run.rollback_status == Some(McpApplyRunStatus::RolledBack) {
         return Ok(Json(ApplyRunView { run }));
     }
-    let backups = run
+    let mut backups = run
         .actions
         .iter()
         .filter_map(|action| action.backup.clone())
         .collect::<Vec<_>>();
+    for backup in run.journal.iter().filter_map(|entry| entry.backup.clone()) {
+        if !backups.iter().any(|existing| existing.id == backup.id) {
+            backups.push(backup);
+        }
+    }
+    backups.reverse();
     if backups.is_empty() {
         return Err(ApiError::conflict("MCP apply run has no restorable backup"));
     }
@@ -672,6 +711,56 @@ async fn rollback_apply_run(
     if actor.trim().is_empty() {
         return Err(ApiError::bad_request("rollback actor is required"));
     }
+    let first_action = run.actions.iter().find(|action| action.backup.is_some());
+    let first_journal = run.journal.iter().find(|entry| entry.backup.is_some());
+    let action_index = first_action
+        .map(|action| action.action_index)
+        .or_else(|| first_journal.map(|entry| entry.action_index))
+        .ok_or_else(|| ApiError::conflict("MCP apply run has no restorable action"))?;
+    let runtime = first_action
+        .map(|action| action.runtime.clone())
+        .or_else(|| first_journal.map(|entry| entry.runtime.clone()))
+        .unwrap_or_default();
+    let server_id = first_action
+        .map(|action| action.server_id.clone())
+        .or_else(|| first_journal.map(|entry| entry.server_id.clone()))
+        .unwrap_or_default();
+    let expected_source_hash = first_action
+        .and_then(|action| action.before_source_hash.clone())
+        .or_else(|| first_journal.and_then(|entry| entry.expected_source_hash.clone()));
+    let first_backup = first_action
+        .and_then(|action| action.backup.clone())
+        .or_else(|| first_journal.and_then(|entry| entry.backup.clone()));
+    let rolling_back = McpApplyJournalEntry {
+        sequence: run
+            .journal
+            .iter()
+            .map(|entry| entry.sequence)
+            .max()
+            .unwrap_or(0)
+            + 1,
+        action_index,
+        runtime,
+        server_id,
+        idempotency_key: format!("rollback:{}:{action_index}", run.id),
+        phase: McpApplyJournalPhase::RollingBack,
+        attempt: run.attempt.max(1) as u32,
+        expected_source_hash,
+        expected_schema_hash: None,
+        backup: first_backup,
+        reason: "compensating rollback started under the apply plan lock".to_owned(),
+        evidence: Vec::new(),
+    };
+    state
+        .store
+        .checkpoint_mcp_apply_run(
+            run.id,
+            McpApplyJournalPhase::RollingBack,
+            &rolling_back,
+            None,
+            None,
+        )
+        .await?;
     let result = state
         .runtime
         .rollback_mcp(McpRollbackExecutionRequest {

@@ -108,6 +108,32 @@ pub trait LiveEventSink: Send + Sync {
     async fn emit(&self, event: LiveEvent);
 }
 
+/// Durable checkpoint sink invoked by MCP adapters at mutation boundaries.
+/// The adapter must await each checkpoint before advancing to the next
+/// non-idempotent phase.
+#[async_trait]
+pub trait McpApplyJournalSink: Send + Sync {
+    async fn checkpoint(
+        &self,
+        run_id: &str,
+        entry: &cocli_driver_core::McpApplyJournalEntry,
+    ) -> Result<(), RuntimeError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoMcpApplyJournalSink;
+
+#[async_trait]
+impl McpApplyJournalSink for NoMcpApplyJournalSink {
+    async fn checkpoint(
+        &self,
+        _run_id: &str,
+        _entry: &cocli_driver_core::McpApplyJournalEntry,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Default)]
 struct NoLiveEventSink;
 
@@ -792,6 +818,7 @@ pub trait RuntimeService: Send + Sync {
     async fn apply_mcp(
         &self,
         _request: cocli_driver_core::McpApplyExecutionRequest,
+        _journal: Arc<dyn McpApplyJournalSink>,
     ) -> Result<cocli_driver_core::McpApplyExecutionResult, RuntimeError> {
         Err(RuntimeError::Unsupported(
             "MCP configuration apply is not supported".to_owned(),

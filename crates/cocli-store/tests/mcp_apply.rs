@@ -205,6 +205,14 @@ async fn apply_run_is_idempotent_redacted_and_persists_across_reopen() {
         .expect("complete rollback");
     assert_eq!(rolled_back.rollback_status, Some(McpApplyRunStatus::Failed));
     assert!(rolled_back.can_rollback);
+    assert!(rolled_back
+        .journal
+        .iter()
+        .any(|entry| entry.phase == McpApplyJournalPhase::RolledBack));
+    assert!(rolled_back
+        .journal
+        .iter()
+        .any(|entry| entry.phase == McpApplyJournalPhase::RecoveryRequired));
     assert_eq!(
         rolled_back.rollback_actions[0].reason,
         "backup restored atomically"
@@ -282,6 +290,55 @@ async fn apply_run_preserves_partial_runtime_failure_details() {
 }
 
 #[tokio::test]
+async fn recovery_required_completion_remains_resumable() {
+    let database_path = temporary_database_path();
+    let store = Store::open(&database_path).await.expect("open store");
+    let (plan, approval_id) = approved_plan(&store).await;
+    let run = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan.id,
+            approval_id,
+            plan_hash: plan.plan_hash,
+            observation_hash: plan.observation_hash,
+            config_hash: plan.config_hash,
+            capability_hash: plan.capability_hash,
+            actor: "recovery-test".to_owned(),
+            confirm_high_risk: true,
+        })
+        .await
+        .expect("create run");
+    let mut result = execution("configuration changed, but recovery is required");
+    result.actions[0].status = McpApplyActionStatus::Failed;
+    result.verification.status = McpVerificationStatus::Mismatched;
+
+    let recovery = store
+        .complete_mcp_apply_run(run.id, &result)
+        .await
+        .expect("record recovery-required result");
+    assert_eq!(recovery.status, McpApplyRunStatus::RecoveryRequired);
+    assert!(recovery.completed_at.is_none());
+    assert_eq!(
+        recovery.recovery_reason.as_deref(),
+        Some("configuration changed, but recovery is required")
+    );
+
+    let resumed = store
+        .checkpoint_mcp_apply_run(
+            run.id,
+            McpApplyJournalPhase::Preflight,
+            &journal(2, McpApplyJournalPhase::Preflight),
+            None,
+            None,
+        )
+        .await
+        .expect("recovery-required run accepts resume checkpoint");
+    assert_eq!(resumed.status, McpApplyRunStatus::Preflight);
+
+    store.close().await;
+    remove_database(&database_path).await;
+}
+
+#[tokio::test]
 async fn apply_run_journal_checkpoints_are_idempotent_and_recoverable() {
     let database_path = temporary_database_path();
     let store = Store::open(&database_path).await.expect("open store");
@@ -320,7 +377,14 @@ async fn apply_run_journal_checkpoints_are_idempotent_and_recoverable() {
     ];
     let mut latest = run;
     for (index, (phase, status)) in boundaries.into_iter().enumerate() {
-        let entry = journal(index as u64 + 1, phase);
+        let mut entry = journal(index as u64 + 1, phase);
+        if phase == McpApplyJournalPhase::BackedUp {
+            entry.backup = execution("journal backup")
+                .actions
+                .into_iter()
+                .next()
+                .and_then(|action| action.backup);
+        }
         latest = store
             .checkpoint_mcp_apply_run(
                 latest.id,
@@ -333,6 +397,9 @@ async fn apply_run_journal_checkpoints_are_idempotent_and_recoverable() {
             .await
             .expect("checkpoint");
         assert_eq!(latest.status, status);
+        if phase == McpApplyJournalPhase::BackedUp {
+            assert!(latest.can_rollback);
+        }
         let repeated = store
             .checkpoint_mcp_apply_run(latest.id, phase, &entry, None, None)
             .await
@@ -344,6 +411,87 @@ async fn apply_run_journal_checkpoints_are_idempotent_and_recoverable() {
         latest.recovery_reason.as_deref(),
         Some("restart found reload pending")
     );
+    let failed_entry = McpApplyJournalEntry {
+        sequence: 8,
+        action_index: 0,
+        runtime: "cursor".to_owned(),
+        server_id: "docs".to_owned(),
+        idempotency_key: "idem-cursor-failed".to_owned(),
+        phase: McpApplyJournalPhase::Failed,
+        attempt: 1,
+        expected_source_hash: Some("before".to_owned()),
+        expected_schema_hash: Some("schema".to_owned()),
+        backup: None,
+        reason: "cursor write failed after backup CAS".to_owned(),
+        evidence: Vec::new(),
+    };
+    latest = store
+        .checkpoint_mcp_apply_run(
+            latest.id,
+            McpApplyJournalPhase::Failed,
+            &failed_entry,
+            None,
+            None,
+        )
+        .await
+        .expect("failed checkpoint");
+    assert_eq!(latest.status, McpApplyRunStatus::Failed);
+    let later_runtime = McpApplyJournalEntry {
+        sequence: 9,
+        action_index: 1,
+        runtime: "claude".to_owned(),
+        server_id: "ops".to_owned(),
+        idempotency_key: "idem-claude-after-failed".to_owned(),
+        phase: McpApplyJournalPhase::Written,
+        attempt: 1,
+        expected_source_hash: Some("claude-before".to_owned()),
+        expected_schema_hash: Some("claude-schema".to_owned()),
+        backup: None,
+        reason: "claude write completed after cursor failed".to_owned(),
+        evidence: Vec::new(),
+    };
+    latest = store
+        .checkpoint_mcp_apply_run(
+            latest.id,
+            McpApplyJournalPhase::Written,
+            &later_runtime,
+            None,
+            None,
+        )
+        .await
+        .expect("later runtime checkpoint");
+    assert_eq!(latest.status, McpApplyRunStatus::Written);
+    assert!(latest
+        .journal
+        .iter()
+        .any(|entry| entry.idempotency_key == "idem-claude-after-failed"));
+    for (sequence, action_index, key) in [
+        (10, 0, "idem-cursor-verified"),
+        (11, 1, "idem-claude-verified"),
+    ] {
+        let mut entry = journal(sequence, McpApplyJournalPhase::Verified);
+        entry.action_index = action_index;
+        key.clone_into(&mut entry.idempotency_key);
+        latest = store
+            .checkpoint_mcp_apply_run(
+                latest.id,
+                McpApplyJournalPhase::Verified,
+                &entry,
+                None,
+                None,
+            )
+            .await
+            .expect("all per-runtime verification checkpoints persist");
+    }
+    let mut completed_result = execution("verified after durable checkpoints");
+    completed_result.journal.clone_from(&latest.journal);
+    latest = store
+        .complete_mcp_apply_run(latest.id, &completed_result)
+        .await
+        .expect("verified checkpoint remains completable");
+    assert_eq!(latest.status, McpApplyRunStatus::Verified);
+    assert_eq!(latest.journal.len(), 11);
+    assert_eq!(latest.actions.len(), 1);
     store.close().await;
 
     let reopened = Store::open(&database_path).await.expect("reopen store");
@@ -352,16 +500,17 @@ async fn apply_run_journal_checkpoints_are_idempotent_and_recoverable() {
         .await
         .expect("read run")
         .expect("run exists");
-    assert_eq!(recovered.status, McpApplyRunStatus::RecoveryRequired);
-    assert_eq!(recovered.journal.len(), 7);
-    assert!(recovered.attempt >= 8);
+    assert_eq!(recovered.status, McpApplyRunStatus::Verified);
+    assert_eq!(recovered.journal.len(), 11);
+    assert!(recovered.attempt >= 12);
 
+    const SECRET_CANARY: &str = "api_key=phase2c-canary-must-not-persist";
     let secret = reopened
         .checkpoint_mcp_apply_run(
             recovered.id,
             McpApplyJournalPhase::Failed,
             &McpApplyJournalEntry {
-                reason: "api_key=must-not-persist".to_owned(),
+                reason: SECRET_CANARY.to_owned(),
                 ..journal(99, McpApplyJournalPhase::Failed)
             },
             None,
@@ -378,17 +527,15 @@ async fn apply_run_journal_checkpoints_are_idempotent_and_recoverable() {
             "operator verified rollback outside active session",
         )
         .await
-        .expect("record manual recovery");
-    assert_eq!(manual.status, McpApplyRunStatus::RecoveryRequired);
-    assert_eq!(
-        manual.recovery_reason.as_deref(),
-        Some("operator verified rollback outside active session")
-    );
-    assert!(manual
-        .stale_reasons
-        .iter()
-        .any(|reason| reason == "manual_recovery_recorded_by:ops-user"));
+        .expect_err("completed run must remain terminal");
+    assert!(matches!(manual, StoreError::InvalidMcpApplyRun(_)));
 
     reopened.close().await;
+    let database_bytes = tokio::fs::read(&database_path)
+        .await
+        .expect("read SQLite database for canary audit");
+    assert!(!database_bytes
+        .windows(SECRET_CANARY.len())
+        .any(|window| window == SECRET_CANARY.as_bytes()));
     remove_database(&database_path).await;
 }

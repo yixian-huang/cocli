@@ -28,6 +28,12 @@ Current support matrix:
 | Claude | supported structured JSON fallback for `mcpServers` only | new-session-only | same subtree and CAS limits as Cursor |
 | Grok | read-only/manual | deferred | no stable transactional writer is assumed |
 
+Codex write support is negotiated with independent read-only
+`codex mcp add --help` and `codex mcp remove --help` probes and is enabled only
+when both installed-binary contracts are proven. A missing binary, timeout,
+non-zero exit, or incomplete help contract reports `unsupported`/`unknown` and
+blocks writes.
+
 Secret-reference injection is unsupported unless an adapter has a proven
 non-persistent injection channel. Opaque `env://` references can be resolved at
 the execution boundary for tests, but resolved values are not serialized,
@@ -63,6 +69,13 @@ through `POST /api/runtimes/mcp/apply-runs/:runId/manual-recovery`. Completed
 non-idempotent writes are not repeated when the journal already proves a
 `written`, `reload_pending`, `reloaded`, or `verified` phase for the same
 idempotency key.
+
+`backed_up` is persisted before atomic replacement together with the expected
+post-write hash. If a process exits between the replacement and the `written`
+checkpoint, recovery compares the destination with both backup and expected
+post-write hashes; it resumes without repeating the mutation only when one of
+those states is proven. Journal-carried backups remain rollback-eligible even
+when the process exited before an action result could be finalized.
 
 Multi-Runtime apply uses saga-style partial results: one Runtime can verify
 while another blocks or fails. The global status is partial/failed/blocked as
