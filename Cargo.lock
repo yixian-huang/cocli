@@ -437,6 +437,7 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "tokio",
 ]
@@ -656,6 +657,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "cocli-driver-core",
  "indexmap",
  "serde",
  "serde_json",

@@ -16,6 +16,11 @@ pub use memory::{
     MemoryDocument, MemoryDocumentEntry, MemoryMoveResult, MemoryNamespace, MemoryScope,
     MemoryTopic,
 };
+mod mcp_governance;
+pub use mcp_governance::{
+    McpPlanDecision, McpPlanDecisionStatus, NewMcpPlanDecision, NewMcpProfile,
+    NewMcpProfileBinding, UpdateMcpProfile,
+};
 mod skills;
 pub use skills::{
     AgentSkillInstall, NewSkillLibrary, SkillLibraryEntry, SkillLibraryFile, SkillLibraryFileMeta,
@@ -171,6 +176,44 @@ pub enum StoreError {
     /// The current installation has no binding for a requested workspace.
     #[error("workspace binding not found: {0}")]
     WorkspaceBindingNotFound(Uuid),
+    /// A requested MCP profile does not exist.
+    #[error("MCP profile not found: {0}")]
+    McpProfileNotFound(Uuid),
+    /// An MCP profile write used a stale optimistic-concurrency version.
+    #[error("MCP profile version conflict for {profile_id}: current={current_version}, expected={expected_version}")]
+    McpProfileVersionConflict {
+        /// MCP profile id.
+        profile_id: Uuid,
+        /// Version currently stored.
+        current_version: i64,
+        /// Version supplied by the caller.
+        expected_version: i64,
+    },
+    /// A requested MCP profile binding does not exist.
+    #[error("MCP profile binding not found: {0}")]
+    McpProfileBindingNotFound(Uuid),
+    /// An MCP profile binding delete used a stale optimistic-concurrency version.
+    #[error("MCP profile binding version conflict for {binding_id}: current={current_version}, expected={expected_version}")]
+    McpProfileBindingVersionConflict {
+        /// MCP profile binding id.
+        binding_id: Uuid,
+        /// Version currently stored.
+        current_version: i64,
+        /// Version supplied by the caller.
+        expected_version: i64,
+    },
+    /// An MCP profile failed policy validation.
+    #[error("invalid MCP profile: {0}")]
+    InvalidMcpProfile(&'static str),
+    /// An MCP binding target is not part of the canonical local ownership model.
+    #[error("invalid MCP binding target: {0}")]
+    InvalidMcpBindingTarget(String),
+    /// A requested MCP plan does not exist.
+    #[error("MCP plan not found: {0}")]
+    McpPlanNotFound(String),
+    /// An MCP plan decision did not match the persisted dry-run plan contract.
+    #[error("invalid MCP plan decision: {0}")]
+    InvalidMcpPlanDecision(String),
 }
 
 /// A local conversation channel.
@@ -3610,6 +3653,11 @@ async fn apply_schema(pool: &SqlitePool) -> Result<(), sqlx_core::Error> {
             12,
             "portable_workspace_foundation",
             include_str!("../migrations/0012_portable_workspace_foundation.sql"),
+        ),
+        (
+            13,
+            "mcp_governance_phase_2a",
+            include_str!("../migrations/0013_mcp_governance_phase_2a.sql"),
         ),
     ] {
         let already_applied: bool =

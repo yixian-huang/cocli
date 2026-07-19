@@ -1584,18 +1584,7 @@ fn server_id(fingerprint: &str) -> String {
 }
 
 fn endpoint_fingerprint(definition: &McpCanonicalDefinition) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(format!("{:?}", definition.transport).as_bytes());
-    if let Some(command) = &definition.command {
-        hasher.update(command.as_bytes());
-    }
-    for arg in &definition.args {
-        hasher.update(arg.as_bytes());
-    }
-    if let Some(endpoint) = &definition.endpoint {
-        hasher.update(endpoint.as_bytes());
-    }
-    hex(hasher.finalize().as_slice())
+    cocli_driver_core::mcp_definition_fingerprint(definition)
 }
 
 fn sha256_text(text: &str) -> String {

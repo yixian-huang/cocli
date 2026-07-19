@@ -3,6 +3,12 @@ import { RefreshCw } from 'lucide-react'
 import {
   localApi,
   type McpDoctorReport,
+  type McpEffectiveDesiredState,
+  type McpPlanAction,
+  type McpPlanView,
+  type McpProfile,
+  type McpProfileBinding,
+  type McpStateSummary,
   type ObservedMcpInstance,
 } from './api'
 import type { LocalCopyKey } from './localization'
@@ -30,16 +36,53 @@ function observationTitle(observation: ObservedMcpInstance): string {
   ].join(', ')
 }
 
+function targetLabel(target: { targetType: string; targetId: string }): string {
+  return `${target.targetType}:${target.targetId}`
+}
+
+function summaryLabel(summary: McpStateSummary): string {
+  const parts = [
+    `configured=${summary.configured ?? 'unknown'}`,
+    `enabled=${summary.enabled ?? 'unknown'}`,
+  ]
+  if (summary.endpointFingerprint) parts.push(`fingerprint=${summary.endpointFingerprint}`)
+  if (summary.allowTools.length > 0) parts.push(`allow=${summary.allowTools.join(',')}`)
+  if (summary.denyTools.length > 0) parts.push(`deny=${summary.denyTools.join(',')}`)
+  if (summary.approvalMode) parts.push(`approval=${summary.approvalMode}`)
+  parts.push(`secretRefs=${summary.secretRefCount}`)
+  return parts.join(', ')
+}
+
+function actionEvidence(action: McpPlanAction): string {
+  if (action.evidence.length === 0) return 'unknown evidence'
+  return action.evidence.map((evidence) => `${evidence.source}: ${evidence.detail}`).join(' · ')
+}
+
 export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
   const [report, setReport] = useState<McpDoctorReport | null>(null)
+  const [profiles, setProfiles] = useState<McpProfile[]>([])
+  const [bindings, setBindings] = useState<McpProfileBinding[]>([])
+  const [effective, setEffective] = useState<McpEffectiveDesiredState | null>(null)
+  const [planView, setPlanView] = useState<McpPlanView | null>(null)
   const [loading, setLoading] = useState(true)
+  const [planning, setPlanning] = useState(false)
+  const [decisionBusy, setDecisionBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
-      setReport(await localApi.inspectMachineMcp())
+      const [nextReport, nextProfiles, nextBindings, nextEffective] = await Promise.all([
+        localApi.inspectMachineMcp(),
+        localApi.listMcpProfiles(),
+        localApi.listMcpProfileBindings(),
+        localApi.getMcpEffectiveDesiredState(),
+      ])
+      setReport(nextReport)
+      setProfiles(nextProfiles.profiles)
+      setBindings(nextBindings.bindings)
+      setEffective(nextEffective)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : t('mcpLoadError'))
     } finally {
@@ -65,6 +108,34 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
       (item) => item.runtime === runtime && item.serverId === serverId,
     )
 
+  const generatePlan = async () => {
+    setPlanning(true)
+    setError(null)
+    try {
+      setPlanView(await localApi.createMcpPlan())
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpPlanError'))
+    } finally {
+      setPlanning(false)
+    }
+  }
+
+  const decidePlan = async (decision: 'approve' | 'reject') => {
+    if (!planView) return
+    setDecisionBusy(true)
+    setError(null)
+    try {
+      const next = decision === 'approve'
+        ? await localApi.approveMcpPlan(planView.plan.id, planView.plan.planHash)
+        : await localApi.rejectMcpPlan(planView.plan.id, planView.plan.planHash, 'Rejected from desktop preview')
+      setPlanView(next)
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : t('mcpPlanError'))
+    } finally {
+      setDecisionBusy(false)
+    }
+  }
+
   return (
     <section className="local-mcp-workspace" aria-label={t('mcpWorkspace')}>
       <header className="workspace-heading">
@@ -84,6 +155,8 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
 
       {report && (
         <>
+          <p className="mcp-zero-write-notice">{t('mcpZeroWriteNotice')}</p>
+
           <div className="mcp-summary-grid">
             <article className={report.summary.status}>
               <span>{t('mcpDoctorStatus')}</span>
@@ -168,6 +241,147 @@ export function LocalMcpWorkspace({ t }: LocalMcpWorkspaceProps) {
                 ))}
               </ul>
             )}
+          </section>
+
+          <section className="mcp-panel" aria-labelledby="mcp-profiles-title">
+            <div className="workspace-section-title">
+              <div>
+                <h2 id="mcp-profiles-title">{t('mcpProfiles')}</h2>
+                <p>{t('mcpProfilesDescription')}</p>
+              </div>
+            </div>
+            {profiles.length === 0 ? <p>{t('mcpNoProfiles')}</p> : (
+              <div className="mcp-profile-list">
+                {profiles.map((profile) => {
+                  const profileBindings = bindings.filter((binding) => binding.profileId === profile.id)
+                  return (
+                    <article key={profile.id}>
+                      <header>
+                        <div>
+                          <strong>{profile.name}</strong>
+                          <small>v{profile.version} · {profile.servers.length} {t('mcpProfileServers')}</small>
+                        </div>
+                        <span>{profileBindings.map((binding) => targetLabel(binding.target)).join(' · ') || t('mcpNoBindings')}</span>
+                      </header>
+                      {profile.description && <p>{profile.description}</p>}
+                      <ul>
+                        {profile.servers.map((server) => (
+                          <li key={`${profile.id}-${server.runtime}-${server.serverId}`}>
+                            <strong>{server.runtime} · {server.alias}</strong>
+                            <span>{server.desiredEnabled ? t('mcpDesiredEnabled') : t('mcpDesiredDisabled')} · {server.approvalMode} · {server.riskOverride ?? 'low'} · secretRefs={server.secretRefs.length}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </article>
+                  )
+                })}
+              </div>
+            )}
+          </section>
+
+          <section className="mcp-panel" aria-labelledby="mcp-effective-title">
+            <div className="workspace-section-title">
+              <div>
+                <h2 id="mcp-effective-title">{t('mcpEffectiveDesired')}</h2>
+                <p>{t('mcpEffectiveDescription')}</p>
+              </div>
+            </div>
+            {effective ? (
+              <>
+                <div className="mcp-effective-meta">
+                  <span>{t('mcpEffectiveTarget')}: {effective.target.machineId}{effective.target.workspaceId ? ` / ${effective.target.workspaceId}` : ''}{effective.target.agentId ? ` / ${effective.target.agentId}` : ''}</span>
+                  <span>{t('mcpConflicts')}: {effective.conflicts.length}</span>
+                </div>
+                {effective.conflicts.length > 0 && (
+                  <ul className="mcp-conflict-list">
+                    {effective.conflicts.map((conflict) => (
+                      <li key={`${conflict.runtime}-${conflict.serverId}-${conflict.precedence}`}>
+                        <strong>{conflict.runtime} · {conflict.serverId}</strong>
+                        <span>{conflict.precedence} · {conflict.reason} · {conflict.profileIds.join(', ')}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                <div className="mcp-profile-list">
+                  {effective.servers.map((server) => (
+                    <article key={`${server.runtime}-${server.serverId}`}>
+                      <header>
+                        <div>
+                          <strong>{server.runtime} · {server.alias}</strong>
+                          <small>{server.inheritedFrom} · {server.sourceProfileNames.join(', ')}</small>
+                        </div>
+                        <span>{server.highRiskContext ? t('mcpHighRiskContext') : t('mcpStandardContext')}</span>
+                      </header>
+                      <p>{server.desiredEnabled ? t('mcpDesiredEnabled') : t('mcpDesiredDisabled')} · allow={server.allowTools.join(', ') || 'none'} · deny={server.denyTools.join(', ') || 'none'} · secretRefs={server.secretRefs.length}</p>
+                    </article>
+                  ))}
+                </div>
+                <ul className="mcp-resolution-list">
+                  {effective.resolution.map((resolution) => (
+                    <li key={resolution.bindingId}>
+                      <strong>{resolution.applied ? t('mcpAppliedResolution') : t('mcpSkippedResolution')}</strong>
+                      <span>{resolution.profileName} -&gt; {targetLabel(resolution.target)} · {resolution.reason}</span>
+                    </li>
+                  ))}
+                </ul>
+              </>
+            ) : <p>{t('mcpNoEffectiveDesired')}</p>}
+          </section>
+
+          <section className="mcp-panel" aria-labelledby="mcp-plan-title">
+            <div className="workspace-section-title">
+              <div>
+                <h2 id="mcp-plan-title">{t('mcpPlanPreview')}</h2>
+                <p>{t('mcpPlanDescription')}</p>
+              </div>
+              <button className="secondary-action" type="button" onClick={() => void generatePlan()} disabled={planning}>
+                {planning ? t('mcpPlanning') : t('mcpGeneratePlan')}
+              </button>
+            </div>
+            {planView ? (
+              <>
+                <div className="mcp-plan-status">
+                  <span>{t('mcpApprovalStatus')}: {planView.approvalStatus}</span>
+                  <span>{t('mcpPlanHash')}: {planView.plan.planHash}</span>
+                  <span>{planView.plan.dryRun ? t('mcpDryRun') : t('mcpNotDryRun')}</span>
+                  {planView.decision?.expiresAt && <span>{t('mcpApprovalExpires')}: {new Date(planView.decision.expiresAt).toLocaleString()}</span>}
+                  {planView.approvedButNotApplied && <strong>{t('mcpApprovedNotApplied')}</strong>}
+                </div>
+                {planView.staleReasons.length > 0 && (
+                  <ul className="mcp-conflict-list">
+                    {planView.staleReasons.map((reason) => <li key={reason}>{reason}</li>)}
+                  </ul>
+                )}
+                <div className="mcp-plan-actions">
+                  {planView.plan.actions.map((action) => (
+                    <article className={`risk-${action.risk}`} key={`${action.kind}-${action.runtime}-${action.serverId}-${action.serverFingerprint}`}>
+                      <header>
+                        <div>
+                          <strong>{action.kind} · {action.runtime} · {action.scope}</strong>
+                          <small>{action.target} · {action.serverId} · {action.serverFingerprint}</small>
+                        </div>
+                        <span>{action.risk}{action.blocked ? ` · ${t('mcpBlocked')}` : ''}</span>
+                      </header>
+                      <p>{action.reason}</p>
+                      <dl>
+                        <div><dt>{t('mcpBefore')}</dt><dd>{summaryLabel(action.before)}</dd></div>
+                        <div><dt>{t('mcpAfter')}</dt><dd>{summaryLabel(action.after)}</dd></div>
+                        <div><dt>{t('mcpEvidence')}</dt><dd>{actionEvidence(action)}</dd></div>
+                        <div><dt>{t('mcpExpectedHashes')}</dt><dd>{action.expectedSourceHash ?? 'unknown'} / {action.expectedSchemaHash ?? 'unknown'}</dd></div>
+                      </dl>
+                    </article>
+                  ))}
+                </div>
+                <div className="mcp-plan-controls">
+                  <button type="button" className="primary-action" onClick={() => void decidePlan('approve')} disabled={decisionBusy || planView.approvalStatus === 'approved'}>
+                    {t('mcpApprovePlan')}
+                  </button>
+                  <button type="button" className="secondary-action" onClick={() => void decidePlan('reject')} disabled={decisionBusy || planView.approvalStatus === 'rejected'}>
+                    {t('mcpRejectPlan')}
+                  </button>
+                </div>
+              </>
+            ) : <p>{t('mcpNoPlan')}</p>}
           </section>
         </>
       )}

@@ -11,6 +11,7 @@ pub mod error;
 pub mod event;
 pub mod headless;
 pub mod mcp;
+pub mod mcp_governance;
 pub mod subtraits;
 pub mod types;
 
@@ -23,6 +24,13 @@ pub use mcp::{
     McpDiagnostic, McpDiagnosticSeverity, McpDoctorReport, McpDoctorSummary, McpEvidence,
     McpInventory, McpProbeRequest, McpProbeSnapshot, McpRuntimeProbe, McpSecretRef, McpServer,
     McpStartupState, McpTransport, ObservedMcpInstance,
+};
+pub use mcp_governance::{
+    generate_mcp_plan, hash_mcp_config, hash_mcp_observation, mcp_definition_fingerprint,
+    resolve_mcp_desired_state, validate_mcp_profile, McpApprovalMode, McpBindingTarget,
+    McpBindingTargetType, McpDesiredServer, McpDesiredTarget, McpEffectiveDesiredState,
+    McpEffectiveServer, McpPlan, McpPlanAction, McpPlanActionKind, McpProfile, McpProfileBinding,
+    McpProfileConflict, McpProfileResolution, McpRiskLevel, McpStateSummary,
 };
 pub use subtraits::{
     ExitCodeClassifier, ProcessFactory, ProcessInitializer, SessionFileGC, StdinBinder,

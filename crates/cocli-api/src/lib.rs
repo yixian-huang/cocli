@@ -4140,6 +4140,14 @@ impl From<StoreError> for ApiError {
             StoreError::WorkspaceNotFound(_) | StoreError::WorkspaceBindingNotFound(_) => {
                 Some(StatusCode::NOT_FOUND)
             }
+            StoreError::McpProfileNotFound(_)
+            | StoreError::McpProfileBindingNotFound(_)
+            | StoreError::McpPlanNotFound(_) => Some(StatusCode::NOT_FOUND),
+            StoreError::McpProfileVersionConflict { .. }
+            | StoreError::McpProfileBindingVersionConflict { .. } => Some(StatusCode::CONFLICT),
+            StoreError::InvalidMcpProfile(_)
+            | StoreError::InvalidMcpBindingTarget(_)
+            | StoreError::InvalidMcpPlanDecision(_) => Some(StatusCode::BAD_REQUEST),
             StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
                 Some(StatusCode::CONFLICT)
             }

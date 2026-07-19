@@ -111,7 +111,7 @@ plan/apply/verify changes, and lockfile/drift governance.
 
 ## Desktop MCP governance
 
-MCP governance Phase 1 is read-only. The local API exposes cross-Runtime
+MCP governance Phase 1 provides read-only observation. The local API exposes cross-Runtime
 inventory and doctor results at `/api/runtimes/mcp/inventory` and
 `/api/runtimes/mcp/doctor`, and the desktop MCP workspace renders the same
 Runtime × Server evidence matrix. Configuration discovery and Runtime-native
@@ -126,6 +126,21 @@ endpoints/aliases, and configuration drift are structured diagnostics. One
 Runtime probe failing does not fail the aggregate request. See
 [docs/mcp-governance-phase-1.md](docs/mcp-governance-phase-1.md) for the API
 contract and the explicit Phase 2 boundary.
+
+Phase 2A adds durable, versioned MCP profiles and machine/Workspace/Agent
+bindings, deterministic effective desired-state resolution, stable dry-run
+plans, and hash-bound approve/reject records. Profile inheritance is fixed at
+`machine < workspace < agent`; conflicting profiles at the same precedence are
+reported instead of silently overwritten. Plans compare the latest Phase 1
+observation with desired state, preserve evidence, mark risky or unsupported
+work, and contain no apply capability. The desktop exposes Profiles and Plan
+Preview alongside the existing matrix and labels approvals as “approved but
+not applied”. See [docs/mcp-governance-phase-2a.md](docs/mcp-governance-phase-2a.md).
+
+Phase 2A never writes Codex, Cursor, Claude, or Grok configuration, never
+performs OAuth/authentication or Runtime approval, and accepts secret
+references only. Phase 2B is reserved for explicit apply/reload/verify,
+adapter writers, backup/rollback, and post-apply drift verification.
 
 ## Repository layout
 

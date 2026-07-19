@@ -68,6 +68,7 @@ describe('LocalApp', () => {
       updatedAt: string
     }> = []
     const taskDependencies: Record<number, number[]> = {}
+    let mcpPlanDecision: 'approved' | 'rejected' | null = null
     let memoryTopic: {
       type: 'project'
       topic: string
@@ -202,6 +203,154 @@ describe('LocalApp', () => {
             observedAt: '2026-07-19T09:00:00Z',
           },
         })
+      }
+      if (path === '/api/runtimes/mcp/profiles') {
+        return jsonResponse({
+          profiles: [{
+            id: 'profile-ops',
+            name: 'Ops baseline',
+            description: 'Production-safe docs tools',
+            version: 2,
+            servers: [{
+              serverId: 'srv-docs',
+              runtime: 'cursor',
+              alias: 'docs',
+              definition: { transport: 'stdio', command: 'docs-server' },
+              desiredEnabled: true,
+              allowTools: ['search'],
+              denyTools: ['write'],
+              approvalMode: 'manual',
+              riskOverride: 'high',
+              secretRefs: [{ location: 'env', kind: 'token', reference: 'env://DOCS_TOKEN' }],
+            }],
+            createdAt: '2026-07-19T08:00:00Z',
+            updatedAt: '2026-07-19T08:30:00Z',
+          }],
+        })
+      }
+      if (path === '/api/runtimes/mcp/bindings') {
+        return jsonResponse({
+          bindings: [{
+            id: 'binding-ops-machine',
+            profileId: 'profile-ops',
+            target: { targetType: 'machine', targetId: 'machine-local' },
+            version: 1,
+            createdAt: '2026-07-19T08:05:00Z',
+            updatedAt: '2026-07-19T08:05:00Z',
+          }],
+        })
+      }
+      if (path === '/api/runtimes/mcp/effective') {
+        return jsonResponse({
+          target: { machineId: 'machine-local' },
+          servers: [{
+            serverId: 'srv-docs',
+            runtime: 'cursor',
+            alias: 'docs',
+            definition: { transport: 'stdio', command: 'docs-server' },
+            desiredEnabled: true,
+            allowTools: ['search'],
+            denyTools: ['write'],
+            approvalMode: 'manual',
+            riskOverride: 'high',
+            secretRefs: [{ location: 'env', kind: 'token', reference: 'env://DOCS_TOKEN' }],
+            sourceProfileIds: ['profile-ops'],
+            sourceProfileNames: ['Ops baseline'],
+            inheritedFrom: 'machine',
+            highRiskContext: true,
+          }],
+          conflicts: [{
+            runtime: 'cursor',
+            serverId: 'srv-docs',
+            precedence: 'machine',
+            profileIds: ['profile-ops', 'profile-other'],
+            reason: 'same-precedence profiles define different desired state',
+          }],
+          resolution: [{
+            profileId: 'profile-ops',
+            profileName: 'Ops baseline',
+            bindingId: 'binding-ops-machine',
+            target: { targetType: 'machine', targetId: 'machine-local' },
+            applied: true,
+            reason: 'highest precedence binding selected deterministically',
+          }],
+        })
+      }
+      if (path === '/api/runtimes/mcp/plans' && init?.method === 'POST') {
+        return jsonResponse({
+          plan: {
+            id: 'plan-1',
+            target: { machineId: 'machine-local' },
+            effectiveDesiredState: {
+              target: { machineId: 'machine-local' },
+              servers: [],
+              conflicts: [],
+              resolution: [],
+            },
+            actions: [{
+              kind: 'approval_required',
+              runtime: 'cursor',
+              scope: 'machine',
+              target: 'machine:machine-local',
+              serverId: 'srv-docs',
+              serverFingerprint: 'sha256:test',
+              before: {
+                configured: true,
+                enabled: true,
+                allowTools: [],
+                denyTools: [],
+                secretRefCount: 0,
+              },
+              after: {
+                configured: true,
+                enabled: true,
+                allowTools: ['search'],
+                denyTools: ['write'],
+                approvalMode: 'manual',
+                secretRefCount: 1,
+              },
+              risk: 'high',
+              reason: 'runtime reports server is not approved',
+              evidence: [{
+                source: 'cursor_cli',
+                detail: 'cursor-agent mcp list-tools',
+                provesRuntimeLoaded: true,
+                provesCurrentSessionVisibility: false,
+              }],
+              expectedSourceHash: 'obs-hash-1',
+              expectedSchemaHash: 'schema-hash-1',
+              blocked: true,
+            }],
+            observationHash: 'obs-hash-1',
+            configHash: 'config-hash-1',
+            planHash: 'plan-hash-1',
+            generatedAt: '2026-07-19T09:10:00Z',
+            dryRun: true,
+            applied: false,
+          },
+          decision: mcpPlanDecision ? {
+            id: 'decision-1',
+            planId: 'plan-1',
+            decision: mcpPlanDecision,
+            planHash: 'plan-hash-1',
+            observationHash: 'obs-hash-1',
+            configHash: 'config-hash-1',
+            actor: 'desktop-user',
+            decidedAt: '2026-07-19T09:11:00Z',
+            expiresAt: '2026-07-19T10:11:00Z',
+          } : undefined,
+          approvalStatus: mcpPlanDecision ?? 'pending',
+          staleReasons: [],
+          approvedButNotApplied: mcpPlanDecision === 'approved',
+        })
+      }
+      if (path === '/api/runtimes/mcp/plans/plan-1/approve' && init?.method === 'POST') {
+        mcpPlanDecision = 'approved'
+        return (fetch as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>)('/api/runtimes/mcp/plans', { method: 'POST' })
+      }
+      if (path === '/api/runtimes/mcp/plans/plan-1/reject' && init?.method === 'POST') {
+        mcpPlanDecision = 'rejected'
+        return (fetch as unknown as (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>)('/api/runtimes/mcp/plans', { method: 'POST' })
       }
       if (path === '/api/channels' && !init?.method) return jsonResponse([channel])
       if (path === '/api/agents' && !init?.method) {
@@ -775,6 +924,26 @@ describe('LocalApp', () => {
     expect(screen.getByRole('row', { name: /cursor D✓ C✓ L✓ E✓ P× A· H× S· I·/ })).toBeInTheDocument()
     expect(screen.getByText(/cursor-agent mcp list-tools/)).toBeInTheDocument()
     expect(screen.getByText(/approval_missing/)).toBeInTheDocument()
+    expect(screen.getByText(/zero-write preview/)).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Profiles' })).toBeInTheDocument()
+    expect(screen.getByText('Ops baseline')).toBeInTheDocument()
+    expect(screen.getAllByText(/machine:machine-local/).length).toBeGreaterThan(0)
+    expect(screen.getByRole('heading', { name: 'Effective desired state' })).toBeInTheDocument()
+    expect(screen.getByText(/same-precedence profiles/)).toBeInTheDocument()
+    expect(screen.getByText(/high-risk context/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Generate dry-run plan' }))
+
+    expect(await screen.findByText(/Approval status: pending/)).toBeInTheDocument()
+    expect(screen.getByText(/approval_required/)).toBeInTheDocument()
+    expect(screen.getByText(/high · blocked/)).toBeInTheDocument()
+    expect(screen.getByText(/runtime reports server is not approved/)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Approve plan' }))
+
+    expect(await screen.findByText(/Approval status: approved/)).toBeInTheDocument()
+    expect(screen.getByText('approved but not applied')).toBeInTheDocument()
+    expect(screen.getByText(/Approval expires:/)).toBeInTheDocument()
   })
 
   it('creates, assigns, updates, and links local tasks', async () => {

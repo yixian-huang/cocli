@@ -49,6 +49,26 @@ This track remains subordinate to cocli's persistent Agent and Channel model;
 it is Runtime governance for multi-Agent desktop work, not a standalone Skill
 package-manager direction.
 
+### Supporting capability track — MCP governance
+
+- **Phase 1 — inventory and doctor (complete):** discover redacted definitions,
+  probe Runtime-native state, preserve independent evidence fields, and report
+  drift, duplicates, approval/authentication gaps, startup failures, and probe
+  failures without modifying Runtime configuration.
+- **Phase 2A — profiles and deterministic planning (complete):** persist
+  versioned Runtime-neutral profiles and canonical machine/Workspace/Agent
+  bindings; resolve `machine < workspace < agent` desired state with explicit
+  same-level conflicts; generate stable, evidence-bound, fully redacted
+  dry-run plans; and record hash-bound approve/reject decisions that become
+  stale after desired-state or observation drift. Approval authorizes a future
+  operation only and is never treated as applied.
+- **Phase 2B — apply, reload, verify, and recovery (planned):** introduce
+  Runtime adapter writers, pre-write backups, rollback, explicit apply and
+  reload controls, and post-apply verification against fresh native evidence.
+
+MCP governance does not introduce a Gateway or Registry and is not a secret
+store. Phase 2A contains no Runtime configuration writer or apply endpoint.
+
 ## Beta milestones
 
 | Milestone | Outcome |

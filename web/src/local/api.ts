@@ -325,6 +325,154 @@ export interface McpDoctorReport {
   inventory: McpInventory
 }
 
+export type McpApprovalMode = 'manual' | 'per_tool' | 'pre_approved'
+export type McpRiskLevel = 'low' | 'medium' | 'high' | 'critical'
+export type McpBindingTargetType = 'machine' | 'workspace' | 'agent'
+export type McpPlanActionKind =
+  | 'add_configure'
+  | 'enable'
+  | 'disable'
+  | 'update'
+  | 'remove'
+  | 'approval_required'
+  | 'authentication_required'
+  | 'manual_unsupported'
+
+export interface McpBindingTarget {
+  targetType: McpBindingTargetType
+  targetId: string
+}
+
+export interface McpDesiredTarget {
+  machineId: string
+  workspaceId?: string
+  agentId?: string
+}
+
+export interface McpDesiredServer {
+  serverId: string
+  runtime: string
+  alias: string
+  definition?: McpServer['definition']
+  desiredEnabled: boolean
+  allowTools: string[]
+  denyTools: string[]
+  approvalMode: McpApprovalMode
+  riskOverride?: McpRiskLevel
+  secretRefs: McpServer['secretRefs']
+}
+
+export interface McpProfile {
+  id: string
+  name: string
+  description?: string
+  version: number
+  servers: McpDesiredServer[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface McpProfileBinding {
+  id: string
+  profileId: string
+  target: McpBindingTarget
+  version: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface McpEffectiveServer extends McpDesiredServer {
+  sourceProfileIds: string[]
+  sourceProfileNames: string[]
+  inheritedFrom: McpBindingTargetType
+  highRiskContext: boolean
+}
+
+export interface McpProfileConflict {
+  runtime: string
+  serverId: string
+  precedence: McpBindingTargetType
+  profileIds: string[]
+  reason: string
+}
+
+export interface McpProfileResolution {
+  profileId: string
+  profileName: string
+  bindingId: string
+  target: McpBindingTarget
+  applied: boolean
+  reason: string
+}
+
+export interface McpEffectiveDesiredState {
+  target: McpDesiredTarget
+  servers: McpEffectiveServer[]
+  conflicts: McpProfileConflict[]
+  resolution: McpProfileResolution[]
+}
+
+export interface McpStateSummary {
+  configured?: boolean
+  enabled?: boolean
+  endpointFingerprint?: string
+  allowTools: string[]
+  denyTools: string[]
+  approvalMode?: McpApprovalMode
+  secretRefCount: number
+}
+
+export interface McpPlanAction {
+  kind: McpPlanActionKind
+  runtime: string
+  scope: string
+  target: string
+  serverId: string
+  serverFingerprint: string
+  before: McpStateSummary
+  after: McpStateSummary
+  risk: McpRiskLevel
+  reason: string
+  evidence: McpEvidence[]
+  expectedSourceHash?: string
+  expectedSchemaHash?: string
+  blocked: boolean
+}
+
+export interface McpPlan {
+  id: string
+  target: McpDesiredTarget
+  effectiveDesiredState: McpEffectiveDesiredState
+  actions: McpPlanAction[]
+  observationHash: string
+  configHash: string
+  planHash: string
+  generatedAt: string
+  dryRun: boolean
+  applied: boolean
+}
+
+export interface McpPlanDecision {
+  id: string
+  planId: string
+  decision: 'approved' | 'rejected'
+  planHash: string
+  observationHash: string
+  configHash: string
+  actor: string
+  reason?: string
+  decidedAt: string
+  expiresAt?: string
+}
+
+export interface McpPlanView {
+  plan: McpPlan
+  decision?: McpPlanDecision
+  approvalStatus: 'pending' | 'approved' | 'rejected' | 'stale' | 'expired'
+  staleReasons: string[]
+  approvedButNotApplied: boolean
+}
+
 export interface SkillFileEntry {
   name: string
   isDir: boolean
@@ -586,6 +734,32 @@ export const localApi = {
     request<McpDoctorReport>('/api/runtimes/mcp/doctor'),
   listMachineMcp: () =>
     request<McpInventory>('/api/runtimes/mcp/inventory'),
+  listMcpProfiles: () =>
+    request<{ profiles: McpProfile[] }>('/api/runtimes/mcp/profiles'),
+  listMcpProfileBindings: () =>
+    request<{ bindings: McpProfileBinding[] }>('/api/runtimes/mcp/bindings'),
+  getMcpEffectiveDesiredState: () =>
+    request<McpEffectiveDesiredState>('/api/runtimes/mcp/effective'),
+  createMcpPlan: () =>
+    request<McpPlanView>('/api/runtimes/mcp/plans', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  approveMcpPlan: (
+    planId: string,
+    planHash: string,
+    actor = 'desktop-user',
+    expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString(),
+  ) =>
+    request<McpPlanView>(`/api/runtimes/mcp/plans/${planId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ planHash, actor, expiresAt }),
+    }),
+  rejectMcpPlan: (planId: string, planHash: string, reason: string, actor = 'desktop-user') =>
+    request<McpPlanView>(`/api/runtimes/mcp/plans/${planId}/reject`, {
+      method: 'POST',
+      body: JSON.stringify({ planHash, actor, reason }),
+    }),
   inspectAgentSkills: (agentId: string) =>
     request<{ summary: SkillDoctorSummary; inventory: AgentSkillInventory }>(
       `/api/agents/${agentId}/skills/doctor`,

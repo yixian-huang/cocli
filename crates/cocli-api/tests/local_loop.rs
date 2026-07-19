@@ -27,6 +27,11 @@ struct FakeRuntime;
 #[derive(Debug)]
 struct FailingStartRuntime;
 
+#[derive(Debug, Default)]
+struct MutableMcpRuntime {
+    inventory: Mutex<McpInventory>,
+}
+
 #[async_trait]
 impl RuntimeService for FakeRuntime {
     async fn list(&self) -> Vec<RuntimeInfo> {
@@ -84,6 +89,25 @@ impl RuntimeService for FailingStartRuntime {
         Err(RuntimeError::Delivery(
             "simulated startup failure".to_owned(),
         ))
+    }
+}
+
+#[async_trait]
+impl RuntimeService for MutableMcpRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        Ok(self
+            .inventory
+            .lock()
+            .expect("mutable MCP inventory should not be poisoned")
+            .clone())
     }
 }
 
@@ -260,6 +284,239 @@ async fn exposes_read_only_mcp_inventory_and_doctor() {
     assert_eq!(doctor["summary"]["runtimeCount"], 1);
     assert_eq!(doctor["summary"]["warningCount"], 1);
     assert_eq!(doctor["inventory"]["diagnostics"][0]["code"], "cli_missing");
+}
+
+fn mcp_profile_body(name: &str, enabled: bool) -> Value {
+    json!({
+        "name": name,
+        "description": "API governance profile",
+        "servers": [{
+            "serverId": "srv-docs",
+            "runtime": "codex",
+            "alias": "docs",
+            "definition": {
+                "transport": "http",
+                "endpoint": "https://example.test/mcp"
+            },
+            "desiredEnabled": enabled,
+            "allowTools": [],
+            "denyTools": [],
+            "approvalMode": "manual",
+            "secretRefs": [{
+                "location": "headers.authorization",
+                "kind": "bearer",
+                "reference": "keychain://cocli/docs-token"
+            }]
+        }]
+    })
+}
+
+#[tokio::test]
+async fn mcp_profile_plan_and_approval_api_is_dry_run_versioned_and_stale_aware() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+
+    let (create_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/profiles",
+        mcp_profile_body("production docs", true),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED);
+    assert_eq!(profile["version"], 1);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let profile_path = format!("/api/runtimes/mcp/profiles/{profile_id}");
+
+    let (get_status, fetched) = json_request(app.clone(), "GET", &profile_path, json!({})).await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert_eq!(fetched["name"], "production docs");
+
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bindings",
+        json!({ "profileId": profile_id, "targetType": "machine" }),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+    assert_eq!(binding["target"]["targetType"], "machine");
+
+    let (effective_status, effective) =
+        json_request(app.clone(), "GET", "/api/runtimes/mcp/effective", json!({})).await;
+    assert_eq!(effective_status, StatusCode::OK);
+    assert_eq!(effective["servers"][0]["serverId"], "srv-docs");
+    assert_eq!(effective["servers"][0]["highRiskContext"], true);
+
+    let (plan_status, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    assert_eq!(plan_status, StatusCode::CREATED);
+    assert_eq!(plan_view["plan"]["dryRun"], true);
+    assert_eq!(plan_view["plan"]["applied"], false);
+    assert_eq!(
+        plan_view["plan"]["actions"][0]["kind"],
+        "manual_unsupported"
+    );
+    assert_eq!(plan_view["plan"]["actions"][0]["blocked"], true);
+    let plan_id = plan_view["plan"]["id"].as_str().expect("plan id");
+    let plan_hash = plan_view["plan"]["planHash"].as_str().expect("plan hash");
+
+    let missing_expiry_status = status_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({ "planHash": plan_hash, "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(missing_expiry_status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    assert_eq!(approved["approvalStatus"], "approved");
+    assert_eq!(approved["approvedButNotApplied"], true);
+    assert_eq!(approved["plan"]["applied"], false);
+
+    let mut update = mcp_profile_body("production docs", false);
+    update["expectedVersion"] = json!(1);
+    let (update_status, updated) =
+        json_request(app.clone(), "PUT", &profile_path, update.clone()).await;
+    assert_eq!(update_status, StatusCode::OK);
+    assert_eq!(updated["version"], 2);
+
+    let (conflict_status, _) = json_request(app.clone(), "PUT", &profile_path, update).await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+
+    let (stale_status, stale) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::OK);
+    assert_eq!(stale["approvalStatus"], "stale");
+    assert!(stale["staleReasons"]
+        .as_array()
+        .expect("stale reasons")
+        .iter()
+        .any(|reason| reason == "desired_config_drift"));
+    assert_eq!(stale["approvedButNotApplied"], false);
+
+    let (_, replacement_plan) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let replacement_id = replacement_plan["plan"]["id"].as_str().expect("plan id");
+    let replacement_hash = replacement_plan["plan"]["planHash"]
+        .as_str()
+        .expect("plan hash");
+    let (reject_status, rejected) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{replacement_id}/reject"),
+        json!({
+            "planHash": replacement_hash,
+            "actor": "api-test",
+            "reason": "requires operator review"
+        }),
+    )
+    .await;
+    assert_eq!(reject_status, StatusCode::OK);
+    assert_eq!(rejected["approvalStatus"], "rejected");
+    assert_eq!(rejected["decision"]["reason"], "requires operator review");
+
+    let binding_id = binding["id"].as_str().expect("binding id");
+    let (unbind_status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/runtimes/mcp/bindings/{binding_id}?expectedVersion=1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(unbind_status, StatusCode::OK);
+
+    let (delete_status, _) = json_request(
+        app,
+        "DELETE",
+        &format!("{profile_path}?expectedVersion=2"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn mcp_profile_api_rejects_plaintext_secret_without_echoing_it() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let mut body = mcp_profile_body("unsafe", true);
+    body["servers"][0]["definition"]["args"] = json!(["--api-key", "sk-do-not-echo-this"]);
+    let (status, response) = json_request(app, "POST", "/api/runtimes/mcp/profiles", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let serialized = response.to_string();
+    assert!(serialized.contains("suspected plaintext secret"));
+    assert!(!serialized.contains("sk-do-not-echo-this"));
+}
+
+#[tokio::test]
+async fn mcp_approval_becomes_stale_after_observation_drift() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(MutableMcpRuntime::default());
+    let app = router(store, runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan_id = plan_view["plan"]["id"].as_str().expect("plan id");
+    let plan_hash = plan_view["plan"]["planHash"].as_str().expect("plan hash");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+
+    runtime
+        .inventory
+        .lock()
+        .expect("mutable MCP inventory should not be poisoned")
+        .diagnostics
+        .push(McpDiagnostic {
+            code: "runtime_drift".to_owned(),
+            severity: McpDiagnosticSeverity::Warning,
+            runtime: "codex".to_owned(),
+            server_id: None,
+            message: "Runtime observation changed".to_owned(),
+            evidence: Vec::new(),
+            observed_at: "2026-07-19T01:00:00Z".to_owned(),
+        });
+
+    let (status, stale) = json_request(
+        app,
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stale["approvalStatus"], "stale");
+    assert!(stale["staleReasons"]
+        .as_array()
+        .expect("stale reasons")
+        .iter()
+        .any(|reason| reason == "observation_drift"));
 }
 
 #[tokio::test]
