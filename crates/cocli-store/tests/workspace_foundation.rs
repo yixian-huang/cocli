@@ -17,6 +17,19 @@ fn temporary_directory_path() -> PathBuf {
     std::env::temp_dir().join(format!("cocli-workspace-dir-{}", Uuid::new_v4()))
 }
 
+/// Host-absolute path that does not need to exist (Windows rejects bare `/…`).
+fn host_absolute(parts: &[&str]) -> String {
+    let mut path = if cfg!(windows) {
+        PathBuf::from(r"C:\")
+    } else {
+        PathBuf::from("/")
+    };
+    for part in parts {
+        path.push(part);
+    }
+    path.to_string_lossy().into_owned()
+}
+
 async fn remove_database(path: &Path) {
     let _ = tokio::fs::remove_file(path).await;
 }
@@ -436,12 +449,13 @@ async fn missing_resources_degrade_without_blocking_subject_reads() {
         .create_channel("recoverable")
         .await
         .expect("channel should be created");
+    let missing = host_absolute(&["definitely", "missing", "cocli-workspace"]);
     let workspace = store
         .attach_workspace(
             "channel",
             channel.id,
             "directory",
-            Some("/definitely/missing/cocli-workspace"),
+            Some(&missing),
             serde_json::json!({"label": "Moved directory"}),
         )
         .await
@@ -595,23 +609,25 @@ async fn directory_and_git_bindings_require_absolute_paths() {
 #[tokio::test]
 async fn canonical_workspace_writes_reject_installation_local_portable_locators() {
     let store = Store::in_memory().await.expect("store should open");
+    let local_git = host_absolute(&["Users", "example", "repository"]);
     assert!(matches!(
         store
             .create_workspace(
                 WorkspaceProviderKey::new("git").expect("provider key"),
                 "Local Git path",
-                Some("/Users/example/repository"),
+                Some(&local_git),
                 serde_json::json!({}),
             )
             .await,
         Err(StoreError::InvalidWorkspacePortableLocator { .. })
     ));
+    let local_directory = host_absolute(&["Users", "example", "documents"]);
     assert!(matches!(
         store
             .create_workspace(
                 WorkspaceProviderKey::new("directory").expect("provider key"),
                 "Local directory path",
-                Some("/Users/example/documents"),
+                Some(&local_directory),
                 serde_json::json!({}),
             )
             .await,
@@ -627,12 +643,13 @@ async fn canonical_workspace_writes_reject_installation_local_portable_locators(
         )
         .await
         .expect("canonical remote should persist");
+    let moved_git = host_absolute(&["Users", "example", "moved-repository"]);
     assert!(matches!(
         store
             .update_workspace(
                 workspace.id,
                 "Moved incorrectly",
-                Some("/Users/example/moved-repository"),
+                Some(&moved_git),
                 serde_json::json!({}),
             )
             .await,

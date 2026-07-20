@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,6 +8,19 @@ use cocli_api::{router, RuntimeError, RuntimeInfo, RuntimeService};
 use cocli_store::{Agent, Message, Store};
 use serde_json::{json, Value};
 use tower::ServiceExt;
+
+/// Host-absolute path that does not need to exist (Windows rejects bare `/…`).
+fn host_absolute(parts: &[&str]) -> String {
+    let mut path = if cfg!(windows) {
+        PathBuf::from(r"C:\")
+    } else {
+        PathBuf::from("/")
+    };
+    for part in parts {
+        path.push(part);
+    }
+    path.to_string_lossy().into_owned()
+}
 
 #[derive(Debug)]
 struct FakeRuntime;
@@ -80,13 +94,14 @@ async fn workspace_routes_preserve_legacy_shape_and_support_share_rebind_and_det
     .await;
     let agent_id = agent["id"].as_str().expect("agent id");
 
+    let missing_portable = host_absolute(&["definitely", "missing", "portable"]);
     let (created_status, created) = json_request(
         app.clone(),
         "POST",
         &format!("/api/channels/{channel_id}/workspaces"),
         json!({
             "kind": "directory",
-            "locator": "/definitely/missing/portable",
+            "locator": missing_portable,
             "metadata": {"label": "Portable files"}
         }),
     )
@@ -95,7 +110,7 @@ async fn workspace_routes_preserve_legacy_shape_and_support_share_rebind_and_det
     assert_eq!(created["owner_type"], "channel");
     assert_eq!(created["owner_id"], channel_id);
     assert_eq!(created["kind"], "directory");
-    assert_eq!(created["locator"], "/definitely/missing/portable");
+    assert_eq!(created["locator"], missing_portable);
     assert_eq!(created["provider_key"], "directory");
     let workspace_id = created["id"].as_str().expect("workspace id");
     let (canonical_status, canonical) = json_request(
@@ -190,11 +205,12 @@ async fn workspace_routes_preserve_legacy_shape_and_support_share_rebind_and_det
     assert!(updated.get("kind").is_none());
     assert!(updated.get("locator").is_none());
 
+    let still_missing = host_absolute(&["still", "missing"]);
     let (rebind_status, rebound) = json_request(
         app.clone(),
         "PUT",
         &format!("/api/workspaces/{workspace_id}/binding"),
-        json!({"local_locator": "/still/missing", "secret_ref": null}),
+        json!({"local_locator": still_missing, "secret_ref": null}),
     )
     .await;
     assert_eq!(rebind_status, StatusCode::OK);
@@ -279,19 +295,17 @@ async fn canonical_workspace_routes_create_update_and_keep_binding_local() {
     assert!(workspace.get("locator").is_none());
     let workspace_id = workspace["id"].as_str().expect("workspace id");
 
+    let missing_worktree = host_absolute(&["definitely", "missing", "project-worktree"]);
     let (binding_status, binding) = json_request(
         app.clone(),
         "PUT",
         &format!("/api/workspaces/{workspace_id}/binding"),
-        json!({"local_locator": "/definitely/missing/project-worktree"}),
+        json!({"local_locator": missing_worktree}),
     )
     .await;
     assert_eq!(binding_status, StatusCode::OK);
     assert_eq!(binding["state"], "needs_attention");
-    assert_eq!(
-        binding["local_locator"],
-        "/definitely/missing/project-worktree"
-    );
+    assert_eq!(binding["local_locator"], missing_worktree);
 
     let (read_status, read) = json_request(
         app.clone(),
@@ -327,6 +341,7 @@ async fn canonical_workspace_routes_create_update_and_keep_binding_local() {
     assert_eq!(updated["metadata"]["default_branch"], "trunk");
     assert!(updated.get("locator").is_none());
 
+    let abs_git_path = host_absolute(&["Users", "example", "repository"]);
     let (git_path_status, _) = json_request(
         app.clone(),
         "POST",
@@ -334,13 +349,14 @@ async fn canonical_workspace_routes_create_update_and_keep_binding_local() {
         json!({
             "provider_key": "git",
             "display_name": "Not portable",
-            "portable_locator": "/Users/example/repository",
+            "portable_locator": abs_git_path,
             "metadata": {}
         }),
     )
     .await;
     assert_eq!(git_path_status, StatusCode::BAD_REQUEST);
 
+    let abs_directory_path = host_absolute(&["Users", "example", "documents"]);
     let (directory_path_status, _) = json_request(
         app,
         "POST",
@@ -348,7 +364,7 @@ async fn canonical_workspace_routes_create_update_and_keep_binding_local() {
         json!({
             "provider_key": "directory",
             "display_name": "Local directory",
-            "portable_locator": "/Users/example/documents",
+            "portable_locator": abs_directory_path,
             "metadata": {}
         }),
     )

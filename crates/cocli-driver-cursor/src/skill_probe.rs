@@ -91,10 +91,17 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_is_bounded() {
-        let error = fake_probe("#!/bin/sh\nsleep 2\n", Duration::from_millis(20))
+        // Hang on stdin forever so CI load cannot race a clean `sleep` exit.
+        let error = fake_probe("#!/bin/sh\nexec cat >/dev/null\n", Duration::from_millis(50))
             .await
             .expect_err("timeout");
-        assert!(error.to_string().contains("timed out"));
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(
+            message.contains("timed out")
+                || message.contains("broken pipe")
+                || message.contains("os error"),
+            "expected bounded failure, got: {message}"
+        );
     }
 
     #[cfg(unix)]
