@@ -1164,6 +1164,55 @@ textarea::placeholder {
   font-size: 11px;
 }
 
+.composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.composer-secondary {
+  border: 1px solid var(--line) !important;
+  background: transparent !important;
+  color: var(--text-muted) !important;
+  min-width: auto !important;
+}
+
+.composer-shortcut {
+  margin: var(--space-2) 0 0;
+  font-size: 0.75rem;
+}
+
+.agent-state-dot.receiving {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.agent-state-dot.working {
+  background: #22c55e;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.25);
+}
+
+.agent-state-dot.paused {
+  background: var(--text-muted);
+  opacity: 0.7;
+}
+
+.agent-row.paused {
+  opacity: 0.88;
+}
+
+.channel-jump {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .composer button {
   min-width: 108px;
   border-color: var(--accent);

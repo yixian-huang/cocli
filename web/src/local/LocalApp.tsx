@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type FormEvent,
+  type KeyboardEvent,
 } from 'react'
 import {
   CheckCircle2,
@@ -79,6 +80,53 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Unexpected local service error'
 }
 
+/** True when the Agent will accept channel/direct deliveries and drive a Runtime. */
+function agentReceivesMessages(agent: Agent): boolean {
+  return agent.status === 'running' && agent.lifecycle_status === 'active'
+}
+
+function applyLiveEvent(
+  event: LiveEvent,
+  previous: LiveTurn | undefined,
+  liveToolLabel: string,
+): LiveTurn {
+  const next: LiveTurn = previous ?? {
+    agentId: event.agentId as string,
+    messageId: event.messageId,
+    text: '',
+    thinking: '',
+    activity: [],
+    phase: 'running',
+    canCancel: false,
+  }
+  const turn: LiveTurn = {
+    ...next,
+    messageId: event.messageId ?? next.messageId,
+  }
+  const text = typeof event.payload.text === 'string' ? event.payload.text : ''
+  if (event.kind === 'turn_started') {
+    turn.text = ''
+    turn.thinking = ''
+    turn.activity = []
+    turn.phase = 'running'
+  } else if (event.kind === 'thinking_delta') {
+    turn.thinking = `${turn.thinking}${text}`.slice(-240)
+  } else if (event.kind === 'text_delta') {
+    turn.text += text
+  } else if (event.kind === 'tool_started') {
+    const name = typeof event.payload.name === 'string' ? event.payload.name : liveToolLabel
+    turn.activity = [...turn.activity, name].slice(-4)
+  } else if (event.kind === 'turn_error') {
+    turn.phase = 'error'
+  } else if (event.kind === 'rate_limited') {
+    turn.phase = 'limited'
+  } else if (event.kind === 'turn_finished') {
+    const status = typeof event.payload.status === 'string' ? event.payload.status : ''
+    if (status === 'Failed' || status === 'Cancelled') turn.phase = 'error'
+  }
+  return turn
+}
+
 function resolveInitialTheme(): LocalTheme {
   try {
     const stored = localStorage.getItem('cocli-local-theme')
@@ -114,6 +162,7 @@ export function LocalApp() {
   const [agentInstructions, setAgentInstructions] = useState('')
   const [inviteAgentId, setInviteAgentId] = useState('')
   const [liveTurns, setLiveTurns] = useState<Record<string, LiveTurn>>({})
+  const [agentLiveTurns, setAgentLiveTurns] = useState<Record<string, LiveTurn>>({})
   const [liveConnection, setLiveConnection] = useState<LiveConnectionState>('connecting')
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -133,7 +182,11 @@ export function LocalApp() {
   const [pending, setPending] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const messageEndRef = useRef<HTMLDivElement>(null)
+  const agentMessageEndRef = useRef<HTMLDivElement>(null)
+  const channelComposerRef = useRef<HTMLFormElement>(null)
+  const agentComposerRef = useRef<HTMLFormElement>(null)
   const liveTurnCleanupRef = useRef<Record<string, number>>({})
+  const agentLiveTurnCleanupRef = useRef<Record<string, number>>({})
   const t = useCallback(
     (key: LocalCopyKey, values?: Record<string, string | number>) =>
       translate(language, key, values),
@@ -151,6 +204,10 @@ export function LocalApp() {
   const availableChannelAgents = useMemo(
     () => agents.filter((agent) => !channelAgents.some((member) => member.id === agent.id)),
     [agents, channelAgents],
+  )
+  const receivingChannelAgents = useMemo(
+    () => channelAgents.filter(agentReceivesMessages),
+    [channelAgents],
   )
   const installedRuntimes = useMemo(
     () => runtimes.filter((runtime) => runtime.installed),
@@ -374,40 +431,14 @@ export function LocalApp() {
             // Live controls are optional; execution visibility remains available.
           })
         }
-        setLiveTurns((current) => {
-          const previous = current[event.agentId as string] ?? {
-            agentId: event.agentId as string,
-            messageId: event.messageId,
-            text: '',
-            thinking: '',
-            activity: [],
-            phase: 'running' as const,
-            canCancel: false,
-          }
-          const next: LiveTurn = { ...previous, messageId: event.messageId ?? previous.messageId }
-          const text = typeof event.payload.text === 'string' ? event.payload.text : ''
-          if (event.kind === 'turn_started') {
-            next.text = ''
-            next.thinking = ''
-            next.activity = []
-            next.phase = 'running'
-          } else if (event.kind === 'thinking_delta') {
-            next.thinking = `${next.thinking}${text}`.slice(-240)
-          } else if (event.kind === 'text_delta') {
-            next.text += text
-          } else if (event.kind === 'tool_started') {
-            const name = typeof event.payload.name === 'string' ? event.payload.name : t('liveTool')
-            next.activity = [...next.activity, name].slice(-4)
-          } else if (event.kind === 'turn_error') {
-            next.phase = 'error'
-          } else if (event.kind === 'rate_limited') {
-            next.phase = 'limited'
-          } else if (event.kind === 'turn_finished') {
-            const status = typeof event.payload.status === 'string' ? event.payload.status : ''
-            if (status === 'Failed' || status === 'Cancelled') next.phase = 'error'
-          }
-          return { ...current, [event.agentId as string]: next }
-        })
+        setLiveTurns((current) => ({
+          ...current,
+          [event.agentId as string]: applyLiveEvent(
+            event,
+            current[event.agentId as string],
+            t('liveTool'),
+          ),
+        }))
       },
       setLiveConnection,
     )
@@ -424,8 +455,84 @@ export function LocalApp() {
   }, [activeChannelId, t])
 
   useEffect(() => {
+    if (workspaceView !== 'agent' || !activeAgentId) {
+      setAgentLiveTurns({})
+      return
+    }
+    let cancelled = false
+    setAgentLiveTurns({})
+    const agentId = activeAgentId
+    const refreshAgentMessages = async () => {
+      try {
+        const nextMessages = await localApi.listAgentMessages(agentId)
+        if (!cancelled) setAgentMessages(nextMessages)
+      } catch {
+        // Polling remains the fallback if live refresh fails.
+      }
+    }
+    const unsubscribe = localApi.subscribeToEvents((event: LiveEvent) => {
+      if (event.agentId !== agentId) return
+      if (event.kind === 'delivery_completed') {
+        const timer = agentLiveTurnCleanupRef.current[agentId]
+        if (timer) window.clearTimeout(timer)
+        delete agentLiveTurnCleanupRef.current[agentId]
+        setAgentLiveTurns((current) => {
+          const next = { ...current }
+          delete next[agentId]
+          return next
+        })
+        void refreshAgentMessages()
+        return
+      }
+      if (event.kind === 'turn_finished') {
+        const existingTimer = agentLiveTurnCleanupRef.current[agentId]
+        if (existingTimer) window.clearTimeout(existingTimer)
+        agentLiveTurnCleanupRef.current[agentId] = window.setTimeout(() => {
+          delete agentLiveTurnCleanupRef.current[agentId]
+          setAgentLiveTurns((current) => {
+            if (current[agentId]?.messageId !== event.messageId) return current
+            const next = { ...current }
+            delete next[agentId]
+            return next
+          })
+          void refreshAgentMessages()
+        }, 4_000)
+      }
+      if (event.kind === 'turn_started') {
+        const timer = agentLiveTurnCleanupRef.current[agentId]
+        if (timer) window.clearTimeout(timer)
+        delete agentLiveTurnCleanupRef.current[agentId]
+        void localApi.getRuntimeStatus(agentId).then((runtimeStatus) => {
+          setAgentLiveTurns((current) => {
+            const turn = current[agentId]
+            if (!turn) return current
+            return {
+              ...current,
+              [agentId]: { ...turn, canCancel: runtimeStatus.supports_turn_cancel },
+            }
+          })
+        }).catch(() => undefined)
+      }
+      setAgentLiveTurns((current) => ({
+        ...current,
+        [agentId]: applyLiveEvent(event, current[agentId], t('liveTool')),
+      }))
+    })
+    return () => {
+      cancelled = true
+      unsubscribe()
+      Object.values(agentLiveTurnCleanupRef.current).forEach((timer) => window.clearTimeout(timer))
+      agentLiveTurnCleanupRef.current = {}
+    }
+  }, [workspaceView, activeAgentId, t])
+
+  useEffect(() => {
     messageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages])
+
+  useEffect(() => {
+    agentMessageEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+  }, [agentMessages, agentLiveTurns])
 
   useEffect(() => {
     if (workspaceView !== 'chat' || !pendingMessageId) return
@@ -521,15 +628,36 @@ export function LocalApp() {
     }
   }
 
+  function mergeAgentUpdate(updated: Agent) {
+    setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent))
+    setChannelAgents((current) => current.map((agent) => (
+      agent.id === updated.id ? updated : agent
+    )))
+  }
+
   async function setAgentStatus(agentId: string, status: AgentStatus) {
     setPending(agentId)
     setError(null)
     try {
       const updated = await localApi.setAgentStatus(agentId, status)
-      setAgents((current) => current.map((agent) => agent.id === updated.id ? updated : agent))
-      setChannelAgents((current) => current.map((agent) => (
-        agent.id === updated.id ? updated : agent
-      )))
+      mergeAgentUpdate(updated)
+    } catch (nextError) {
+      setError(errorMessage(nextError))
+    } finally {
+      setPending(null)
+    }
+  }
+
+  async function resumeChannelReceivers() {
+    const paused = channelAgents.filter((agent) => !agentReceivesMessages(agent))
+    if (paused.length === 0) return
+    setPending('resume-members')
+    setError(null)
+    try {
+      for (const agent of paused) {
+        const updated = await localApi.setAgentStatus(agent.id, 'running')
+        mergeAgentUpdate(updated)
+      }
     } catch (nextError) {
       setError(errorMessage(nextError))
     } finally {
@@ -556,10 +684,24 @@ export function LocalApp() {
     }
   }
 
+  function onComposerKeyDown(
+    event: KeyboardEvent<HTMLTextAreaElement>,
+    formRef: { current: HTMLFormElement | null },
+  ) {
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault()
+      formRef.current?.requestSubmit()
+    }
+  }
+
   async function sendAgentMessage(event: FormEvent) {
     event.preventDefault()
     const content = agentDraft.trim()
     if (!activeAgentId || !content) return
+    if (activeAgent && !agentReceivesMessages(activeAgent)) {
+      setError(t('agentMustBeReceiving'))
+      return
+    }
     setPending('agent-message')
     setError(null)
     try {
@@ -1083,7 +1225,7 @@ export function LocalApp() {
             <div ref={messageEndRef} />
           </div>
 
-          <form className="composer" onSubmit={sendMessage}>
+          <form className="composer" ref={channelComposerRef} onSubmit={sendMessage}>
             <label htmlFor="channel-message">
               {activeChannel ? t('messageFor', { channel: activeChannel.name }) : t('selectChannelFirst')}
             </label>
@@ -1091,43 +1233,70 @@ export function LocalApp() {
               id="channel-message"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
+              onKeyDown={(event) => onComposerKeyDown(event, channelComposerRef)}
               placeholder={t('messagePlaceholder')}
               disabled={!activeChannel}
               rows={3}
             />
             <div>
               <span>
-                {channelAgents.some((agent) => agent.status === 'running')
-                  ? t('runningAgentsHint')
-                  : t('noRunningAgentHint')}
+                {receivingChannelAgents.length > 0
+                  ? t('receivingAgentsHint', { count: receivingChannelAgents.length })
+                  : channelAgents.length > 0
+                    ? t('noReceivingAgentHint')
+                    : t('noRunningAgentHint')}
               </span>
-              <button
-                type="submit"
-                disabled={!activeChannel || !draft.trim() || pending === 'message'}
-              >
-                {pending === 'message' ? t('sending') : t('sendMessage')}
-              </button>
+              <div className="composer-actions">
+                {channelAgents.length > 0 && receivingChannelAgents.length === 0 && (
+                  <button
+                    type="button"
+                    className="composer-secondary"
+                    disabled={pending === 'resume-members'}
+                    onClick={() => void resumeChannelReceivers()}
+                  >
+                    {pending === 'resume-members' ? t('resumingMembers') : t('resumeMembers')}
+                  </button>
+                )}
+                <button
+                  type="submit"
+                  disabled={!activeChannel || !draft.trim() || pending === 'message'}
+                >
+                  {pending === 'message' ? t('sending') : t('sendMessage')}
+                </button>
+              </div>
             </div>
+            <p className="composer-shortcut quiet-copy">{t('composerShortcut')}</p>
           </form>
         </section>
 
         <aside className="agent-panel" aria-label={t('channelAgents')}>
           <div className="section-heading">
             <h2>{t('agents')}</h2>
-            <span>{channelAgents.length}</span>
+            <span>
+              {receivingChannelAgents.length}/{channelAgents.length}
+            </span>
           </div>
 
           <div className="agent-list">
-            {channelAgents.map((agent) => (
-              <article className="agent-row" key={agent.id}>
+            {channelAgents.map((agent) => {
+              const receiving = agentReceivesMessages(agent)
+              const live = Boolean(liveTurns[agent.id])
+              return (
+              <article className={`agent-row${receiving ? ' receiving' : ' paused'}`} key={agent.id}>
                 <div className="agent-title">
-                  <span className={`agent-state-dot ${agent.lifecycle_status}`} aria-hidden="true" />
+                  <span
+                    className={`agent-state-dot ${receiving ? (live ? 'working' : 'receiving') : 'paused'}`}
+                    aria-hidden="true"
+                  />
                   <strong>{agent.name}</strong>
                 </div>
                 <dl>
                   <div><dt>{t('runtime')}</dt><dd>{agent.runtime}</dd></div>
                   <div><dt>{t('model')}</dt><dd>{agent.model ?? t('defaultModel')}</dd></div>
-                  <div><dt>{t('lifecycle')}</dt><dd>{agent.lifecycle_status}</dd></div>
+                  <div>
+                    <dt>{t('delivery')}</dt>
+                    <dd>{live ? t('agentWorking') : receiving ? t('agentReceiving') : t('agentPaused')}</dd>
+                  </div>
                 </dl>
                 <button
                   type="button"
@@ -1143,13 +1312,14 @@ export function LocalApp() {
                   disabled={pending === agent.id}
                   onClick={() => void setAgentStatus(
                     agent.id,
-                    agent.lifecycle_status === 'active' ? 'stopped' : 'running',
+                    receiving ? 'stopped' : 'running',
                   )}
                 >
-                  {agent.lifecycle_status === 'active' ? t('pauseAgent') : t('resumeAgent')}
+                  {receiving ? t('pauseAgent') : t('resumeAgent')}
                 </button>
               </article>
-            ))}
+              )
+            })}
             {activeChannel && channelAgents.length === 0 && (
               <p className="quiet-copy">{t('noAgents')}</p>
             )}
@@ -1377,7 +1547,16 @@ export function LocalApp() {
                     <p>{activeAgent.description || activeAgent.instructions || `${activeAgent.runtime} · ${activeAgent.model ?? t('defaultModel')}`}</p>
                   </div>
                   <dl>
-                    <div><dt>{t('lifecycle')}</dt><dd>{activeAgent.lifecycle_status}</dd></div>
+                    <div>
+                      <dt>{t('delivery')}</dt>
+                      <dd>
+                        {agentLiveTurns[activeAgent.id]
+                          ? t('agentWorking')
+                          : agentReceivesMessages(activeAgent)
+                            ? t('agentReceiving')
+                            : t('agentPaused')}
+                      </dd>
+                    </div>
                     <div><dt>{t('runtime')}</dt><dd>{activeAgent.runtime}</dd></div>
                     <div><dt>{t('model')}</dt><dd>{activeAgent.model ?? t('defaultModel')}</dd></div>
                   </dl>
@@ -1387,12 +1566,106 @@ export function LocalApp() {
                     disabled={pending === activeAgent.id}
                     onClick={() => void setAgentStatus(
                       activeAgent.id,
-                      activeAgent.lifecycle_status === 'active' ? 'stopped' : 'running',
+                      agentReceivesMessages(activeAgent) ? 'stopped' : 'running',
                     )}
                   >
-                    {activeAgent.lifecycle_status === 'active' ? t('pauseAgent') : t('resumeAgent')}
+                    {agentReceivesMessages(activeAgent) ? t('pauseAgent') : t('resumeAgent')}
                   </button>
                 </header>
+
+                <section className="agent-direct-conversation">
+                  <header><h2>{t('agentDirect')}</h2></header>
+                  <div className="agent-direct-messages" aria-live="polite">
+                    {agentMessages.length === 0 && Object.keys(agentLiveTurns).length === 0 && (
+                      <p>{t('agentNoMessages')}</p>
+                    )}
+                    {agentMessages.map((message) => (
+                      <article className={`message ${message.role}`} key={message.id}>
+                        <div className="message-meta">
+                          <strong>{message.role === 'user' ? t('you') : activeAgent.name}</strong>
+                          <span>#{message.seq}</span>
+                          <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
+                        </div>
+                        <p>{message.content}</p>
+                      </article>
+                    ))}
+                    {Object.values(agentLiveTurns).map((turn) => (
+                      <article className={`live-turn ${turn.phase}`} key={`agent-live-${turn.agentId}`}>
+                        <header>
+                          <div>
+                            <CircleDot size={14} aria-hidden="true" />
+                            <strong>{activeAgent.name}</strong>
+                          </div>
+                          <div className="live-turn-actions">
+                            <span>
+                              {turn.phase === 'limited'
+                                ? t('liveLimited')
+                                : turn.phase === 'error' ? t('liveError') : t('liveRunning')}
+                            </span>
+                            {turn.canCancel && (
+                              <button
+                                type="button"
+                                disabled={pending === `cancel-${turn.agentId}`}
+                                onClick={() => void cancelLiveTurn(turn.agentId)}
+                              >
+                                {pending === `cancel-${turn.agentId}` ? t('liveCancelling') : t('liveCancel')}
+                              </button>
+                            )}
+                          </div>
+                        </header>
+                        {turn.thinking && !turn.text && <p className="live-thinking">{turn.thinking}</p>}
+                        {turn.text && <p className="live-output">{turn.text}</p>}
+                        {turn.activity.length > 0 && (
+                          <ul>
+                            {turn.activity.map((activity, index) => (
+                              <li key={`${activity}-${index}`}>
+                                <Wrench size={12} aria-hidden="true" />
+                                {activity}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </article>
+                    ))}
+                    <div ref={agentMessageEndRef} />
+                  </div>
+                  <form
+                    className="agent-direct-composer"
+                    ref={agentComposerRef}
+                    onSubmit={sendAgentMessage}
+                  >
+                    <textarea
+                      value={agentDraft}
+                      onChange={(event) => setAgentDraft(event.target.value)}
+                      onKeyDown={(event) => onComposerKeyDown(event, agentComposerRef)}
+                      placeholder={t('agentDirectPlaceholder')}
+                      rows={3}
+                    />
+                    <div className="composer-actions">
+                      {!agentReceivesMessages(activeAgent) && (
+                        <button
+                          type="button"
+                          className="composer-secondary"
+                          disabled={pending === activeAgent.id}
+                          onClick={() => void setAgentStatus(activeAgent.id, 'running')}
+                        >
+                          {t('resumeAgent')}
+                        </button>
+                      )}
+                      <button
+                        type="submit"
+                        disabled={
+                          !agentDraft.trim()
+                          || pending === 'agent-message'
+                          || !agentReceivesMessages(activeAgent)
+                        }
+                      >
+                        {pending === 'agent-message' ? t('sending') : t('sendMessage')}
+                      </button>
+                    </div>
+                    <p className="composer-shortcut quiet-copy">{t('composerShortcut')}</p>
+                  </form>
+                </section>
 
                 <div className="agent-context-grid">
                   <article>
@@ -1410,7 +1683,24 @@ export function LocalApp() {
                   <article>
                     <h2>{t('memberChannels')}</h2>
                     {agentChannels.length > 0
-                      ? <ul>{agentChannels.map((channel) => <li key={channel.id}>#{channel.name}</li>)}</ul>
+                      ? (
+                        <ul>
+                          {agentChannels.map((channel) => (
+                            <li key={channel.id}>
+                              <button
+                                type="button"
+                                className="channel-jump"
+                                onClick={() => {
+                                  setActiveChannelId(channel.id)
+                                  setWorkspaceView('chat')
+                                }}
+                              >
+                                #{channel.name}
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )
                       : <p>{t('noChannels')}</p>}
                   </article>
                   <article className="advanced-resource-handles-card">
@@ -1460,37 +1750,6 @@ export function LocalApp() {
                       : <p>{t('noOperations')}</p>}
                   </article>
                 </div>
-
-                <section className="agent-direct-conversation">
-                  <header><h2>{t('agentDirect')}</h2></header>
-                  <div className="agent-direct-messages" aria-live="polite">
-                    {agentMessages.length === 0 && <p>{t('agentNoMessages')}</p>}
-                    {agentMessages.map((message) => (
-                      <article className={`message ${message.role}`} key={message.id}>
-                        <div className="message-meta">
-                          <strong>{message.role === 'user' ? t('you') : activeAgent.name}</strong>
-                          <span>#{message.seq}</span>
-                          <time dateTime={message.created_at}>{formatTime(message.created_at)}</time>
-                        </div>
-                        <p>{message.content}</p>
-                      </article>
-                    ))}
-                  </div>
-                  <form className="agent-direct-composer" onSubmit={sendAgentMessage}>
-                    <textarea
-                      value={agentDraft}
-                      onChange={(event) => setAgentDraft(event.target.value)}
-                      placeholder={t('agentDirectPlaceholder')}
-                      rows={3}
-                    />
-                    <button
-                      type="submit"
-                      disabled={!agentDraft.trim() || pending === 'agent-message'}
-                    >
-                      {pending === 'agent-message' ? t('sending') : t('sendMessage')}
-                    </button>
-                  </form>
-                </section>
               </>
             )}
           </section>

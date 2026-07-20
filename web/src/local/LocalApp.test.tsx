@@ -1742,9 +1742,11 @@ describe('LocalApp', () => {
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
     expect(await screen.findByText('builder')).toBeInTheDocument()
+    expect(screen.getByText(/1 Agent\(s\) will receive this message/)).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     expect(await screen.findByRole('heading', { name: '@builder' })).toBeInTheDocument()
+    expect(screen.getByText('Receiving')).toBeInTheDocument()
     fireEvent.click(screen.getByText('Optional resource handles'))
     fireEvent.change(screen.getByLabelText('Resource location'), {
       target: { value: '/tmp/general-purpose-work' },
@@ -1758,8 +1760,12 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     expect(await screen.findByText('direct: Research a non-code topic')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Pause Agent' }))
-    expect(await screen.findByText('paused')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Pause delivery' }))
+    expect(await screen.findByText('Paused')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Resume delivery' }))
+    expect(await screen.findByText('Receiving')).toBeInTheDocument()
   })
 
   it('searches durable local data and exposes a state backup download', async () => {
