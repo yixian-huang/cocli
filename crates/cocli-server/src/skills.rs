@@ -1886,7 +1886,7 @@ mod tests {
         assert!(report
             .search_paths
             .iter()
-            .any(|path| path.path.ends_with(".cursor/skills")));
+            .any(|path| { Path::new(&path.path).ends_with(Path::new(".cursor").join("skills")) }));
         assert!(!config.workspace_root.exists());
     }
 

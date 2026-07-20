@@ -25,7 +25,7 @@ and reading [DESIGN.md](../DESIGN.md) / [ROADMAP.md](../ROADMAP.md).
 | macOS Intel (`x86_64-apple-darwin`) | Should work | Planned | No |
 | Linux x86_64 (`x86_64-unknown-linux-gnu`) | **Yes** | **Yes** (fmt/clippy/test gate) | No |
 | Linux aarch64 (`aarch64-unknown-linux-gnu`) | Via `cross` / native | Planned (OpenSSL packaging) | No |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | **Yes** with MSVC + Node 20 | **Yes** | No |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | **Yes** with MSVC + Node 20 | **Yes** (build + non-Unix-shell tests; process lifecycle tests that spawn `/bin/sh` are Unix-only) | No |
 
 **Prerequisites:** Rust **1.80+** (workspace `rust-version` / `rust-toolchain.toml`), Node **20+** (web build), and optionally a Runtime CLI for real execution.
 

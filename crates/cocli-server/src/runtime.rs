@@ -2368,6 +2368,9 @@ pub enum RuntimeSetupError {
 }
 
 #[cfg(test)]
+// Fake drivers spawn `/bin/sh` scripts for process lifecycle coverage.
+// Windows CI still builds the library; these integration paths are Unix-only.
+#[cfg(unix)]
 mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
