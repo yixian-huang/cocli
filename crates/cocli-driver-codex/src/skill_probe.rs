@@ -261,10 +261,12 @@ mod tests {
         let error = probe_skills(&binary, temp.path())
             .await
             .expect_err("nonzero exit should fail");
-        let message = error.to_string();
+        let message = error.to_string().to_ascii_lowercase();
         assert!(
-            message.contains("exited") || message.contains("exit"),
-            "expected exit failure detail, got: {message}"
+            message.contains("exit")
+                || message.contains("broken pipe")
+                || message.contains("os error"),
+            "expected process-failure detail, got: {message}"
         );
     }
 

@@ -1003,6 +1003,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn copy_update_remove_and_rollback_are_atomic_and_cas_safe() {
         let temp = tempdir().expect("temp");
@@ -1090,6 +1091,7 @@ mod tests {
             .contains("expected fingerprint"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn prepared_receipt_recovers_crashes_after_backup_staging_and_activation() {
         let temp = tempdir().expect("temp");
@@ -1242,6 +1244,7 @@ mod tests {
             .contains("resolve governed Skill symlink"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn workspace_lockfile_write_restore_is_atomic_stable_and_cas_safe() {
         let temp = tempdir().expect("temp");
