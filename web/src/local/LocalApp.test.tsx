@@ -1682,19 +1682,19 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Set up your first local task' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Start with a Channel or Agent' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
 
     expect(await screen.findByText('builder')).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Task for #product-loop'), {
+    fireEvent.change(screen.getByLabelText('Message in #product-loop'), {
       target: { value: 'Ship the loop' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Run task' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
 
     expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Ship the loop')).toBeInTheDocument())
-    expect(screen.queryByRole('heading', { name: 'Set up your first local task' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Start with a Channel or Agent' })).not.toBeInTheDocument()
   })
 
   it('renders live runtime events from the execution stream', async () => {
@@ -1745,16 +1745,17 @@ describe('LocalApp', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     expect(await screen.findByRole('heading', { name: '@builder' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Workspace location'), {
+    fireEvent.click(screen.getByText('Optional resource handles'))
+    fireEvent.change(screen.getByLabelText('Resource location'), {
       target: { value: '/tmp/general-purpose-work' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Attach Workspace' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Attach handle' }))
     expect(await screen.findByText('directory workspace · directory')).toBeInTheDocument()
 
     fireEvent.change(screen.getByPlaceholderText('Describe the requirement for this Agent…'), {
       target: { value: 'Research a non-code topic' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Run task' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     expect(await screen.findByText('direct: Research a non-code topic')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Pause Agent' }))
@@ -1816,7 +1817,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Language' }))
     fireEvent.click(screen.getByRole('option', { name: /简体中文/ }))
 
-    expect(await screen.findByRole('heading', { name: '添加 Agent' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: '邀请 Agent' })).toBeInTheDocument()
     expect(document.documentElement.lang).toBe('zh-CN')
     expect(localStorage.getItem('cocli-local-language')).toBe('zh-CN')
   })
@@ -2029,8 +2030,8 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
     expect(await screen.findByText('builder')).toBeInTheDocument()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Tasks' }))
-    expect(await screen.findByRole('heading', { name: 'Task board' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Coordination' }))
+    expect(await screen.findByRole('heading', { name: 'Coordination' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('New task'), {
       target: { value: 'Prepare release' },
     })
@@ -2098,10 +2099,10 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
     expect(await screen.findByText('builder')).toBeInTheDocument()
 
-    fireEvent.change(screen.getByLabelText('Task for #product-loop'), {
+    fireEvent.change(screen.getByLabelText('Message in #product-loop'), {
       target: { value: 'Ship the loop' },
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Run task' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
     expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))

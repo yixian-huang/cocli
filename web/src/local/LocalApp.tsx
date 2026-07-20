@@ -124,7 +124,6 @@ export function LocalApp() {
   const [pendingMessageId, setPendingMessageId] = useState<string | null>(null)
   const [channelName, setChannelName] = useState('')
   const [channelDescription, setChannelDescription] = useState('')
-  const [channelGoal, setChannelGoal] = useState('')
   const [agentName, setAgentName] = useState('')
   const [runtimeName, setRuntimeName] = useState('')
   const [model, setModel] = useState('')
@@ -454,13 +453,11 @@ export function LocalApp() {
       const channel = await localApi.createChannel({
         name,
         description: channelDescription.trim() || undefined,
-        goal: channelGoal.trim() || undefined,
       })
       setChannels((current) => [...current, channel])
       setActiveChannelId(channel.id)
       setChannelName('')
       setChannelDescription('')
-      setChannelGoal('')
     } catch (nextError) {
       setError(errorMessage(nextError))
     } finally {
@@ -799,19 +796,20 @@ export function LocalApp() {
           </button>
           <button
             type="button"
-            className={workspaceView === 'tasks' ? 'active' : ''}
-            onClick={() => setWorkspaceView('tasks')}
-          >
-            <ListTodo size={14} aria-hidden="true" />
-            {t('tasksWorkspace')}
-          </button>
-          <button
-            type="button"
             className={workspaceView === 'knowledge' ? 'active' : ''}
             onClick={() => setWorkspaceView('knowledge')}
           >
             <BookOpen size={14} aria-hidden="true" />
             {t('knowledgeMemory')}
+          </button>
+          <button
+            type="button"
+            className={`nav-secondary-tool${workspaceView === 'tasks' ? ' active' : ''}`}
+            onClick={() => setWorkspaceView('tasks')}
+            title={t('tasksWorkspaceHint')}
+          >
+            <ListTodo size={14} aria-hidden="true" />
+            {t('tasksWorkspace')}
           </button>
         </nav>
       )}
@@ -951,14 +949,6 @@ export function LocalApp() {
                 onChange={(event) => setChannelDescription(event.target.value)}
                 placeholder={t('channelDescriptionPlaceholder')}
               />
-              <label htmlFor="channel-goal">{t('channelGoal')}</label>
-              <textarea
-                id="channel-goal"
-                value={channelGoal}
-                onChange={(event) => setChannelGoal(event.target.value)}
-                placeholder={t('channelGoalPlaceholder')}
-                rows={2}
-              />
               <button type="submit" disabled={!channelName.trim() || pending === 'channel'}>
                 {t('add')}
               </button>
@@ -995,7 +985,6 @@ export function LocalApp() {
               <span className="eyebrow">{t('localChannel')}</span>
               <h1>{activeChannel ? `# ${activeChannel.name}` : t('chooseChannel')}</h1>
               {activeChannel?.description && <p>{activeChannel.description}</p>}
-              {activeChannel?.goal && <small>{t('channelGoal')}: {activeChannel.goal}</small>}
             </div>
             {activeChannel && <span>{agentCountLabel}</span>}
           </header>
@@ -1031,8 +1020,8 @@ export function LocalApp() {
             {activeChannel && !messagesLoading && messages.length === 0 && (
               <div className="empty-state">
                 <span>02</span>
-                <h2>{t('startTask')}</h2>
-                <p>{t('startTaskDescription')}</p>
+                <h2>{t('startConversation')}</h2>
+                <p>{t('startConversationDescription')}</p>
               </div>
             )}
             {messages.map((message) => (
@@ -1091,14 +1080,14 @@ export function LocalApp() {
           </div>
 
           <form className="composer" onSubmit={sendMessage}>
-            <label htmlFor="task-message">
-              {activeChannel ? t('taskFor', { channel: activeChannel.name }) : t('selectChannelFirst')}
+            <label htmlFor="channel-message">
+              {activeChannel ? t('messageFor', { channel: activeChannel.name }) : t('selectChannelFirst')}
             </label>
             <textarea
-              id="task-message"
+              id="channel-message"
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
-              placeholder={t('taskPlaceholder')}
+              placeholder={t('messagePlaceholder')}
               disabled={!activeChannel}
               rows={3}
             />
@@ -1112,7 +1101,7 @@ export function LocalApp() {
                 type="submit"
                 disabled={!activeChannel || !draft.trim() || pending === 'message'}
               >
-                {pending === 'message' ? t('running') : t('runTask')}
+                {pending === 'message' ? t('sending') : t('sendMessage')}
               </button>
             </div>
           </form>
@@ -1257,11 +1246,12 @@ export function LocalApp() {
           </form>
 
           {activeChannel && (
-            <section className="channel-workspace-attachments">
-              <div className="section-heading">
-                <h2>{t('workspaceAttachments')}</h2>
-                <span>{channelWorkspaces.length}</span>
-              </div>
+            <details className="channel-workspace-attachments advanced-resource-handles">
+              <summary>
+                <span>{t('resourceHandlesAdvanced')}</span>
+                <span className="quiet-copy">{channelWorkspaces.length}</span>
+              </summary>
+              <p className="quiet-copy">{t('resourceHandlesHint')}</p>
               {channelWorkspaces.length > 0 && (
                 <ul>
                   {channelWorkspaces.map((workspace) => (
@@ -1299,7 +1289,7 @@ export function LocalApp() {
                   {pending === 'channel-workspace' ? t('adding') : t('attachWorkspace')}
                 </button>
               </form>
-            </section>
+            </details>
           )}
         </aside>
       </div>
@@ -1419,40 +1409,43 @@ export function LocalApp() {
                       ? <ul>{agentChannels.map((channel) => <li key={channel.id}>#{channel.name}</li>)}</ul>
                       : <p>{t('noChannels')}</p>}
                   </article>
-                  <article>
-                    <h2>{t('workspaceAttachments')}</h2>
-                    {agentWorkspaces.length > 0
-                      ? <ul>{agentWorkspaces.map((workspace) => (
-                        <li key={workspace.id}>{workspace.display_name} · {workspace.provider_key}{workspace.portable_locator ? ` · ${workspace.portable_locator}` : ''}</li>
-                      ))}</ul>
-                      : <p>{t('noWorkspaces')}</p>}
-                    <form className="workspace-attach-form" onSubmit={attachAgentWorkspace}>
-                      <LocalSelect
-                        id="agent-workspace-kind"
-                        ariaLabel={t('workspaceKind')}
-                        value={workspaceKind}
-                        options={[
-                          { value: 'directory', label: t('workspaceDirectory') },
-                          { value: 'git', label: t('workspaceGit') },
-                          { value: 'external', label: t('workspaceExternal') },
-                          { value: 'managed', label: t('workspaceManaged') },
-                        ]}
-                        onChange={(value) => setWorkspaceKind(value as BuiltInWorkspaceProviderKey)}
-                        placeholder={t('selectOption')}
-                      />
-                      <input
-                        aria-label={t('workspaceLocator')}
-                        value={workspaceLocator}
-                        onChange={(event) => setWorkspaceLocator(event.target.value)}
-                        placeholder={t('workspaceLocatorPlaceholder')}
-                      />
-                      <button
-                        type="submit"
-                        disabled={!workspaceLocator.trim() || pending === 'agent-workspace'}
-                      >
-                        {pending === 'agent-workspace' ? t('adding') : t('attachWorkspace')}
-                      </button>
-                    </form>
+                  <article className="advanced-resource-handles-card">
+                    <details className="advanced-resource-handles" open={agentWorkspaces.length > 0}>
+                      <summary>{t('resourceHandlesAdvanced')}</summary>
+                      <p className="quiet-copy">{t('resourceHandlesHint')}</p>
+                      {agentWorkspaces.length > 0
+                        ? <ul>{agentWorkspaces.map((workspace) => (
+                          <li key={workspace.id}>{workspace.display_name} · {workspace.provider_key}{workspace.portable_locator ? ` · ${workspace.portable_locator}` : ''}</li>
+                        ))}</ul>
+                        : <p>{t('noWorkspaces')}</p>}
+                      <form className="workspace-attach-form" onSubmit={attachAgentWorkspace}>
+                        <LocalSelect
+                          id="agent-workspace-kind"
+                          ariaLabel={t('workspaceKind')}
+                          value={workspaceKind}
+                          options={[
+                            { value: 'directory', label: t('workspaceDirectory') },
+                            { value: 'git', label: t('workspaceGit') },
+                            { value: 'external', label: t('workspaceExternal') },
+                            { value: 'managed', label: t('workspaceManaged') },
+                          ]}
+                          onChange={(value) => setWorkspaceKind(value as BuiltInWorkspaceProviderKey)}
+                          placeholder={t('selectOption')}
+                        />
+                        <input
+                          aria-label={t('workspaceLocator')}
+                          value={workspaceLocator}
+                          onChange={(event) => setWorkspaceLocator(event.target.value)}
+                          placeholder={t('workspaceLocatorPlaceholder')}
+                        />
+                        <button
+                          type="submit"
+                          disabled={!workspaceLocator.trim() || pending === 'agent-workspace'}
+                        >
+                          {pending === 'agent-workspace' ? t('adding') : t('attachWorkspace')}
+                        </button>
+                      </form>
+                    </details>
                   </article>
                   <article>
                     <h2>{t('operationHistory')}</h2>
@@ -1490,7 +1483,7 @@ export function LocalApp() {
                       type="submit"
                       disabled={!agentDraft.trim() || pending === 'agent-message'}
                     >
-                      {pending === 'agent-message' ? t('running') : t('runTask')}
+                      {pending === 'agent-message' ? t('sending') : t('sendMessage')}
                     </button>
                   </form>
                 </section>
