@@ -53,7 +53,11 @@ fn detect_models_for_with_caches(
                 model("kimi-k2", "Kimi K2 (128K)"),
                 model("kimi-k1.5", "Kimi K1.5 (200K)"),
             ],
-            "grok" => detect_grok_models(grok_home).unwrap_or_else(default_grok_models),
+            // Cache is fast and refreshed by `grok models`; CLI is authoritative when
+            // the cache is missing/empty; defaults keep offline discovery usable.
+            "grok" => detect_grok_models(grok_home)
+                .or_else(detect_grok_models_cli)
+                .unwrap_or_else(default_grok_models),
             _ => Vec::new(),
         };
         if !entries.is_empty() {
@@ -103,20 +107,151 @@ fn grok_models_cache_home() -> Option<PathBuf> {
 fn detect_grok_models(grok_home: Option<&Path>) -> Option<Vec<RuntimeModel>> {
     let home = grok_home?;
     let cached = cocli_driver_grok::list_models_from_cache(home)?;
-    Some(
-        cached
-            .into_iter()
-            .map(|entry| RuntimeModel {
-                id: entry.id,
-                label: entry.label,
-            })
-            .collect(),
-    )
+    let default_id = grok_default_model_id(home);
+    let mut models: Vec<RuntimeModel> = cached
+        .into_iter()
+        .map(|entry| RuntimeModel {
+            id: entry.id,
+            label: entry.label,
+        })
+        .collect();
+    prefer_model_first(&mut models, default_id.as_deref());
+    (!models.is_empty()).then_some(models)
+}
+
+/// Parse `grok models` human output (source of truth for launchable model ids).
+///
+/// Example:
+/// ```text
+/// Default model: grok-4.5
+/// Available models:
+///   * grok-4.5 (default)
+/// ```
+fn detect_grok_models_cli() -> Option<Vec<RuntimeModel>> {
+    let output = run_command_text("grok", &["models"])?;
+    let models = parse_grok_models_output(&output);
+    (!models.is_empty()).then_some(models)
+}
+
+fn parse_grok_models_output(output: &str) -> Vec<RuntimeModel> {
+    let mut default_id: Option<String> = None;
+    let mut models = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for raw in output.lines() {
+        let line = strip_ansi(raw).trim().to_string();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line
+            .strip_prefix("Default model:")
+            .or_else(|| line.strip_prefix("default model:"))
+        {
+            let id = rest.trim().to_string();
+            if !id.is_empty() {
+                default_id = Some(id);
+            }
+            continue;
+        }
+        let starred = line
+            .strip_prefix('*')
+            .or_else(|| line.strip_prefix('•'))
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let Some(rest) = starred else {
+            continue;
+        };
+        let (id, marked_default) = if let Some(id) = rest
+            .strip_suffix("(default)")
+            .or_else(|| rest.strip_suffix("(Default)"))
+        {
+            (id.trim().to_string(), true)
+        } else {
+            (rest.to_string(), false)
+        };
+        if id.is_empty() || id.contains(' ') || !seen.insert(id.clone()) {
+            continue;
+        }
+        if marked_default {
+            default_id = Some(id.clone());
+        }
+        models.push(RuntimeModel {
+            label: humanize_model_id(&id),
+            id,
+        });
+    }
+
+    prefer_model_first(&mut models, default_id.as_deref());
+    models
+}
+
+fn grok_default_model_id(grok_home: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(grok_home.join("config.toml")).ok()?;
+    parse_toml_models_default(&config)
+}
+
+/// Minimal `[models] default = "..."` reader (no full TOML dependency).
+fn parse_toml_models_default(config: &str) -> Option<String> {
+    let mut in_models = false;
+    for raw in config.lines() {
+        let line = raw.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_models = line == "[models]";
+            continue;
+        }
+        if !in_models {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "default" {
+            continue;
+        }
+        let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn prefer_model_first(models: &mut Vec<RuntimeModel>, preferred: Option<&str>) {
+    let Some(preferred) = preferred else {
+        return;
+    };
+    if let Some(index) = models.iter().position(|model| model.id == preferred) {
+        if index > 0 {
+            let chosen = models.remove(index);
+            models.insert(0, chosen);
+        }
+    }
+}
+
+fn humanize_model_id(id: &str) -> String {
+    id.split(|c: char| c == '-' || c == '_' || c == '/')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => {
+                    let mut label = first.to_uppercase().collect::<String>();
+                    label.push_str(chars.as_str());
+                    label
+                }
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn default_grok_models() -> Vec<RuntimeModel> {
     vec![
-        model("grok-composer-2.5-fast", "Grok Composer 2.5 Fast"),
+        model("grok-4.5", "Grok 4.5"),
         model("grok-build", "Grok Build"),
     ]
 }
@@ -583,22 +718,65 @@ mod tests {
             serde_json::json!({
                 "models": {
                     "grok-build": { "info": { "display_name": "Grok Build" } },
-                    "grok-composer-2.5-fast": {
-                        "info": { "display_name": "Grok Composer 2.5 Fast" }
+                    "grok-4.5": {
+                        "info": { "display_name": "Grok 4.5" }
                     }
                 }
             })
             .to_string(),
         )
         .unwrap();
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[models]\ndefault = \"grok-4.5\"\n",
+        )
+        .unwrap();
 
-        let cached = detect_models_for_with_caches(&["grok".to_string()], None, Some(tmp.path()));
-        assert_eq!(cached["grok"][0].id, "grok-build");
-        assert_eq!(cached["grok"][1].id, "grok-composer-2.5-fast");
+        // Force the cache path by skipping CLI (no PATH dependency in unit tests):
+        // call detect_grok_models directly via the home-only helper chain.
+        let cached = detect_grok_models(Some(tmp.path())).expect("cache models");
+        assert_eq!(cached[0].id, "grok-4.5");
+        assert!(cached.iter().any(|m| m.id == "grok-build"));
 
-        let fallback = detect_models_for_with_caches(&["grok".to_string()], None, None);
-        assert_eq!(fallback["grok"][0].id, "grok-composer-2.5-fast");
-        assert_eq!(fallback["grok"][1].id, "grok-build");
+        let fallback = default_grok_models();
+        assert_eq!(fallback[0].id, "grok-4.5");
+        assert_eq!(fallback[1].id, "grok-build");
+    }
+
+    #[test]
+    fn parse_grok_models_cli_output_puts_default_first() {
+        let output = "\
+You are logged in with grok.com.
+
+Default model: grok-4.5
+
+Available models:
+  * grok-build
+  * grok-4.5 (default)
+";
+        let models = parse_grok_models_output(output);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "grok-4.5");
+        assert_eq!(models[1].id, "grok-build");
+        assert_eq!(models[0].label, "Grok 4.5");
+    }
+
+    #[test]
+    fn parse_toml_models_default_reads_quoted_value() {
+        let config = "\
+[ui]
+yolo = false
+
+[models]
+default = \"grok-4.5\"
+
+[plugins]
+enabled = []
+";
+        assert_eq!(
+            parse_toml_models_default(config).as_deref(),
+            Some("grok-4.5")
+        );
     }
 
     #[test]

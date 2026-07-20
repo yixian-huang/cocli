@@ -8,7 +8,8 @@ BIN="${COCLI_BIN:-$ROOT/target/debug/cocli}"
 PORT="${COCLI_SMOKE_PORT:-18090}"
 BASE="http://127.0.0.1:${PORT}"
 DATA="${COCLI_SMOKE_DATA:-$(mktemp -d -t cocli-grok-smoke.XXXXXX)}"
-MODEL="${COCLI_GROK_MODEL:-grok-4.5}"
+# Empty model = let cocli/server pick the first discovered launchable model.
+MODEL="${COCLI_GROK_MODEL:-}"
 PROMPT="${COCLI_SMOKE_PROMPT:-You are working inside the cocli repository. Reply in one short sentence confirming you can see this is the cocli multi-agent project and that Channel→Agent delivery works.}"
 TIMEOUT_SEC="${COCLI_SMOKE_TIMEOUT:-180}"
 
@@ -24,7 +25,7 @@ fi
 
 echo "data dir: $DATA"
 echo "bind:     $BASE"
-echo "model:    $MODEL"
+echo "model:    ${MODEL:-<discovered first>}"
 
 "$BIN" --bind "127.0.0.1:${PORT}" --data-dir "$DATA" >"$DATA/server.log" 2>&1 &
 PID=$!
@@ -36,7 +37,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for _ in $(seq 1 50); do
+for _ in $(seq 1 80); do
   if curl -sf "$BASE/healthz" >/dev/null 2>&1; then
     break
   fi
@@ -48,7 +49,15 @@ echo "— runtimes —"
 RUNTIMES=$(curl -sf "$BASE/api/runtimes")
 echo "$RUNTIMES" | python3 -c 'import json,sys; data=json.load(sys.stdin); grok=[r for r in data if r["name"]=="grok"];
 print(json.dumps(grok[0] if grok else {"error":"grok missing","all":[r["name"] for r in data]}, indent=2));
-assert grok and grok[0].get("installed"), "grok runtime not installed/discovered"'
+assert grok and grok[0].get("installed"), "grok runtime not installed/discovered";
+models=grok[0].get("models") or [];
+assert models, "grok models list empty";
+assert models[0] not in ("grok-composer-2.5-fast",), "stale grok model list: %r" % (models,)'
+DISCOVERED_MODEL=$(echo "$RUNTIMES" | python3 -c 'import json,sys; data=json.load(sys.stdin); grok=next(r for r in data if r["name"]=="grok"); print((grok.get("models") or [""])[0])')
+if [[ -z "$MODEL" ]]; then
+  MODEL="$DISCOVERED_MODEL"
+fi
+echo "using model: $MODEL"
 
 CHANNEL=$(curl -sf -X POST "$BASE/api/channels" \
   -H 'content-type: application/json' \

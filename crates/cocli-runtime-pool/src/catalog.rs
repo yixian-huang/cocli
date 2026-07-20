@@ -6,7 +6,7 @@ use cocli_driver_core::types::{
 use cocli_driver_core::Driver;
 use serde::{Deserialize, Serialize};
 
-use crate::{RuntimeProbe, RuntimeRegistry};
+use crate::{discover_runtime_models, RuntimeProbe, RuntimeRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeModel {
@@ -163,7 +163,33 @@ impl RuntimeCatalog {
             .map(|spec| discover_entry(registry, spec, probe))
             .collect::<Vec<_>>();
         runtimes.sort_by(|a, b| a.name.cmp(&b.name));
-        Self { runtimes }
+        let mut catalog = Self { runtimes };
+        catalog.apply_discovered_models();
+        catalog
+    }
+
+    /// Overlay live model discovery (CLI/cache/API) onto static spec fallbacks.
+    ///
+    /// Specs keep offline defaults; discovery replaces them when the runtime
+    /// reports a non-empty launchable model set (for example `grok models`).
+    pub fn apply_discovered_models(&mut self) {
+        let names: Vec<String> = self
+            .runtimes
+            .iter()
+            .filter(|entry| entry.installed && entry.unavailable_reason.is_none())
+            .map(|entry| entry.name.clone())
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let live = discover_runtime_models(&names);
+        for entry in &mut self.runtimes {
+            if let Some(models) = live.get(&entry.name) {
+                if !models.is_empty() {
+                    entry.models = models.clone();
+                }
+            }
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&RuntimeCatalogEntry> {
@@ -238,7 +264,7 @@ pub fn initial_oss_runtime_specs() -> Vec<RuntimeSpec> {
             RuntimeModel::new("kimi-k1.5", "Kimi K1.5 (200K)"),
         ]),
         RuntimeSpec::new("grok", "grok").with_models(vec![
-            RuntimeModel::new("grok-composer-2.5-fast", "Grok Composer 2.5 Fast"),
+            RuntimeModel::new("grok-4.5", "Grok 4.5"),
             RuntimeModel::new("grok-build", "Grok Build"),
         ]),
         RuntimeSpec::new("chatrs", "chatrs"),
