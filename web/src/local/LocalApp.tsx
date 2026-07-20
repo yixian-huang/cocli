@@ -39,6 +39,8 @@ import {
   type Workspace,
   type WorkingState,
   type AgentOperation,
+  type PendingDelivery,
+  type DeliveryState,
 } from './api'
 import { LocalSelect } from './LocalSelect'
 import { LocalHistoryWorkspace } from './LocalHistoryWorkspace'
@@ -163,6 +165,8 @@ export function LocalApp() {
   const [inviteAgentId, setInviteAgentId] = useState('')
   const [liveTurns, setLiveTurns] = useState<Record<string, LiveTurn>>({})
   const [agentLiveTurns, setAgentLiveTurns] = useState<Record<string, LiveTurn>>({})
+  const [channelPendingDeliveries, setChannelPendingDeliveries] = useState<PendingDelivery[]>([])
+  const [agentPendingDeliveries, setAgentPendingDeliveries] = useState<PendingDelivery[]>([])
   const [liveConnection, setLiveConnection] = useState<LiveConnectionState>('connecting')
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -358,6 +362,7 @@ export function LocalApp() {
   useEffect(() => {
     if (!activeChannelId) {
       setMessages([])
+      setChannelPendingDeliveries([])
       return
     }
     let cancelled = false
@@ -378,10 +383,19 @@ export function LocalApp() {
     }
     void refreshMessages(true)
     setLiveTurns({})
+    setChannelPendingDeliveries([])
     const unsubscribe = localApi.subscribeToEvents(
       (event: LiveEvent) => {
         if (event.channelId !== activeChannelId) return
         if (event.kind === 'delivery_completed') {
+          const deliveryId = typeof event.payload.deliveryId === 'string'
+            ? event.payload.deliveryId
+            : null
+          setChannelPendingDeliveries((current) => current.filter((delivery) => {
+            if (deliveryId && delivery.id === deliveryId) return false
+            if (event.agentId && delivery.agent_id === event.agentId) return false
+            return true
+          }))
           if (event.agentId) {
             const timer = liveTurnCleanupRef.current[event.agentId]
             if (timer) window.clearTimeout(timer)
@@ -394,6 +408,13 @@ export function LocalApp() {
           }
           void refreshMessages(false)
           return
+        }
+        if (event.kind === 'turn_started' && event.agentId) {
+          setChannelPendingDeliveries((current) => current.map((delivery) => (
+            delivery.agent_id === event.agentId
+              ? { ...delivery, state: 'in_flight' as DeliveryState }
+              : delivery
+          )))
         }
         if (!event.agentId) return
         if (event.kind === 'turn_finished') {
@@ -457,6 +478,7 @@ export function LocalApp() {
   useEffect(() => {
     if (workspaceView !== 'agent' || !activeAgentId) {
       setAgentLiveTurns({})
+      setAgentPendingDeliveries([])
       return
     }
     let cancelled = false
@@ -473,6 +495,12 @@ export function LocalApp() {
     const unsubscribe = localApi.subscribeToEvents((event: LiveEvent) => {
       if (event.agentId !== agentId) return
       if (event.kind === 'delivery_completed') {
+        const deliveryId = typeof event.payload.deliveryId === 'string'
+          ? event.payload.deliveryId
+          : null
+        setAgentPendingDeliveries((current) => current.filter((delivery) => (
+          deliveryId ? delivery.id !== deliveryId : delivery.agent_id !== agentId
+        )))
         const timer = agentLiveTurnCleanupRef.current[agentId]
         if (timer) window.clearTimeout(timer)
         delete agentLiveTurnCleanupRef.current[agentId]
@@ -483,6 +511,12 @@ export function LocalApp() {
         })
         void refreshAgentMessages()
         return
+      }
+      if (event.kind === 'turn_started') {
+        setAgentPendingDeliveries((current) => current.map((delivery) => ({
+          ...delivery,
+          state: 'in_flight' as DeliveryState,
+        })))
       }
       if (event.kind === 'turn_finished') {
         const existingTimer = agentLiveTurnCleanupRef.current[agentId]
@@ -676,6 +710,10 @@ export function LocalApp() {
       setMessages((current) =>
         [...current, response.message, ...response.replies].sort((left, right) => left.seq - right.seq),
       )
+      const pendingRows = (response.pending_deliveries ?? []).filter((delivery) => (
+        delivery.state === 'pending' || delivery.state === 'in_flight' || delivery.state === 'exhausted'
+      ))
+      setChannelPendingDeliveries(pendingRows)
       setDraft('')
     } catch (nextError) {
       setError(errorMessage(nextError))
@@ -710,12 +748,61 @@ export function LocalApp() {
         [...current, response.message, ...response.replies]
           .sort((left, right) => left.seq - right.seq),
       )
+      const pendingRows = (response.pending_deliveries ?? []).map((delivery) => ({
+        ...delivery,
+        agent_id: delivery.agent_id ?? activeAgentId,
+      }))
+      setAgentPendingDeliveries(pendingRows)
       setAgentDraft('')
     } catch (nextError) {
       setError(errorMessage(nextError))
     } finally {
       setPending(null)
     }
+  }
+
+  function deliveryStateLabel(state: DeliveryState): string {
+    if (state === 'in_flight') return t('deliveryInFlight')
+    if (state === 'exhausted') return t('deliveryExhausted')
+    return t('deliveryPending')
+  }
+
+  function renderPendingDeliveries(
+    deliveries: PendingDelivery[],
+    names: Map<string, string>,
+  ) {
+    if (deliveries.length === 0) return null
+    return (
+      <div className="pending-deliveries" aria-live="polite">
+        {deliveries.map((delivery) => {
+          const agentName = delivery.agent_id
+            ? names.get(delivery.agent_id) ?? t('agent')
+            : t('agent')
+          return (
+            <article
+              key={delivery.id}
+              className={`pending-delivery-card state-${delivery.state}`}
+            >
+              <header>
+                <span className={`delivery-state-dot ${delivery.state}`} aria-hidden="true" />
+                <strong>{agentName}</strong>
+                <span className="delivery-state-label">{deliveryStateLabel(delivery.state)}</span>
+              </header>
+              <p>
+                {delivery.state === 'exhausted'
+                  ? t('deliveryExhaustedDetail', { attempts: delivery.attempts })
+                  : delivery.state === 'in_flight'
+                    ? t('deliveryInFlightDetail')
+                    : t('deliveryPendingDetail', { attempts: delivery.attempts })}
+              </p>
+              {delivery.last_error && (
+                <small className="delivery-error">{delivery.last_error}</small>
+              )}
+            </article>
+          )
+        })}
+      </div>
+    )
   }
 
   async function attachAgentWorkspace(event: FormEvent) {
@@ -1188,6 +1275,7 @@ export function LocalApp() {
                 <p>{message.content}</p>
               </article>
             ))}
+            {renderPendingDeliveries(channelPendingDeliveries, agentNames)}
             {Object.values(liveTurns).map((turn) => (
               <article className={`live-turn ${turn.phase}`} key={turn.agentId}>
                 <header>
@@ -1589,6 +1677,10 @@ export function LocalApp() {
                         <p>{message.content}</p>
                       </article>
                     ))}
+                    {renderPendingDeliveries(
+                      agentPendingDeliveries,
+                      new Map([[activeAgent.id, activeAgent.name]]),
+                    )}
                     {Object.values(agentLiveTurns).map((turn) => (
                       <article className={`live-turn ${turn.phase}`} key={`agent-live-${turn.agentId}`}>
                         <header>

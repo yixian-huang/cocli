@@ -1528,14 +1528,27 @@ export interface RuntimeActivity {
   sessionId?: string
 }
 
-interface PostMessageResponse {
+export type DeliveryState = 'pending' | 'in_flight' | 'exhausted'
+
+/** Durable delivery row from post-message / agent-message responses. */
+export interface PendingDelivery {
+  id: string
+  agent_id?: string
+  channel_id?: string
+  message_id?: string
+  seq?: number
+  state: DeliveryState
+  attempts: number
+  next_attempt_at?: string
+  last_error?: string | null
+  created_at?: string
+  updated_at?: string
+}
+
+export interface PostMessageResponse {
   message: Message
   replies: Message[]
-  pending_deliveries?: Array<{
-    id: string
-    state: 'pending' | 'in_flight' | 'exhausted'
-    attempts: number
-  }>
+  pending_deliveries?: PendingDelivery[]
 }
 
 interface ApiErrorBody {

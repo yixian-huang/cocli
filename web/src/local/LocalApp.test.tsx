@@ -1660,6 +1660,31 @@ describe('LocalApp', () => {
         return jsonResponse(updated)
       }
       if (path === `/api/channels/${channel.id}/messages` && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body)) as { content: string }
+        if (body.content.includes('async')) {
+          return jsonResponse({
+            message: {
+              id: 'message-async-1',
+              channel_id: channel.id,
+              seq: 1,
+              agent_id: null,
+              role: 'user',
+              content: body.content,
+              created_at: '2026-07-16T09:02:00Z',
+            },
+            replies: [],
+            pending_deliveries: [{
+              id: 'delivery-async-1',
+              agent_id: 'agent-1',
+              channel_id: channel.id,
+              message_id: 'message-async-1',
+              seq: 1,
+              state: 'pending',
+              attempts: 1,
+              last_error: null,
+            }],
+          }, 202)
+        }
         return jsonResponse({
           message: {
             id: 'message-1',
@@ -1667,7 +1692,7 @@ describe('LocalApp', () => {
             seq: 1,
             agent_id: null,
             role: 'user',
-            content: 'Ship the loop',
+            content: body.content,
             created_at: '2026-07-16T09:02:00Z',
           },
           replies: [{
@@ -1676,9 +1701,10 @@ describe('LocalApp', () => {
             seq: 2,
             agent_id: 'agent-1',
             role: 'assistant',
-            content: 'echo: Ship the loop',
+            content: `echo: ${body.content}`,
             created_at: '2026-07-16T09:02:01Z',
           }],
+          pending_deliveries: [],
         }, 201)
       }
       return jsonResponse({ error: `Unhandled ${path}` }, 500)
@@ -1702,6 +1728,67 @@ describe('LocalApp', () => {
     expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Ship the loop')).toBeInTheDocument())
     expect(screen.queryByRole('heading', { name: 'Start with a Channel or Agent' })).not.toBeInTheDocument()
+  })
+
+  it('shows pending deliveries until live completion clears them', async () => {
+    class FakeEventSource {
+      static instance: FakeEventSource | null = null
+      onopen: (() => void) | null = null
+      onerror: (() => void) | null = null
+      onmessage: ((event: MessageEvent<string>) => void) | null = null
+      readonly url: string
+
+      constructor(url: string) {
+        this.url = url
+        FakeEventSource.instance = this
+      }
+
+      close() {}
+    }
+    vi.stubGlobal('EventSource', FakeEventSource)
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+    expect(await screen.findByText('builder')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Message in #product-loop'), {
+      target: { value: 'Please handle async delivery' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    expect(await screen.findByText('Queued')).toBeInTheDocument()
+    expect(screen.getByText(/Waiting for the Runtime worker/)).toBeInTheDocument()
+
+    const eventSource = FakeEventSource.instance
+    eventSource?.onopen?.()
+    eventSource?.onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({
+        kind: 'turn_started',
+        channelId: channel.id,
+        agentId: 'agent-1',
+        messageId: 'message-async-1',
+        payload: {},
+        occurredAt: '2026-07-16T09:03:00Z',
+      }),
+    }))
+    expect(await screen.findByText('Delivering')).toBeInTheDocument()
+
+    eventSource?.onmessage?.(new MessageEvent('message', {
+      data: JSON.stringify({
+        kind: 'delivery_completed',
+        channelId: channel.id,
+        agentId: 'agent-1',
+        messageId: 'message-async-2',
+        payload: { deliveryId: 'delivery-async-1' },
+        occurredAt: '2026-07-16T09:03:01Z',
+      }),
+    }))
+    await waitFor(() => {
+      expect(screen.queryByText('Delivering')).not.toBeInTheDocument()
+      expect(screen.queryByText('Queued')).not.toBeInTheDocument()
+    })
   })
 
   it('renders live runtime events from the execution stream', async () => {
