@@ -389,8 +389,8 @@ fn chatrs_extract_settings_empty_profile_name_falls_back_to_anthropic() {
     assert_eq!(profile, "anthropic");
 }
 
-#[test]
-fn chatrs_spawn_writes_write_enabled_false_when_env_missing() {
+#[tokio::test]
+async fn chatrs_spawn_writes_write_enabled_false_when_env_missing() {
     // SECURITY regression test: hardcoded `write_enabled=true` previously
     // granted write access to read-only agents. Verify the JSON ends up
     // with write_enabled=false when no env vars are supplied.
@@ -409,6 +409,7 @@ fn chatrs_spawn_writes_write_enabled_false_when_env_missing() {
         initial_prompt: "",
         env_vars: &[],
     };
+    // Spawn may fail if chatrs is missing; agent.json must still be written first.
     let _ = drv.spawn(&cfg);
 
     let agent_json = tmp.path().join(".cocli").join("agent.json");
@@ -423,8 +424,8 @@ fn chatrs_spawn_writes_write_enabled_false_when_env_missing() {
     );
 }
 
-#[test]
-fn chatrs_spawn_writes_write_enabled_true_when_env_says_true() {
+#[tokio::test]
+async fn chatrs_spawn_writes_write_enabled_true_when_env_says_true() {
     let tmp = tempfile::tempdir().unwrap();
     let drv = driver_for_test();
     let env = vec![
