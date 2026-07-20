@@ -9,21 +9,22 @@ memory, tasks, and relationships survive the underlying CLI process and
 runtime session.
 
 **Status:** early alpha. The local server, SQLite state, web client, eight
-Runtime adapters, durable delivery, Tasks, Memory, Skills, runtime history,
-live execution events, search, state backup/restore, and Skill governance are
-implemented. The persistent Agent/Channel model in
-[DESIGN.md](DESIGN.md) is landed; APIs, Workspace provider contracts,
-installers, and release guarantees are still evolving toward a public alpha.
+Runtime adapters, durable delivery, optional Tasks, Memory, Skills, runtime
+history, live execution events, search, state backup/restore, and Skill
+governance are implemented. The persistent Agent/Channel model in
+[DESIGN.md](DESIGN.md) is landed; installers and release guarantees are still
+evolving toward a public alpha.
 
 ## Product model
 
 - **Agent** is a persistent worker identity. Runtime, model, Session, and CLI
   process are execution details beneath it.
-- **Channel** is a durable collaboration context containing messages, Tasks,
-  participating Agents, and shared context.
-- **Workspace** is an optional scope/resource attachment. A directory, Git
-  repository, worktree, document collection, or external resource can be a
-  Workspace, but none is required to start.
+- **Channel** is a durable collaboration room: messages, participating Agents,
+  and shared context. It is **not** a project shell and is **not** defined by
+  Tasks or a formal purpose/goal. Tasks remain optional coordination primitives.
+- **Workspace** is an optional resource handle for local resolution and
+  migration (thin adapters only). Git and similar providers are **not** product
+  features cocli maintains or markets; none is required to start.
 - **Memory and Skills** are tools used by Agents. Runtime history and raw
   execution details are diagnostic surfaces for users.
 - **Wiki is not part of the core product.** A future Wiki may be delivered as
