@@ -56,10 +56,26 @@ impl ReapDeps for DefaultReapDeps {
     }
 
     fn force_kill(&self, pid: u32) {
-        let _ = nix::sys::signal::kill(
-            nix::unistd::Pid::from_raw(pid as i32),
-            nix::sys::signal::Signal::SIGKILL,
-        );
+        #[cfg(unix)]
+        {
+            let _ = nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid as i32),
+                nix::sys::signal::Signal::SIGKILL,
+            );
+        }
+        #[cfg(windows)]
+        {
+            use sysinfo::{Pid, Signal, System};
+            let mut sys = System::new();
+            sys.refresh_process(Pid::from_u32(pid));
+            if let Some(process) = sys.process(Pid::from_u32(pid)) {
+                let _ = process.kill_with(Signal::Kill);
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = pid;
+        }
     }
 
     fn process_parent(&self, pid: u32) -> u32 {

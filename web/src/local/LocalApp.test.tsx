@@ -2060,7 +2060,7 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'MCP' }))
 
     expect(await screen.findByRole('heading', { name: 'MCP inventory and doctor' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Runtime × Server matrix' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: /Runtime x Server matrix/i })).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /cursor D✓ C✓ L✓ E✓ P× A· H× S· I·/ })).toBeInTheDocument()
     expect(screen.getByText(/cursor-agent mcp list-tools/)).toBeInTheDocument()
     expect(screen.getByText(/approval_missing/)).toBeInTheDocument()

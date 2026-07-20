@@ -8,12 +8,13 @@ license.workspace = true
 [dependencies]
 cocli-pidfile = { path = "../cocli-pidfile" }
 sysinfo       = { workspace = true }
-nix           = { workspace = true }
 tracing       = { workspace = true }
-# Direct dep so the workspace pin reaches sysinfo's resolver (rayon 1.11+
-# requires rustc 1.80; we're on 1.78).
+# Direct dep so the workspace pin reaches sysinfo's resolver.
 rayon         = { workspace = true }
 rayon-core    = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
