@@ -19,13 +19,13 @@ and reading [DESIGN.md](../DESIGN.md) / [ROADMAP.md](../ROADMAP.md).
 
 ## Platforms (build & run from source)
 
-| Platform | Build from source | CI job | Prebuilt release |
-|----------|-------------------|--------|------------------|
-| macOS Apple Silicon (`aarch64-apple-darwin`) | **Yes** (primary dogfood) | Yes | No |
-| macOS Intel (`x86_64-apple-darwin`) | Should work | Yes | No |
-| Linux x86_64 (`x86_64-unknown-linux-gnu`) | **Yes** | Yes (fmt/clippy/test gate) | No |
-| Linux aarch64 (`aarch64-unknown-linux-gnu`) | Via `cross` | Yes (build only) | No |
-| Windows x86_64 (`x86_64-pc-windows-msvc`) | Expected with MSVC | Yes | No |
+| Platform | Build from source | CI job (early alpha) | Prebuilt release |
+|----------|-------------------|----------------------|------------------|
+| macOS Apple Silicon (`aarch64-apple-darwin`) | **Yes** (primary dogfood) | **Yes** | No |
+| macOS Intel (`x86_64-apple-darwin`) | Should work | Planned | No |
+| Linux x86_64 (`x86_64-unknown-linux-gnu`) | **Yes** | **Yes** (fmt/clippy/test gate) | No |
+| Linux aarch64 (`aarch64-unknown-linux-gnu`) | Via `cross` / native | Planned (OpenSSL packaging) | No |
+| Windows x86_64 (`x86_64-pc-windows-msvc`) | **Yes** with MSVC + Node 20 | **Yes** | No |
 
 **Prerequisites:** Rust **1.80+** (workspace `rust-version` / `rust-toolchain.toml`), Node **20+** (web build), and optionally a Runtime CLI for real execution.
 

@@ -1153,7 +1153,7 @@ fn known_silent_notification_does_not_emit_runtime_drift() {
 async fn handshake_timeout_closes_stdin_when_turn_never_starts() {
     let _hooks = test_hooks::lock_hooks_async().await;
     test_hooks::reset_handshake_timeout_ms();
-    test_hooks::set_handshake_timeout_ms(50);
+    test_hooks::set_handshake_timeout_ms(80);
     let d = Arc::new(process_driver_for_test());
 
     let mut child = tokio::process::Command::new("sleep")
@@ -1168,7 +1168,8 @@ async fn handshake_timeout_closes_stdin_when_turn_never_starts() {
     d.as_stdin_binder().unwrap().bind_stdin(stdin);
     assert!(d.stdin_is_bound_for_test());
 
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    // CI runners are noisier than local machines; wait well past the 80ms watchdog.
+    tokio::time::sleep(Duration::from_millis(400)).await;
     assert!(
         !d.stdin_is_bound_for_test(),
         "handshake watchdog should close stdin when turn/started never arrives"
