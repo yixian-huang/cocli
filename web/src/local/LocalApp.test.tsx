@@ -1764,7 +1764,8 @@ describe('LocalApp', () => {
     expect(await screen.findByText('Paused')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Resume delivery' }))
+    const resumeButtons = screen.getAllByRole('button', { name: 'Resume delivery' })
+    fireEvent.click(resumeButtons[0])
     expect(await screen.findByText('Receiving')).toBeInTheDocument()
   })
 
