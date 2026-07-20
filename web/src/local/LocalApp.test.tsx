@@ -1402,6 +1402,13 @@ describe('LocalApp', () => {
           lifecycle_status: 'paused',
         })
       }
+      if (path === '/api/agents/agent-1/start' && init?.method === 'POST') {
+        return jsonResponse({
+          ...createdAgent,
+          status: 'running',
+          lifecycle_status: 'active',
+        })
+      }
       if (path === '/api/agents/agent-1/skills' && !init?.method) {
         return jsonResponse({
           skills: skillInstalled ? [{
