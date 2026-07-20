@@ -27,7 +27,7 @@ and reading [DESIGN.md](../DESIGN.md) / [ROADMAP.md](../ROADMAP.md).
 | Linux aarch64 (`aarch64-unknown-linux-gnu`) | Via `cross` | Yes (build only) | No |
 | Windows x86_64 (`x86_64-pc-windows-msvc`) | Expected with MSVC | Yes | No |
 
-**Prerequisites:** Rust **1.78+** (workspace `rust-version`), Node **20+** (web build), and optionally a Runtime CLI for real execution.
+**Prerequisites:** Rust **1.80+** (workspace `rust-version` / `rust-toolchain.toml`), Node **20+** (web build), and optionally a Runtime CLI for real execution.
 
 ```bash
 git clone https://github.com/yixian-huang/cocli.git

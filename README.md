@@ -39,7 +39,7 @@ terminology, and non-goals.
 
 ## Run from source
 
-Prerequisites: Rust 1.78+, Node.js 20+, npm, and at least one supported Agent
+Prerequisites: Rust 1.80+, Node.js 20+, npm, and at least one supported Agent
 CLI if you want real Runtime execution.
 
 ```bash

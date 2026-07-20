@@ -4,7 +4,7 @@ Thanks for your interest! Here's how to get up and running.
 
 ## Prerequisites
 
-- Rust 1.78+ (`rustup install 1.78`)
+- Rust 1.80+ (`rustup install 1.80`; `rust-toolchain.toml` pins the workspace)
 - Node 20+ (for frontend dev)
 - One supported Agent CLI for real Runtime end-to-end testing; not needed for
   unit tests or the fake-runtime local loop
@@ -73,8 +73,8 @@ the shared driver contract and include parser/spawn regression tests.
 
 Before requesting review for runtime changes, run:
 
-    cargo +1.78 test --workspace
-    cargo +1.78 clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace
+    cargo clippy --workspace --all-targets -- -D warnings
     cargo fmt --all -- --check
     scripts/check-runtime-release.sh
 
