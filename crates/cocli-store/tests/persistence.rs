@@ -13,6 +13,13 @@ fn temporary_database_path() -> PathBuf {
     std::env::temp_dir().join(format!("cocli-store-{}.sqlite3", Uuid::new_v4()))
 }
 
+/// Windows may keep SQLite handles briefly after drop; cleanup is best-effort.
+fn remove_temp_database(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+}
+
 #[tokio::test]
 async fn store_restores_channels_agents_and_messages_after_reopen() {
     let database_path = temporary_database_path();
@@ -54,7 +61,7 @@ async fn store_restores_channels_agents_and_messages_after_reopen() {
 
     assert_eq!(messages[0].content, "persisted reply");
 
-    std::fs::remove_file(database_path).expect("temporary database should be removable");
+    remove_temp_database(&database_path);
 }
 
 #[tokio::test]
@@ -119,8 +126,8 @@ async fn store_exports_a_consistent_reopenable_snapshot() {
     );
     drop(snapshot);
     drop(store);
-    std::fs::remove_file(database_path).expect("database should be removable");
-    std::fs::remove_file(snapshot_path).expect("snapshot should be removable");
+    remove_temp_database(&database_path);
+    remove_temp_database(&snapshot_path);
 }
 
 #[tokio::test]
@@ -259,8 +266,8 @@ async fn portable_snapshot_removes_installation_credentials_and_live_execution_s
     );
 
     store.close().await;
-    std::fs::remove_file(database_path).expect("database should be removable");
-    std::fs::remove_file(snapshot_path).expect("snapshot should be removable");
+    remove_temp_database(&database_path);
+    remove_temp_database(&snapshot_path);
 }
 
 #[tokio::test]
@@ -304,7 +311,7 @@ async fn store_versions_and_upgrades_a_pre_versioned_database() {
     Store::open(&database_path)
         .await
         .expect("recorded migrations should not replay");
-    std::fs::remove_file(database_path).expect("temporary database should be removable");
+    remove_temp_database(&database_path);
 }
 
 #[tokio::test]
@@ -439,7 +446,7 @@ async fn memory_storage_migration_preserves_legacy_documents() {
     assert_eq!(ordinary_link_count, 1);
     pool.close().await;
 
-    std::fs::remove_file(database_path).expect("temporary database should be removable");
+    remove_temp_database(&database_path);
 }
 
 #[tokio::test]
@@ -486,7 +493,7 @@ async fn concurrent_channel_writes_allocate_unique_monotonic_sequences() {
     );
 
     drop(store);
-    std::fs::remove_file(database_path).expect("temporary database should be removable");
+    remove_temp_database(&database_path);
 }
 
 #[tokio::test]
