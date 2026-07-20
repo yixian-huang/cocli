@@ -16,11 +16,11 @@ use cocli_agent::state::Idle;
 use cocli_agent::watchdog::{WatchdogStore, AUTO_RETRY_MAX};
 use cocli_agent::{AgentActor, AgentMetrics, StartCfg};
 use cocli_api::{
-    LiveEvent, LiveEventSink, RuntimeBridgeTokenProvider, RuntimeError, RuntimeForkResult,
-    RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo, RuntimeKnowledgeProvider,
-    RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot, RuntimeRecoveryProbeResult,
-    RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus, RuntimeSkill,
-    RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
+    LiveEvent, LiveEventSink, McpApplyJournalSink, RuntimeBridgeTokenProvider, RuntimeError,
+    RuntimeForkResult, RuntimeHistoryEvent, RuntimeHistorySink, RuntimeInfo,
+    RuntimeKnowledgeProvider, RuntimeKnowledgeSnapshot, RuntimeMetricsSnapshot,
+    RuntimeRecoveryProbeResult, RuntimeRecoveryStatus, RuntimeService, RuntimeSessionStatus,
+    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
 };
 use cocli_driver_chatrs::ChatrsDriver;
 use cocli_driver_claude::ClaudeDriver;
@@ -561,6 +561,34 @@ impl RuntimeService for LocalRuntimeService {
         Ok(crate::mcp::inspect(&self.catalog, &self.config).await)
     }
 
+    async fn inspect_mcp_capabilities(
+        &self,
+    ) -> Result<cocli_driver_core::McpCapabilitySnapshot, RuntimeError> {
+        Ok(crate::mcp::capabilities(&self.catalog, &self.config).await)
+    }
+
+    async fn preflight_mcp(
+        &self,
+        plan: &cocli_driver_core::McpPlan,
+    ) -> Result<cocli_driver_core::McpPreflightReport, RuntimeError> {
+        Ok(crate::mcp::preflight(&self.catalog, &self.config, plan).await)
+    }
+
+    async fn apply_mcp(
+        &self,
+        request: cocli_driver_core::McpApplyExecutionRequest,
+        journal: Arc<dyn McpApplyJournalSink>,
+    ) -> Result<cocli_driver_core::McpApplyExecutionResult, RuntimeError> {
+        Ok(crate::mcp::apply(&self.catalog, &self.config, request, journal.as_ref()).await)
+    }
+
+    async fn rollback_mcp(
+        &self,
+        request: cocli_driver_core::McpRollbackExecutionRequest,
+    ) -> Result<cocli_driver_core::McpRollbackExecutionResult, RuntimeError> {
+        Ok(crate::mcp::rollback(&self.catalog, &self.config, request).await)
+    }
+
     fn skill_compatibility(&self, runtime: &str) -> RuntimeSkillCompatibility {
         crate::skills::compatibility(&self.registry, runtime)
     }
@@ -574,6 +602,60 @@ impl RuntimeService for LocalRuntimeService {
         agent: &Agent,
     ) -> Result<cocli_api::RuntimeSkillInspection, RuntimeError> {
         crate::skills::inspect(&self.registry, &self.config, agent).await
+    }
+
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<cocli_api::RuntimeSkillInspection, RuntimeError> {
+        crate::skills::inspect_machine(&self.registry, &self.config, runtime).await
+    }
+
+    async fn governance_skill_target(
+        &self,
+        agent: &Agent,
+        skill_name: &str,
+    ) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+        crate::skills::governance_target(&self.registry, &self.config, agent, skill_name)
+    }
+
+    async fn governance_scope_capabilities(
+        &self,
+        runtime: &str,
+        scope: &str,
+        scope_root: Option<&Path>,
+    ) -> Result<Vec<cocli_api::GovernanceScopeCapability>, RuntimeError> {
+        crate::skills::governance_scope_capabilities(
+            &self.registry,
+            &self.config,
+            runtime,
+            scope,
+            scope_root,
+        )
+    }
+
+    async fn governance_skill_target_in_scope(
+        &self,
+        runtime: &str,
+        scope: &str,
+        scope_root: Option<&Path>,
+        skill_name: &str,
+    ) -> Result<cocli_api::GovernanceSkillTarget, RuntimeError> {
+        crate::skills::governance_target_in_scope(
+            &self.registry,
+            &self.config,
+            runtime,
+            scope,
+            scope_root,
+            skill_name,
+        )
+    }
+
+    async fn governance_managed_artifact_root(&self) -> Result<PathBuf, RuntimeError> {
+        let data_root = self.config.workspace_root.parent().ok_or_else(|| {
+            RuntimeError::Unsupported("cocli data root is unavailable".to_owned())
+        })?;
+        Ok(data_root.join("managed-skills/v1/artifacts"))
     }
 
     async fn install_skill(

@@ -1,5 +1,6 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -9,13 +10,26 @@ use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use chrono::{Duration as ChronoDuration, Utc};
 use cocli_api::{
-    reconcile_skill_state, router, router_with_delivery_config, DeliveryConfig, McpDiagnostic,
+    governance_artifact_digests, reconcile_skill_state, router, router_with_delivery_config,
+    DeliveryConfig, GovernanceScopeCapability, GovernanceSkillTarget, McpDiagnostic,
     McpDiagnosticSeverity, McpEvidence, McpInventory, RuntimeError, RuntimeInfo, RuntimeService,
-    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillFileContent, RuntimeSkillFileEntry,
+    RuntimeSkill, RuntimeSkillCompatibility, RuntimeSkillEvidence, RuntimeSkillFileContent,
+    RuntimeSkillFileEntry, RuntimeSkillFinding, RuntimeSkillInspection, RuntimeSkillSearchPath,
+};
+use cocli_driver_core::{
+    McpApplyActionResult, McpApplyActionStatus, McpApplyExecutionRequest, McpApplyExecutionResult,
+    McpApplyJournalEntry, McpApplyJournalPhase, McpBackupDescriptor, McpCapabilitySnapshot,
+    McpReloadResult, McpReloadStatus, McpReloadStrategy, McpRollbackExecutionRequest,
+    McpRollbackExecutionResult, McpRuntimeCapability, McpVerificationResult, McpVerificationStatus,
 };
 use cocli_store::{
-    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewSkillLibrary, SkillLibraryFile,
-    Store,
+    Agent, AgentStatus, Message, MessageRole, NewAgentTurn, NewMcpApplyRun,
+    NewSkillGovernanceApplyAction, NewSkillGovernanceApplyRun, NewSkillGovernanceManagedArtifact,
+    NewSkillGovernanceMaterialization, NewSkillLibrary, SkillGovernanceApplyActionStatus,
+    SkillGovernanceApplyRunStatus, SkillGovernanceInstallationMode,
+    SkillGovernanceMaterializationOwnership, SkillGovernanceMaterializationRootKind,
+    SkillGovernanceRecoveryStatus, SkillGovernanceScope, SkillGovernanceVerifyStatus,
+    SkillLibraryFile, Store, WorkspaceProviderKey,
 };
 use serde_json::{json, Value};
 use tempfile::tempdir;
@@ -25,7 +39,341 @@ use tower::ServiceExt;
 struct FakeRuntime;
 
 #[derive(Debug)]
+struct GovernanceApplyRuntime {
+    workspace_root: PathBuf,
+}
+
+#[derive(Debug)]
 struct FailingStartRuntime;
+
+#[derive(Debug, Default)]
+struct MutableMcpRuntime {
+    inventory: Mutex<McpInventory>,
+}
+
+#[derive(Debug, Default)]
+struct ApplyMcpRuntime {
+    apply_calls: AtomicUsize,
+    rollback_calls: AtomicUsize,
+    applied: AtomicBool,
+}
+
+#[derive(Debug, Default)]
+struct MutableCapabilityRuntime {
+    version: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct PartialMcpRuntime {
+    rollback_backup_count: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct SnapshotSkillRuntime {
+    agent_inspections: AtomicUsize,
+    machine_inspections: AtomicUsize,
+    delay: Duration,
+}
+
+impl SnapshotSkillRuntime {
+    fn inspection(runtime: &str, scope: &str) -> RuntimeSkillInspection {
+        let path = format!("/tmp/{runtime}/shared-skill/SKILL.md");
+        let evidence = RuntimeSkillEvidence {
+            source: "filesystem".to_owned(),
+            detail: "test search paths".to_owned(),
+            proves_session_visibility: false,
+        };
+        RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: RuntimeSkillCompatibility::Supported,
+            evidence: evidence.clone(),
+            search_paths: vec![RuntimeSkillSearchPath {
+                path: format!("/tmp/{runtime}"),
+                scope: scope.to_owned(),
+                exists: true,
+                readable: true,
+                symlink: false,
+                resolved_path: None,
+                issue: None,
+            }],
+            skills: vec![RuntimeSkillFinding {
+                fingerprint: "shared-skill-fingerprint".to_owned(),
+                skill: RuntimeSkill {
+                    name: "shared-skill".to_owned(),
+                    display_name: "Shared Skill".to_owned(),
+                    description: "test skill".to_owned(),
+                    user_invocable: true,
+                    skill_type: scope.to_owned(),
+                    path: path.clone(),
+                    install_path: None,
+                },
+                runtime: runtime.to_owned(),
+                scope: scope.to_owned(),
+                source_path: path,
+                resolved_path: None,
+                presence: "discovered".to_owned(),
+                evidence,
+                enabled: None,
+                valid: Some(true),
+                duplicate: false,
+                shadowed: false,
+                issues: Vec::new(),
+            }],
+            issues: Vec::new(),
+        }
+    }
+}
+
+impl GovernanceApplyRuntime {
+    fn target(&self, agent: &Agent, name: &str) -> GovernanceSkillTarget {
+        let scope_root = self.workspace_root.join(agent.id.to_string());
+        let search_root = scope_root.join(".fake/skills");
+        GovernanceSkillTarget {
+            entry_path: search_root.join(name),
+            search_root,
+            scope_root,
+        }
+    }
+
+    fn inspection(&self, agent: &Agent) -> RuntimeSkillInspection {
+        let evidence = RuntimeSkillEvidence {
+            source: "filesystem".to_owned(),
+            detail: "isolated governance apply fixture".to_owned(),
+            proves_session_visibility: false,
+        };
+        let target = self.target(agent, "reviewer");
+        let skills = target
+            .entry_path
+            .join("SKILL.md")
+            .is_file()
+            .then(|| RuntimeSkillFinding {
+                skill: RuntimeSkill {
+                    name: "reviewer".to_owned(),
+                    display_name: "Reviewer".to_owned(),
+                    description: "isolated fixture".to_owned(),
+                    user_invocable: true,
+                    skill_type: "workspace".to_owned(),
+                    path: target
+                        .entry_path
+                        .join("SKILL.md")
+                        .to_string_lossy()
+                        .into_owned(),
+                    install_path: Some(".fake/skills/reviewer".to_owned()),
+                },
+                runtime: "fake".to_owned(),
+                fingerprint: "fixture-reviewer".to_owned(),
+                scope: "workspace".to_owned(),
+                source_path: target.entry_path.to_string_lossy().into_owned(),
+                resolved_path: target
+                    .entry_path
+                    .canonicalize()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                presence: "installed".to_owned(),
+                evidence: evidence.clone(),
+                enabled: Some(true),
+                valid: Some(true),
+                duplicate: false,
+                shadowed: false,
+                issues: Vec::new(),
+            });
+        RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: "fake".to_owned(),
+            compatibility: RuntimeSkillCompatibility::Supported,
+            evidence,
+            search_paths: vec![RuntimeSkillSearchPath {
+                path: target.search_root.to_string_lossy().into_owned(),
+                scope: "workspace".to_owned(),
+                exists: target.search_root.exists(),
+                readable: target.search_root.exists(),
+                symlink: false,
+                resolved_path: target
+                    .search_root
+                    .canonicalize()
+                    .ok()
+                    .map(|path| path.to_string_lossy().into_owned()),
+                issue: None,
+            }],
+            skills: skills.into_iter().collect(),
+            issues: Vec::new(),
+        }
+    }
+}
+
+#[async_trait]
+impl RuntimeService for GovernanceApplyRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        vec![RuntimeInfo {
+            name: "fake".to_owned(),
+            installed: true,
+            binary: None,
+            version: Some("governance-test".to_owned()),
+            models: Vec::new(),
+            capabilities: vec!["skills:supported".to_owned()],
+            unavailable_reason: None,
+        }]
+    }
+
+    async fn reply(&self, _agent: &Agent, _message: &Message) -> Result<String, RuntimeError> {
+        Ok(String::new())
+    }
+
+    fn skill_compatibility(&self, _runtime: &str) -> RuntimeSkillCompatibility {
+        RuntimeSkillCompatibility::Supported
+    }
+
+    async fn inspect_skills(&self, agent: &Agent) -> Result<RuntimeSkillInspection, RuntimeError> {
+        Ok(self.inspection(agent))
+    }
+
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<RuntimeSkillInspection, RuntimeError> {
+        Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: RuntimeSkillCompatibility::Supported,
+            evidence: RuntimeSkillEvidence::default(),
+            search_paths: Vec::new(),
+            skills: Vec::new(),
+            issues: Vec::new(),
+        })
+    }
+
+    async fn governance_skill_target(
+        &self,
+        agent: &Agent,
+        skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Ok(self.target(agent, skill_name))
+    }
+
+    async fn governance_scope_capabilities(
+        &self,
+        runtime: &str,
+        scope: &str,
+        scope_root: Option<&std::path::Path>,
+    ) -> Result<Vec<GovernanceScopeCapability>, RuntimeError> {
+        let root = match scope {
+            "machine" => self.workspace_root.join("../machine-home/.fake/skills"),
+            "workspace" => scope_root
+                .ok_or_else(|| RuntimeError::Unsupported("workspace root missing".to_owned()))?
+                .join(".fake/skills"),
+            _ => {
+                return Err(RuntimeError::Unsupported(
+                    "unsupported test scope".to_owned(),
+                ))
+            }
+        };
+        Ok(vec![GovernanceScopeCapability {
+            runtime: runtime.to_owned(),
+            scope: scope.to_owned(),
+            root_kind: "runtime_specific".to_owned(),
+            path: root.to_string_lossy().into_owned(),
+            status: "missing".to_owned(),
+            exists: root.exists(),
+            writable: true,
+            atomic_rename: true,
+            supported: true,
+            evidence: "isolated_test_driver".to_owned(),
+            blocked_reason: None,
+        }])
+    }
+
+    async fn governance_skill_target_in_scope(
+        &self,
+        _runtime: &str,
+        scope: &str,
+        scope_root: Option<&std::path::Path>,
+        skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        let scope_root = match scope {
+            "machine" => self.workspace_root.join("../machine-home"),
+            "workspace" => scope_root
+                .ok_or_else(|| RuntimeError::Unsupported("workspace root missing".to_owned()))?
+                .to_path_buf(),
+            _ => {
+                return Err(RuntimeError::Unsupported(
+                    "unsupported test scope".to_owned(),
+                ))
+            }
+        };
+        let search_root = scope_root.join(".fake/skills");
+        Ok(GovernanceSkillTarget {
+            entry_path: search_root.join(skill_name),
+            search_root,
+            scope_root,
+        })
+    }
+
+    async fn governance_managed_artifact_root(&self) -> Result<PathBuf, RuntimeError> {
+        Ok(self.workspace_root.join("../managed-skills/v1/artifacts"))
+    }
+}
+
+#[async_trait]
+impl RuntimeService for SnapshotSkillRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        vec![RuntimeInfo {
+            name: "fake".to_owned(),
+            installed: true,
+            binary: None,
+            version: Some("test".to_owned()),
+            models: Vec::new(),
+            capabilities: vec!["skills:supported".to_owned()],
+            unavailable_reason: None,
+        }]
+    }
+
+    async fn reply(&self, _agent: &Agent, _message: &Message) -> Result<String, RuntimeError> {
+        Ok(String::new())
+    }
+
+    fn skill_compatibility(&self, runtime: &str) -> RuntimeSkillCompatibility {
+        if runtime == "chatrs" {
+            RuntimeSkillCompatibility::Unsupported
+        } else {
+            RuntimeSkillCompatibility::Supported
+        }
+    }
+
+    async fn list_skills(&self, agent: &Agent) -> Result<Vec<RuntimeSkill>, RuntimeError> {
+        Ok(Self::inspection(&agent.runtime, "workspace")
+            .skills
+            .into_iter()
+            .map(|finding| finding.skill)
+            .collect())
+    }
+
+    async fn inspect_skills(&self, agent: &Agent) -> Result<RuntimeSkillInspection, RuntimeError> {
+        self.agent_inspections.fetch_add(1, Ordering::SeqCst);
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
+        if agent.name == "broken" {
+            return Err(RuntimeError::Delivery(
+                "simulated agent probe failure".to_owned(),
+            ));
+        }
+        Ok(Self::inspection(&agent.runtime, "workspace"))
+    }
+
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<RuntimeSkillInspection, RuntimeError> {
+        self.machine_inspections.fetch_add(1, Ordering::SeqCst);
+        if runtime == "grok" {
+            return Err(RuntimeError::Delivery(
+                "simulated runtime probe failure".to_owned(),
+            ));
+        }
+        Ok(Self::inspection(runtime, "user"))
+    }
+}
 
 #[async_trait]
 impl RuntimeService for FakeRuntime {
@@ -84,6 +432,258 @@ impl RuntimeService for FailingStartRuntime {
         Err(RuntimeError::Delivery(
             "simulated startup failure".to_owned(),
         ))
+    }
+}
+
+#[async_trait]
+impl RuntimeService for MutableMcpRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        Ok(self
+            .inventory
+            .lock()
+            .expect("mutable MCP inventory should not be poisoned")
+            .clone())
+    }
+}
+
+#[async_trait]
+impl RuntimeService for ApplyMcpRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        let mut inventory = McpInventory::default();
+        if self.applied.load(Ordering::SeqCst) {
+            inventory.diagnostics.push(McpDiagnostic {
+                code: "post_apply_state".to_owned(),
+                severity: McpDiagnosticSeverity::Info,
+                runtime: "cursor".to_owned(),
+                server_id: None,
+                message: "post-apply observation".to_owned(),
+                evidence: Vec::new(),
+                observed_at: "2026-07-19T00:00:00Z".to_owned(),
+            });
+        }
+        Ok(inventory)
+    }
+
+    async fn apply_mcp(
+        &self,
+        _request: McpApplyExecutionRequest,
+        _journal: Arc<dyn cocli_api::McpApplyJournalSink>,
+    ) -> Result<McpApplyExecutionResult, RuntimeError> {
+        self.apply_calls.fetch_add(1, Ordering::SeqCst);
+        self.applied.store(true, Ordering::SeqCst);
+        Ok(McpApplyExecutionResult {
+            actions: vec![McpApplyActionResult {
+                action_index: 0,
+                runtime: "cursor".to_owned(),
+                server_id: "docs".to_owned(),
+                status: McpApplyActionStatus::Verified,
+                reason: "verified safely".to_owned(),
+                backup: Some(McpBackupDescriptor {
+                    id: "backup-test".to_owned(),
+                    runtime: "cursor".to_owned(),
+                    source_path: "/tmp/config.json".to_owned(),
+                    backup_path: "/tmp/backup.json".to_owned(),
+                    source_hash: "before".to_owned(),
+                    backup_hash: "before".to_owned(),
+                    applied_hash: "after".to_owned(),
+                    source_existed: true,
+                }),
+                before_source_hash: Some("before".to_owned()),
+                after_source_hash: Some("after".to_owned()),
+            }],
+            reloads: vec![McpReloadResult {
+                runtime: "cursor".to_owned(),
+                status: McpReloadStatus::Deferred,
+                reason: "active sessions were not restarted".to_owned(),
+            }],
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Matched,
+                observation_hash: "verified-observation".to_owned(),
+                mismatches: Vec::new(),
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
+            },
+            journal: Vec::new(),
+        })
+    }
+
+    async fn rollback_mcp(
+        &self,
+        request: McpRollbackExecutionRequest,
+    ) -> Result<McpRollbackExecutionResult, RuntimeError> {
+        self.rollback_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(McpRollbackExecutionResult {
+            actions: request
+                .backups
+                .into_iter()
+                .enumerate()
+                .map(|(action_index, backup)| McpApplyActionResult {
+                    action_index,
+                    runtime: backup.runtime.clone(),
+                    server_id: "docs".to_owned(),
+                    status: McpApplyActionStatus::RolledBack,
+                    reason: "backup restored atomically".to_owned(),
+                    backup: Some(backup),
+                    before_source_hash: None,
+                    after_source_hash: None,
+                })
+                .collect(),
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Matched,
+                observation_hash: "rollback-observation".to_owned(),
+                mismatches: Vec::new(),
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
+            },
+        })
+    }
+}
+
+#[async_trait]
+impl RuntimeService for MutableCapabilityRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        Ok(McpInventory::default())
+    }
+
+    async fn inspect_mcp_capabilities(&self) -> Result<McpCapabilitySnapshot, RuntimeError> {
+        let mut snapshot = McpCapabilitySnapshot {
+            hash: String::new(),
+            observed_at: "2026-07-19T00:00:00Z".to_owned(),
+            runtimes: vec![McpRuntimeCapability {
+                runtime: "codex".to_owned(),
+                adapter: "codex_native_cli".to_owned(),
+                binary_path: Some("/tmp/fake-codex".to_owned()),
+                binary_version: Some(format!("1.{}", self.version.load(Ordering::SeqCst))),
+                config_schema_version: "codex.mcp_servers.v1".to_owned(),
+                destination: "/tmp/config.toml".to_owned(),
+                allowed_subtree: "mcp_servers".to_owned(),
+                reload_strategy: McpReloadStrategy::NewSessionOnly,
+                operations: BTreeMap::new(),
+            }],
+        };
+        snapshot.hash = cocli_driver_core::hash_mcp_capabilities(&snapshot);
+        Ok(snapshot)
+    }
+}
+
+#[async_trait]
+impl RuntimeService for PartialMcpRuntime {
+    async fn list(&self) -> Vec<RuntimeInfo> {
+        FakeRuntime.list().await
+    }
+
+    async fn reply(&self, _agent: &Agent, message: &Message) -> Result<String, RuntimeError> {
+        Ok(format!("echo: {}", message.content))
+    }
+
+    async fn inspect_mcp(&self) -> Result<McpInventory, RuntimeError> {
+        Ok(McpInventory::default())
+    }
+
+    async fn apply_mcp(
+        &self,
+        _request: McpApplyExecutionRequest,
+        _journal: Arc<dyn cocli_api::McpApplyJournalSink>,
+    ) -> Result<McpApplyExecutionResult, RuntimeError> {
+        Ok(McpApplyExecutionResult {
+            actions: vec![
+                McpApplyActionResult {
+                    action_index: 0,
+                    runtime: "cursor".to_owned(),
+                    server_id: "docs".to_owned(),
+                    status: McpApplyActionStatus::Verified,
+                    reason: "cursor verified".to_owned(),
+                    backup: Some(McpBackupDescriptor {
+                        id: "cursor-backup".to_owned(),
+                        runtime: "cursor".to_owned(),
+                        source_path: "/tmp/cursor.json".to_owned(),
+                        backup_path: "/tmp/cursor.backup".to_owned(),
+                        source_hash: "before".to_owned(),
+                        backup_hash: "before".to_owned(),
+                        applied_hash: "after".to_owned(),
+                        source_existed: true,
+                    }),
+                    before_source_hash: Some("before".to_owned()),
+                    after_source_hash: Some("after".to_owned()),
+                },
+                McpApplyActionResult {
+                    action_index: 1,
+                    runtime: "claude".to_owned(),
+                    server_id: "ops".to_owned(),
+                    status: McpApplyActionStatus::Failed,
+                    reason: "claude CAS conflict".to_owned(),
+                    backup: None,
+                    before_source_hash: None,
+                    after_source_hash: None,
+                },
+            ],
+            reloads: Vec::new(),
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Mismatched,
+                observation_hash: "partial".to_owned(),
+                mismatches: vec!["claude/ops was not applied".to_owned()],
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
+            },
+            journal: Vec::new(),
+        })
+    }
+
+    async fn rollback_mcp(
+        &self,
+        request: McpRollbackExecutionRequest,
+    ) -> Result<McpRollbackExecutionResult, RuntimeError> {
+        self.rollback_backup_count
+            .store(request.backups.len(), Ordering::SeqCst);
+        let actions = request
+            .backups
+            .into_iter()
+            .enumerate()
+            .map(|(action_index, backup)| McpApplyActionResult {
+                action_index,
+                runtime: backup.runtime.clone(),
+                server_id: "docs".to_owned(),
+                status: McpApplyActionStatus::RolledBack,
+                reason: "cursor compensation completed".to_owned(),
+                backup: Some(backup),
+                before_source_hash: None,
+                after_source_hash: None,
+            })
+            .collect();
+        Ok(McpRollbackExecutionResult {
+            actions,
+            verification: McpVerificationResult {
+                status: McpVerificationStatus::Matched,
+                observation_hash: "rollback".to_owned(),
+                mismatches: Vec::new(),
+                written_config_hashes: Default::default(),
+                session_effective: Default::default(),
+            },
+        })
     }
 }
 
@@ -260,6 +860,1003 @@ async fn exposes_read_only_mcp_inventory_and_doctor() {
     assert_eq!(doctor["summary"]["runtimeCount"], 1);
     assert_eq!(doctor["summary"]["warningCount"], 1);
     assert_eq!(doctor["inventory"]["diagnostics"][0]["code"], "cli_missing");
+}
+
+#[tokio::test]
+async fn mcp_bundle_export_import_requires_explicit_rebind_and_never_imports_approval() {
+    let store = Store::in_memory().await.expect("store should open");
+    let machine_id = store.current_installation_id().to_owned();
+    let app = router(store, Arc::new(MutableCapabilityRuntime::default()));
+    let (status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/profiles",
+        mcp_profile_body("portable docs", true),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let (status, _binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bindings",
+        json!({
+            "profileId": profile_id,
+            "targetType": "machine",
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, exported) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/export-preview",
+        json!({
+            "actor": "operator",
+            "includeCapabilityExpectations": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let bundle = exported["bundle"].clone();
+    let exported_json = serde_json::to_string(&bundle).expect("bundle json");
+    assert!(!exported_json.contains(&machine_id));
+    assert!(!exported_json.contains("planHash"));
+    assert!(!exported_json.contains("approvalId"));
+    assert!(!exported_json.contains("applyRun"));
+    assert_eq!(exported["dryRun"], true);
+
+    let (status, missing) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/import-preview",
+        json!({
+            "actor": "operator",
+            "bundle": bundle,
+            "rebindings": {}
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(missing["canCommit"].as_bool().is_some_and(|value| !value));
+    let audit_id = missing["audit"]["id"].as_str().expect("audit id");
+    let audit_version = missing["audit"]["version"].as_i64().expect("audit version");
+
+    let (status, rebound) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/rebind"),
+        json!({
+            "expectedVersion": audit_version,
+            "rebindings": {
+                "targets": {"machine:1": machine_id},
+                "runtimes": {"runtime:codex": "codex"},
+                "secretRefs": {"keychain://cocli/docs-token": "env://DEST_DOCS_TOKEN"},
+                "machineLocalValues": {},
+                "profiles": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rebound["canCommit"], true);
+    let version = rebound["audit"]["version"].as_i64().expect("version");
+    let (status, committed) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/commit"),
+        json!({
+            "expectedVersion": version,
+            "actor": "operator"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(committed["audit"]["status"], "committed");
+    assert_eq!(committed["audit"]["result"]["approvalImported"], false);
+    assert_eq!(committed["audit"]["result"]["applyImported"], false);
+}
+
+fn mcp_profile_body(name: &str, enabled: bool) -> Value {
+    json!({
+        "name": name,
+        "description": "API governance profile",
+        "servers": [{
+            "serverId": "srv-docs",
+            "runtime": "codex",
+            "alias": "docs",
+            "definition": {
+                "transport": "http",
+                "endpoint": "https://example.test/mcp"
+            },
+            "desiredEnabled": enabled,
+            "allowTools": [],
+            "denyTools": [],
+            "approvalMode": "manual",
+            "secretRefs": [{
+                "location": "headers.authorization",
+                "kind": "bearer",
+                "reference": "keychain://cocli/docs-token"
+            }]
+        }]
+    })
+}
+
+#[tokio::test]
+async fn mcp_capability_version_drift_invalidates_plan_approval() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(MutableCapabilityRuntime::default());
+    let app = router(store, runtime.clone());
+    let (capability_status, capabilities) = json_request(
+        app.clone(),
+        "GET",
+        "/api/runtimes/mcp/capabilities",
+        json!({}),
+    )
+    .await;
+    assert_eq!(capability_status, StatusCode::OK);
+    assert_eq!(capabilities["runtimes"][0]["binaryVersion"], "1.0");
+
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let plan_hash = plan["planHash"].as_str().expect("plan hash");
+    let (preflight_status, preflight) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/preflight"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preflight_status, StatusCode::OK);
+    assert_eq!(preflight["capabilityHash"], plan["capabilityHash"]);
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+
+    runtime.version.store(1, Ordering::SeqCst);
+    let (stale_status, stale) = json_request(
+        app,
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::OK);
+    assert_eq!(stale["approvalStatus"], "stale");
+    assert!(stale["staleReasons"]
+        .as_array()
+        .expect("stale reasons")
+        .iter()
+        .any(|reason| reason == "adapter_capability_or_version_drift"));
+}
+
+#[tokio::test]
+async fn mcp_profile_plan_and_approval_api_is_dry_run_versioned_and_stale_aware() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+
+    let (create_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/profiles",
+        mcp_profile_body("production docs", true),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED);
+    assert_eq!(profile["version"], 1);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let profile_path = format!("/api/runtimes/mcp/profiles/{profile_id}");
+
+    let (get_status, fetched) = json_request(app.clone(), "GET", &profile_path, json!({})).await;
+    assert_eq!(get_status, StatusCode::OK);
+    assert_eq!(fetched["name"], "production docs");
+
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bindings",
+        json!({ "profileId": profile_id, "targetType": "machine" }),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+    assert_eq!(binding["target"]["targetType"], "machine");
+
+    let (effective_status, effective) =
+        json_request(app.clone(), "GET", "/api/runtimes/mcp/effective", json!({})).await;
+    assert_eq!(effective_status, StatusCode::OK);
+    assert_eq!(effective["servers"][0]["serverId"], "srv-docs");
+    assert_eq!(effective["servers"][0]["highRiskContext"], true);
+
+    let (plan_status, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    assert_eq!(plan_status, StatusCode::CREATED);
+    assert_eq!(plan_view["plan"]["dryRun"], true);
+    assert_eq!(plan_view["plan"]["applied"], false);
+    assert_eq!(
+        plan_view["plan"]["actions"][0]["kind"],
+        "manual_unsupported"
+    );
+    assert_eq!(plan_view["plan"]["actions"][0]["blocked"], true);
+    let plan_id = plan_view["plan"]["id"].as_str().expect("plan id");
+    let plan_hash = plan_view["plan"]["planHash"].as_str().expect("plan hash");
+    let observation_hash = plan_view["plan"]["observationHash"]
+        .as_str()
+        .expect("observation hash");
+    let config_hash = plan_view["plan"]["configHash"]
+        .as_str()
+        .expect("config hash");
+
+    let missing_expiry_status = status_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({ "planHash": plan_hash, "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(missing_expiry_status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    assert_eq!(approved["approvalStatus"], "approved");
+    assert_eq!(approved["approvedButNotApplied"], true);
+    assert_eq!(approved["plan"]["applied"], false);
+    let high_risk_status = status_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan_hash,
+            "observationHash": observation_hash,
+            "configHash": config_hash,
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(high_risk_status, StatusCode::BAD_REQUEST);
+
+    let mut update = mcp_profile_body("production docs", false);
+    update["expectedVersion"] = json!(1);
+    let (update_status, updated) =
+        json_request(app.clone(), "PUT", &profile_path, update.clone()).await;
+    assert_eq!(update_status, StatusCode::OK);
+    assert_eq!(updated["version"], 2);
+
+    let (conflict_status, _) = json_request(app.clone(), "PUT", &profile_path, update).await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+
+    let (stale_status, stale) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::OK);
+    assert_eq!(stale["approvalStatus"], "stale");
+    assert!(stale["staleReasons"]
+        .as_array()
+        .expect("stale reasons")
+        .iter()
+        .any(|reason| reason == "desired_config_drift"));
+    assert_eq!(stale["approvedButNotApplied"], false);
+
+    let (_, replacement_plan) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let replacement_id = replacement_plan["plan"]["id"].as_str().expect("plan id");
+    let replacement_hash = replacement_plan["plan"]["planHash"]
+        .as_str()
+        .expect("plan hash");
+    let (reject_status, rejected) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{replacement_id}/reject"),
+        json!({
+            "planHash": replacement_hash,
+            "actor": "api-test",
+            "reason": "requires operator review"
+        }),
+    )
+    .await;
+    assert_eq!(reject_status, StatusCode::OK);
+    assert_eq!(rejected["approvalStatus"], "rejected");
+    assert_eq!(rejected["decision"]["reason"], "requires operator review");
+
+    let binding_id = binding["id"].as_str().expect("binding id");
+    let (unbind_status, _) = json_request(
+        app.clone(),
+        "DELETE",
+        &format!("/api/runtimes/mcp/bindings/{binding_id}?expectedVersion=1"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(unbind_status, StatusCode::OK);
+
+    let (delete_status, _) = json_request(
+        app,
+        "DELETE",
+        &format!("{profile_path}?expectedVersion=2"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(delete_status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn mcp_bundle_export_import_requires_explicit_rebinding_and_is_idempotent() {
+    let store = Store::in_memory().await.expect("store should open");
+    let installation_id = store.current_installation_id().to_owned();
+    let runtime = Arc::new(MutableCapabilityRuntime::default());
+    let app = router(store.clone(), runtime);
+    let (create_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/profiles",
+        json!({
+            "name": "portable-codex",
+            "servers": [{
+                "serverId": "docs",
+                "runtime": "codex",
+                "alias": "docs",
+                "definition": {
+                    "transport": "stdio",
+                    "command": "docs-server"
+                },
+                "desiredEnabled": true,
+                "allowTools": ["read"],
+                "denyTools": [],
+                "approvalMode": "manual",
+                "secretRefs": []
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED);
+    let (binding_status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bindings",
+        json!({
+            "profileId": profile["id"],
+            "targetType": "machine"
+        }),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+
+    let (export_status, exported) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/export-preview",
+        json!({
+            "actor": "bundle-test",
+            "includeCapabilityExpectations": true
+        }),
+    )
+    .await;
+    assert_eq!(export_status, StatusCode::OK);
+    assert_eq!(exported["dryRun"], true);
+    assert_eq!(exported["bundle"]["schemaVersion"], 2);
+    let exported_text = serde_json::to_string(&exported).expect("serialize export");
+    assert!(!exported_text.contains(&installation_id));
+    assert!(!exported_text.contains("approvalId"));
+    assert!(!exported_text.contains("backupPath"));
+
+    let (preview_status, previewed) = json_request(
+        app.clone(),
+        "POST",
+        "/api/runtimes/mcp/bundles/import-preview",
+        json!({
+            "bundle": exported["bundle"],
+            "actor": "bundle-test",
+            "rebindings": {}
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::CREATED);
+    assert_eq!(previewed["canCommit"], false);
+    assert_eq!(previewed["preview"]["approvalImported"], false);
+    let audit_id = previewed["audit"]["id"].as_str().expect("audit id");
+
+    for canary in ["sk-api-canary", "ghp_api_canary", "xoxb-api-canary"] {
+        let (secret_status, secret_response) = json_request(
+            app.clone(),
+            "POST",
+            &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/rebind"),
+            json!({
+                "expectedVersion": previewed["audit"]["version"],
+                "rebindings": {
+                    "secretRefs": { "env://OLD_TOKEN": canary }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(secret_status, StatusCode::BAD_REQUEST);
+        assert!(!secret_response.to_string().contains(canary));
+
+        let (preview_secret_status, preview_secret_response) = json_request(
+            app.clone(),
+            "POST",
+            "/api/runtimes/mcp/bundles/import-preview",
+            json!({
+                "bundle": exported["bundle"].clone(),
+                "actor": "bundle-test",
+                "rebindings": {
+                    "machineLocalValues": {
+                        "machine-local:profile:server:command": canary
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(preview_secret_status, StatusCode::BAD_REQUEST);
+        assert!(!preview_secret_response.to_string().contains(canary));
+    }
+
+    let (rebind_status, rebound) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/rebind"),
+        json!({
+            "expectedVersion": previewed["audit"]["version"],
+            "rebindings": {
+                "targets": { "machine:1": installation_id },
+                "runtimes": { "runtime:codex": "codex" },
+                "secretRefs": {},
+                "machineLocalValues": {},
+                "profiles": {}
+            }
+        }),
+    )
+    .await;
+    assert_eq!(rebind_status, StatusCode::OK);
+    assert_eq!(rebound["canCommit"], true);
+
+    let commit_body = json!({
+        "expectedVersion": rebound["audit"]["version"],
+        "actor": "bundle-test"
+    });
+    let (commit_status, committed) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/commit"),
+        commit_body.clone(),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK);
+    assert_eq!(committed["audit"]["status"], "committed");
+    assert_eq!(committed["audit"]["result"]["approvalImported"], false);
+    assert_eq!(committed["audit"]["result"]["applyImported"], false);
+    let profile_count = store
+        .list_mcp_profiles()
+        .await
+        .expect("list profiles")
+        .len();
+
+    let (repeat_status, repeated) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/bundles/imports/{audit_id}/commit"),
+        commit_body,
+    )
+    .await;
+    assert_eq!(repeat_status, StatusCode::OK);
+    assert_eq!(repeated["audit"]["id"], audit_id);
+    assert_eq!(
+        store
+            .list_mcp_profiles()
+            .await
+            .expect("list profiles after repeat")
+            .len(),
+        profile_count
+    );
+}
+
+#[tokio::test]
+async fn mcp_adapter_conformance_api_reports_observed_runtime_service_contract() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(MutableCapabilityRuntime::default()));
+    let (status, report) =
+        json_request(app, "GET", "/api/runtimes/mcp/conformance", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let reports = report["reports"].as_array().expect("reports");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(
+        reports
+            .iter()
+            .map(|item| item["adapter"]["runtime"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>(),
+        vec!["codex"]
+    );
+    assert!(reports.iter().all(|item| item["passed"] == true));
+    assert!(reports[0]["adapter"]["adapter"]
+        .as_str()
+        .expect("adapter identity")
+        .contains("observed-runtime-service"));
+    assert!(report["note"]
+        .as_str()
+        .expect("note")
+        .contains("production RuntimeService"));
+    assert!(!serde_json::to_string(&report)
+        .expect("serialize report")
+        .contains("fake-adapter"));
+    assert!(!serde_json::to_string(&report)
+        .expect("serialize report")
+        .contains("PHASE3A_CONFORMANCE_SECRET_CANARY"));
+}
+
+#[tokio::test]
+async fn mcp_profile_api_rejects_plaintext_secret_without_echoing_it() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let mut body = mcp_profile_body("unsafe", true);
+    body["servers"][0]["definition"]["args"] = json!(["--api-key", "sk-do-not-echo-this"]);
+    let (status, response) = json_request(app, "POST", "/api/runtimes/mcp/profiles", body).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let serialized = response.to_string();
+    assert!(serialized.contains("suspected plaintext secret"));
+    assert!(!serialized.contains("sk-do-not-echo-this"));
+}
+
+#[tokio::test]
+async fn mcp_approval_becomes_stale_after_observation_drift() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(MutableMcpRuntime::default());
+    let app = router(store.clone(), runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan_id = plan_view["plan"]["id"].as_str().expect("plan id");
+    let plan_hash = plan_view["plan"]["planHash"].as_str().expect("plan hash");
+    let observation_hash = plan_view["plan"]["observationHash"]
+        .as_str()
+        .expect("observation hash");
+    let config_hash = plan_view["plan"]["configHash"]
+        .as_str()
+        .expect("config hash");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    let decision = store
+        .get_mcp_plan_decision(plan_id)
+        .await
+        .expect("read approval")
+        .expect("approval exists");
+    let interrupted = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan_id.to_owned(),
+            approval_id: decision.id,
+            plan_hash: plan_hash.to_owned(),
+            observation_hash: observation_hash.to_owned(),
+            config_hash: config_hash.to_owned(),
+            capability_hash: plan_view["plan"]["capabilityHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            actor: "api-test".to_owned(),
+            confirm_high_risk: false,
+        })
+        .await
+        .expect("persist interrupted run");
+
+    runtime
+        .inventory
+        .lock()
+        .expect("mutable MCP inventory should not be poisoned")
+        .diagnostics
+        .push(McpDiagnostic {
+            code: "runtime_drift".to_owned(),
+            severity: McpDiagnosticSeverity::Warning,
+            runtime: "codex".to_owned(),
+            server_id: None,
+            message: "Runtime observation changed".to_owned(),
+            evidence: Vec::new(),
+            observed_at: "2026-07-19T01:00:00Z".to_owned(),
+        });
+
+    let (status, stale) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/runtimes/mcp/plans/{plan_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stale["approvalStatus"], "stale");
+    assert!(stale["staleReasons"]
+        .as_array()
+        .expect("stale reasons")
+        .iter()
+        .any(|reason| reason == "observation_drift"));
+    let (apply_status, recovered) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan_hash,
+            "observationHash": observation_hash,
+            "configHash": config_hash,
+            "actor": "api-test",
+            "confirmHighRisk": true
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(recovered["run"]["id"], interrupted.id.to_string());
+    assert_eq!(recovered["run"]["status"], "recovery_required");
+    assert_eq!(
+        recovered["run"]["recoveryReason"],
+        "observation or desired configuration drifted during an interrupted apply"
+    );
+    let (manual_status, manual) = json_request(
+        app,
+        "POST",
+        &format!(
+            "/api/runtimes/mcp/apply-runs/{}/manual-recovery",
+            interrupted.id
+        ),
+        json!({
+            "actor": "recovery-operator",
+            "reason": "configuration requires operator inspection"
+        }),
+    )
+    .await;
+    assert_eq!(manual_status, StatusCode::OK);
+    assert_eq!(manual["run"]["status"], "recovery_required");
+    assert!(manual["run"]["journal"]
+        .as_array()
+        .expect("journal")
+        .iter()
+        .any(|entry| entry["phase"] == "recovery_required"));
+}
+
+#[tokio::test]
+async fn interrupted_post_write_observation_drift_reaches_runtime_recovery() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(ApplyMcpRuntime::default());
+    let app = router(store.clone(), runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan["planHash"],
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    let decision = store
+        .get_mcp_plan_decision(plan_id)
+        .await
+        .expect("read approval")
+        .expect("approval exists");
+    let run = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan_id.to_owned(),
+            approval_id: decision.id,
+            plan_hash: plan["planHash"].as_str().unwrap_or_default().to_owned(),
+            observation_hash: plan["observationHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            config_hash: plan["configHash"].as_str().unwrap_or_default().to_owned(),
+            capability_hash: plan["capabilityHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            actor: "api-test".to_owned(),
+            confirm_high_risk: false,
+        })
+        .await
+        .expect("create interrupted run");
+    let backup = McpBackupDescriptor {
+        id: "interrupted-backup".to_owned(),
+        runtime: "cursor".to_owned(),
+        source_path: "/tmp/interrupted-config.json".to_owned(),
+        backup_path: "/tmp/interrupted-backup.json".to_owned(),
+        source_hash: "before".to_owned(),
+        backup_hash: "before".to_owned(),
+        applied_hash: "after".to_owned(),
+        source_existed: true,
+    };
+    store
+        .checkpoint_mcp_apply_run(
+            run.id,
+            McpApplyJournalPhase::BackedUp,
+            &McpApplyJournalEntry {
+                sequence: 1,
+                action_index: 0,
+                runtime: "cursor".to_owned(),
+                server_id: "docs".to_owned(),
+                idempotency_key: "interrupted-write".to_owned(),
+                phase: McpApplyJournalPhase::BackedUp,
+                attempt: 1,
+                expected_source_hash: Some("before".to_owned()),
+                expected_schema_hash: None,
+                backup: Some(backup),
+                reason: "backup persisted before simulated restart".to_owned(),
+                evidence: Vec::new(),
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("checkpoint interrupted backup");
+    runtime.applied.store(true, Ordering::SeqCst);
+
+    let (status, recovered) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan["planHash"],
+            "observationHash": plan["observationHash"],
+            "configHash": plan["configHash"],
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(runtime.apply_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recovered["run"]["status"], "verified");
+    assert!(recovered["run"]["canRollback"].as_bool().unwrap_or(false));
+    assert!(recovered["run"]["journal"]
+        .as_array()
+        .expect("journal")
+        .iter()
+        .any(|entry| entry["phase"] == "backed_up"));
+}
+
+#[tokio::test]
+async fn mcp_apply_api_revalidates_hashes_is_idempotent_and_rolls_back() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(ApplyMcpRuntime::default());
+    let app = router(store.clone(), runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let plan_hash = plan["planHash"].as_str().expect("plan hash");
+    let observation_hash = plan["observationHash"].as_str().expect("observation hash");
+    let config_hash = plan["configHash"].as_str().expect("config hash");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan_hash,
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    let decision = store
+        .get_mcp_plan_decision(plan_id)
+        .await
+        .expect("read approval")
+        .expect("approval exists");
+    let interrupted = store
+        .create_mcp_apply_run(NewMcpApplyRun {
+            plan_id: plan_id.to_owned(),
+            approval_id: decision.id,
+            plan_hash: plan_hash.to_owned(),
+            observation_hash: observation_hash.to_owned(),
+            config_hash: config_hash.to_owned(),
+            capability_hash: plan["capabilityHash"]
+                .as_str()
+                .unwrap_or_default()
+                .to_owned(),
+            actor: "api-test".to_owned(),
+            confirm_high_risk: false,
+        })
+        .await
+        .expect("persist resumable run");
+
+    let (stale_status, stale) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": "wrong",
+            "observationHash": observation_hash,
+            "configHash": config_hash,
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(stale_status, StatusCode::CONFLICT);
+    assert!(stale["error"].as_str().expect("error").contains("hashes"));
+
+    let apply_body = json!({
+        "planHash": plan_hash,
+        "observationHash": observation_hash,
+        "configHash": config_hash,
+        "actor": "api-test",
+        "confirmHighRisk": false
+    });
+    let (apply_status, applied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        apply_body.clone(),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(applied["run"]["status"], "verified");
+    assert_eq!(applied["run"]["verification"]["status"], "matched");
+    assert_eq!(applied["run"]["reloads"][0]["status"], "deferred");
+    assert_eq!(applied["run"]["canRollback"], true);
+    let run_id = applied["run"]["id"].as_str().expect("run id");
+    assert_eq!(run_id, interrupted.id.to_string());
+
+    let (_, repeated) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        apply_body,
+    )
+    .await;
+    assert_eq!(repeated["run"]["id"], run_id);
+    assert_eq!(runtime.apply_calls.load(Ordering::SeqCst), 1);
+
+    let (rollback_status, rolled_back) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/apply-runs/{run_id}/rollback"),
+        json!({ "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK);
+    assert_eq!(rolled_back["run"]["rollbackStatus"], "rolled_back");
+    let (_, repeated_rollback) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/apply-runs/{run_id}/rollback"),
+        json!({ "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(repeated_rollback["run"]["rollbackStatus"], "rolled_back");
+    assert_eq!(runtime.rollback_calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn mcp_partial_saga_rolls_back_only_successful_runtime_and_preserves_failure() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(PartialMcpRuntime::default());
+    let app = router(store, runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let (approve_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan["planHash"],
+            "actor": "api-test",
+            "expiresAt": "2099-07-19T10:00:00Z"
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    let (apply_status, partial) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan["planHash"],
+            "observationHash": plan["observationHash"],
+            "configHash": plan["configHash"],
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK);
+    assert_eq!(partial["run"]["status"], "partial");
+    assert_eq!(partial["run"]["actions"][1]["status"], "failed");
+    assert_eq!(
+        partial["run"]["actions"][1]["reason"],
+        "claude CAS conflict"
+    );
+    let run_id = partial["run"]["id"].as_str().expect("run id");
+    let (rollback_status, rolled_back) = json_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/apply-runs/{run_id}/rollback"),
+        json!({ "actor": "api-test" }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK);
+    assert_eq!(runtime.rollback_backup_count.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        rolled_back["run"]["rollbackActions"]
+            .as_array()
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(rolled_back["run"]["actions"][1]["status"], "failed");
+}
+
+#[tokio::test]
+async fn mcp_apply_api_never_executes_an_expired_approval() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(ApplyMcpRuntime::default());
+    let app = router(store, runtime.clone());
+    let (_, plan_view) =
+        json_request(app.clone(), "POST", "/api/runtimes/mcp/plans", json!({})).await;
+    let plan = &plan_view["plan"];
+    let plan_id = plan["id"].as_str().expect("plan id");
+    let expires_at = (Utc::now() + ChronoDuration::milliseconds(500)).to_rfc3339();
+    let approve_status = status_request(
+        app.clone(),
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/approve"),
+        json!({
+            "planHash": plan["planHash"],
+            "actor": "api-test",
+            "expiresAt": expires_at
+        }),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    let apply_status = status_request(
+        app,
+        "POST",
+        &format!("/api/runtimes/mcp/plans/{plan_id}/apply"),
+        json!({
+            "planHash": plan["planHash"],
+            "observationHash": plan["observationHash"],
+            "configHash": plan["configHash"],
+            "actor": "api-test",
+            "confirmHighRisk": false
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::CONFLICT);
+    assert_eq!(runtime.apply_calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1099,6 +2696,1786 @@ async fn concurrent_duplicate_skill_install_mutates_runtime_once() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn ordinary_agent_skill_list_does_not_run_heavy_inspection() {
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store.create_channel("skills-list").await.expect("channel");
+    let agent = store
+        .create_agent(channel.id, "quick-list", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("agent");
+    let runtime = Arc::new(SnapshotSkillRuntime::default());
+    let app = router(store, runtime.clone());
+
+    let (status, body) = json_request(
+        app,
+        "GET",
+        &format!("/api/agents/{}/skills", agent.id),
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["skills"].as_array().map(Vec::len), Some(1));
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn skill_snapshots_coalesce_cache_and_force_refresh() {
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("skill-snapshots")
+        .await
+        .expect("channel");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "snapshot-agent",
+            "fake",
+            None,
+            AgentStatus::Stopped,
+        )
+        .await
+        .expect("agent");
+    let runtime = Arc::new(SnapshotSkillRuntime {
+        delay: Duration::from_millis(50),
+        ..SnapshotSkillRuntime::default()
+    });
+    let app = router(store, runtime.clone());
+    let uri = format!("/api/agents/{}/skills/inventory", agent.id);
+
+    let first = json_request(app.clone(), "GET", &uri, json!({}));
+    let second = json_request(app.clone(), "GET", &uri, json!({}));
+    let ((first_status, first_body), (second_status, second_body)) = tokio::join!(first, second);
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        (
+            first_body["cacheStatus"].as_str(),
+            second_body["cacheStatus"].as_str()
+        ),
+        (Some("fresh"), Some("cached")) | (Some("cached"), Some("fresh"))
+    ));
+
+    let (cached_status, cached) = json_request(app.clone(), "GET", &uri, json!({})).await;
+    assert_eq!(cached_status, StatusCode::OK);
+    assert_eq!(cached["cacheStatus"], "cached");
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 1);
+
+    let doctor_uri = format!("/api/agents/{}/skills/doctor", agent.id);
+    let (doctor_status, doctor) = json_request(app.clone(), "GET", &doctor_uri, json!({})).await;
+    assert_eq!(doctor_status, StatusCode::OK);
+    assert_eq!(doctor["summary"]["runtimeCount"], 1);
+
+    let force_uri = format!("{uri}?force=true");
+    let first_force = json_request(app.clone(), "GET", &force_uri, json!({}));
+    let second_force = json_request(app, "GET", &force_uri, json!({}));
+    let ((first_status, _), (second_status, _)) = tokio::join!(first_force, second_force);
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK);
+    assert_eq!(runtime.agent_inspections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn skill_governance_profiles_lock_and_dry_run_plans_are_versioned_and_stale_safe() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(SnapshotSkillRuntime::default());
+    let app = router(store, runtime);
+    let profile_document = json!({
+        "schemaVersion": 1,
+        "name": "machine-baseline",
+        "description": "Pinned read-only governance baseline",
+        "skills": [{
+            "logicalIdentity": "shared-skill",
+            "source": {
+                "kind": "local",
+                "location": "/tmp/fake/shared-skill"
+            },
+            "version": "1.0.0",
+            "resolvedRevision": "fixture-v1",
+            "contentDigest": "sha256:fixture-content-v1",
+            "manifestDigest": "sha256:fixture-manifest-v1",
+            "targetRuntime": "fake",
+            "installScope": "machine",
+            "installationMode": "copy",
+            "enabled": true,
+            "updatePolicy": "pinned",
+            "allowedSources": ["local"],
+            "riskPolicy": "allowlisted",
+            "expectedDestination": "/tmp/fake/shared-skill"
+        }]
+    });
+    let (profile_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        profile_document.clone(),
+    )
+    .await;
+    assert_eq!(profile_status, StatusCode::CREATED);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    assert_eq!(profile["version"], 1);
+
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({
+            "profileId": profile_id,
+            "scope": "machine",
+            "scopeId": "ignored-client-value"
+        }),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+    assert_eq!(binding["scopeId"], "machine");
+
+    let (desired_status, desired) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/desired/effective",
+        json!({}),
+    )
+    .await;
+    assert_eq!(desired_status, StatusCode::OK);
+    assert_eq!(desired["skills"].as_array().map(Vec::len), Some(1));
+    assert!(desired["desiredConfigHash"]
+        .as_str()
+        .is_some_and(|hash| hash.starts_with("sha256:")));
+
+    let preview_request = json!({
+        "scope": "machine",
+        "scopeId": "machine",
+        "force": true
+    });
+    let (evidence_status, evidence) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/evidence?force=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(evidence_status, StatusCode::OK);
+    assert!(evidence["skills"].as_array().is_some_and(|skills| skills
+        .iter()
+        .all(|skill| skill["sessionEffective"] == "unknown")));
+
+    let (lock_status, lock) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/lock/preview",
+        preview_request.clone(),
+    )
+    .await;
+    assert_eq!(lock_status, StatusCode::OK);
+    assert_eq!(lock["writesRealDirectories"], false);
+    assert_eq!(lock["lockfileBoundary"], "store_only");
+    assert!(lock["preview"]["lockfileHash"].is_string());
+
+    let (plan_status, plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        preview_request.clone(),
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::CREATED);
+    assert_eq!(plan["applied"], false);
+    assert_eq!(plan["plan"]["status"], "draft");
+    assert!(plan["preview"]["content"]["actions"]
+        .as_array()
+        .is_some_and(|actions| actions
+            .iter()
+            .filter(|action| action["runtime"] == "fake")
+            .all(|action| action["blocked"] == true)));
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK);
+    assert_eq!(approved["plan"]["status"], "approved");
+    assert_eq!(approved["applied"], false);
+
+    let (stale_plan_status, stale_plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        preview_request,
+    )
+    .await;
+    assert_eq!(stale_plan_status, StatusCode::CREATED);
+    let stale_plan_id = stale_plan["plan"]["id"].as_str().expect("stale plan id");
+    let mut changed_document = profile_document;
+    changed_document["skills"][0]["enabled"] = json!(false);
+    let (update_status, updated) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/skills/governance/profiles/{profile_id}"),
+        json!({"expectedVersion": 1, "document": changed_document.clone()}),
+    )
+    .await;
+    assert_eq!(update_status, StatusCode::OK);
+    assert_eq!(updated["version"], 2);
+    let (version_conflict_status, _) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/skills/governance/profiles/{profile_id}"),
+        json!({"expectedVersion": 1, "document": changed_document}),
+    )
+    .await;
+    assert_eq!(version_conflict_status, StatusCode::CONFLICT);
+    let (conflict_status, conflict) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{stale_plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(conflict_status, StatusCode::CONFLICT);
+    assert_eq!(conflict["plan"]["status"], "stale");
+    assert!(conflict["staleReasons"]
+        .as_array()
+        .is_some_and(|reasons| reasons
+            .iter()
+            .any(|reason| reason == "desired_config_hash_changed")));
+
+    let mut secret_document = json!({
+        "schemaVersion": 1,
+        "name": "private-source",
+        "skills": [updated["skills"][0].clone()]
+    });
+    secret_document["skills"][0]["source"]["kind"] = json!("git");
+    secret_document["skills"][0]["source"]["location"] =
+        json!("https://raw-secret@example.com/private.git?token=raw-secret");
+    let (secret_status, secret_error) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/profiles",
+        secret_document,
+    )
+    .await;
+    assert_eq!(secret_status, StatusCode::BAD_REQUEST);
+    assert!(!secret_error.to_string().contains("raw-secret"));
+}
+
+#[tokio::test]
+async fn approved_governance_apply_is_idempotent_verified_and_cas_rollback_safe() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: isolated apply fixture\n---\n",
+    )
+    .expect("source manifest");
+    let digests = governance_artifact_digests(&source).expect("artifact digests");
+    let workspace_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: workspace_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let channel = store
+        .create_channel("governed-apply")
+        .await
+        .expect("channel");
+    let agent = store
+        .create_agent(channel.id, "governed", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("agent");
+    let app = router(store.clone(), runtime);
+
+    let (_, managed_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": source}),
+    )
+    .await;
+    let (managed_status, managed) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": source,
+            "expectedPreviewHash": managed_preview["previewHash"],
+            "idempotencyKey": managed_preview["idempotencyKey"],
+            "confirmationNonce": managed_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(managed_status, StatusCode::OK, "{managed}");
+
+    let (profile_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        json!({
+            "schemaVersion": 1,
+            "name": "agent-trusted-local",
+            "skills": [{
+                "logicalIdentity": "reviewer",
+                "source": {"kind": "local", "location": source.to_string_lossy()},
+                "contentDigest": digests.content_digest,
+                "manifestDigest": digests.manifest_digest,
+                "targetRuntime": "fake",
+                "installScope": "agent",
+                "installationMode": "copy",
+                "enabled": true,
+                "updatePolicy": "pinned",
+                "allowedSources": ["local"],
+                "riskPolicy": "trusted"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(profile_status, StatusCode::CREATED);
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let (binding_status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({"profileId": profile_id, "scope": "agent", "scopeId": agent.id}),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED);
+    let plan_request = json!({
+        "scope": "agent",
+        "scopeId": agent.id,
+        "agentId": agent.id,
+        "force": true
+    });
+    let (plan_status, plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        plan_request,
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::CREATED, "{plan}");
+    assert!(plan["preview"]["content"]["actions"]
+        .as_array()
+        .is_some_and(|actions| actions.iter().any(|action| action["action"] == "install")));
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "{approved}");
+    let approved_version = approved["plan"]["version"]
+        .as_i64()
+        .expect("approved version");
+
+    let (_, evidence_before_preview) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/evidence?force=true",
+        json!({}),
+    )
+    .await;
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert!(preview["staleReasons"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let (_, evidence_after_preview) = json_request(
+        app.clone(),
+        "GET",
+        "/api/skills/governance/evidence?force=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        evidence_before_preview["snapshotHash"],
+        evidence_after_preview["snapshotHash"]
+    );
+    let idempotency_key = preview["idempotencyKey"].as_str().expect("idempotency");
+    let nonce = preview["confirmationNonce"].as_str().expect("nonce");
+    let installed = workspace_root
+        .join(agent.id.to_string())
+        .join(".fake/skills/reviewer/SKILL.md");
+    assert!(!installed.exists());
+    let request = json!({
+        "expectedVersion": approved_version,
+        "idempotencyKey": idempotency_key,
+        "confirmationNonce": nonce,
+        "confirmHighRisk": preview["highRisk"].as_bool().unwrap_or(false)
+    });
+    let (apply_status, applied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        request.clone(),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["applied"], true);
+    assert_eq!(applied["run"]["status"], "succeeded");
+    let run_id = applied["run"]["id"].as_str().expect("run id");
+    assert!(installed.exists());
+    assert_eq!(
+        store
+            .list_skill_governance_managed_artifacts()
+            .await
+            .expect("deduplicated managed artifacts")
+            .len(),
+        1
+    );
+
+    let (retry_status, retried) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        request,
+    )
+    .await;
+    assert_eq!(retry_status, StatusCode::OK, "{retried}");
+    assert_eq!(retried["run"]["id"], run_id);
+
+    let (verify_status, verified) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/verify"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(verify_status, StatusCode::OK, "{verified}");
+    assert_eq!(verified["verified"], true);
+
+    let (rollback_preview_status, rollback_preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(
+        rollback_preview_status,
+        StatusCode::OK,
+        "{rollback_preview}"
+    );
+    let rollback_key = rollback_preview["idempotencyKey"]
+        .as_str()
+        .expect("rollback idempotency");
+    let rollback_nonce = rollback_preview["confirmationNonce"]
+        .as_str()
+        .expect("rollback nonce");
+    let (rollback_status, rolled_back) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback"),
+        json!({
+            "idempotencyKey": rollback_key,
+            "confirmationNonce": rollback_nonce,
+            "confirmRollback": true
+        }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK, "{rolled_back}");
+    assert_eq!(rolled_back["rolledBack"], true);
+    assert!(!installed.exists());
+    let runs = store
+        .list_skill_governance_apply_runs(
+            cocli_store::SkillGovernanceScope::Agent,
+            &agent.id.to_string(),
+        )
+        .await
+        .expect("persisted runs");
+    assert_eq!(runs.len(), 1);
+    let persisted_run = &runs[0];
+    let persisted_lock = store
+        .get_skill_governance_lock(persisted_run.lock_id.expect("run lock id"))
+        .await
+        .expect("lock lookup")
+        .expect("persisted lock");
+    assert_eq!(persisted_lock.run_id, Some(persisted_run.id));
+    assert!(persisted_lock.released_at.is_some());
+    assert!(
+        store
+            .list_skill_governance_apply_audit("lock", persisted_lock.id)
+            .await
+            .expect("lock audit")
+            .iter()
+            .filter(|audit| audit.action == "renew")
+            .count()
+            >= 4
+    );
+    let actions = store
+        .list_skill_governance_apply_actions(persisted_run.id)
+        .await
+        .expect("persisted actions");
+    let action_audit = store
+        .list_skill_governance_apply_audit("action", actions[0].id)
+        .await
+        .expect("action audit");
+    for expected in [
+        "preflight",
+        "locked",
+        "staged",
+        "written",
+        "refreshing",
+        "verified",
+        "rolling_back",
+        "rolled_back",
+    ] {
+        assert!(
+            action_audit
+                .iter()
+                .any(|audit| audit.to_status.as_deref() == Some(expected)),
+            "missing journal boundary {expected}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn governance_scope_capabilities_reports_missing_workspace_binding_without_creating_roots() {
+    let temp = tempdir().expect("temp directory");
+    let runtime_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: runtime_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, runtime);
+
+    let (status, response) = json_request(
+        app,
+        "GET",
+        "/api/skills/governance/scopes?runtime=fake&scope=workspace",
+        json!({}),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert!(response["capabilities"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    assert!(response["diagnostics"].as_array().is_some_and(|items| items
+        .iter()
+        .any(|diagnostic| diagnostic["errorType"] == "unsupported")));
+    assert!(!runtime_root.exists());
+}
+
+#[tokio::test]
+async fn workspace_lockfile_restore_rejects_user_edit_before_writing() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    std::fs::create_dir_all(workspace_root.join(".cocli")).expect("workspace lock directory");
+    let lockfile = workspace_root.join(".cocli/skills.lock.json");
+    std::fs::write(&lockfile, "{\"managed\":true}\n").expect("initial lockfile");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "lockfile workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+    let (inspect_status, inspected) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(inspect_status, StatusCode::OK, "{inspected}");
+    let stored = store
+        .upsert_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+            "sha256:stored-lock",
+            inspected["diskFingerprint"]
+                .as_str()
+                .expect("disk fingerprint"),
+            inspected["diskHash"].as_str().expect("disk hash"),
+            json!({"managed": true}),
+            None,
+            None,
+            json!({"createdVia": "test"}),
+            json!({"restoreDocument": {"managed": true}}),
+            None,
+        )
+        .await
+        .expect("stored lockfile");
+    std::fs::write(&lockfile, "user edit\n").expect("user edit");
+    let (_, edited) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore/preview",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": edited["diskHash"]
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+
+    let (restore_status, restore) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": edited["diskHash"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(restore_status, StatusCode::CONFLICT, "{restore}");
+    assert_eq!(
+        std::fs::read_to_string(lockfile).expect("lockfile remains user edited"),
+        "user edit\n"
+    );
+}
+
+#[tokio::test]
+async fn workspace_lockfile_restore_is_atomic_versioned_and_reversible() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    std::fs::create_dir_all(workspace_root.join(".cocli")).expect("workspace lock directory");
+    let lockfile = workspace_root.join(".cocli/skills.lock.json");
+    std::fs::write(&lockfile, "{\n  \"generation\": 2\n}\n").expect("current lockfile");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "restorable lockfile workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+    let (_, inspected) = json_request(
+        app.clone(),
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    let stored = store
+        .upsert_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+            "logical-v2",
+            inspected["diskFingerprint"]
+                .as_str()
+                .expect("disk fingerprint"),
+            inspected["diskHash"].as_str().expect("disk hash"),
+            json!({"generation": 2}),
+            None,
+            None,
+            json!({"createdVia": "test"}),
+            json!({
+                "restoreDocument": {"generation": 1},
+                "restoreLockHash": "logical-v1"
+            }),
+            None,
+        )
+        .await
+        .expect("stored lockfile");
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore/preview",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": inspected["diskHash"]
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    let (restore_status, restored) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/workspace-lockfile/restore",
+        json!({
+            "workspaceId": workspace.id,
+            "expectedVersion": stored.version,
+            "expectedDiskHash": inspected["diskHash"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(restore_status, StatusCode::OK, "{restored}");
+    assert_eq!(
+        std::fs::read_to_string(&lockfile).expect("restored lockfile"),
+        "{\n  \"generation\": 1\n}\n"
+    );
+    let record = store
+        .get_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+        )
+        .await
+        .expect("lockfile lookup")
+        .expect("restored record");
+    assert_eq!(record.version, stored.version + 1);
+    assert_eq!(record.lock_hash, "logical-v1");
+    assert_eq!(record.document, json!({"generation": 1}));
+    assert_eq!(
+        record.restore_metadata["restoreDocument"],
+        json!({"generation": 2})
+    );
+    assert_eq!(record.restore_metadata["restoreLockHash"], "logical-v2");
+    assert!(record
+        .last_backup_path
+        .as_deref()
+        .is_some_and(|path| std::path::Path::new(path).exists()));
+    let (_, after) = json_request(
+        app,
+        "GET",
+        &format!(
+            "/api/skills/governance/workspace-lockfile?workspaceId={}",
+            workspace.id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(record.expected_disk_hash, after["diskHash"]);
+    assert_eq!(record.expected_disk_fingerprint, after["diskFingerprint"]);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn adoption_preview_blocks_symlink_escape_targets() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    let search_root = workspace_root.join(".fake/skills");
+    let external = temp.path().join("external/reviewer");
+    std::fs::create_dir_all(&search_root).expect("search root");
+    std::fs::create_dir_all(&external).expect("external skill");
+    std::fs::write(
+        external.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: outside target\n---\n",
+    )
+    .expect("external manifest");
+    symlink(&external, search_root.join("reviewer")).expect("escaped target symlink");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "adoption workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store, runtime);
+
+    let (status, preview) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/adoption/preview",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer"
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["blocked"], true);
+    assert!(preview["hazards"]
+        .as_array()
+        .is_some_and(|hazards| hazards.iter().any(|hazard| hazard == "symlink_escape")));
+}
+
+#[tokio::test]
+async fn adoption_commit_rejects_target_changes_after_preview() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    let skill_root = workspace_root.join(".fake/skills/reviewer");
+    std::fs::create_dir_all(&skill_root).expect("existing skill root");
+    std::fs::write(skill_root.join("SKILL.md"), "# Before\n").expect("existing manifest");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "adoption CAS workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+
+    let (_, artifact_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": skill_root}),
+    )
+    .await;
+    let (artifact_status, artifact) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": skill_root,
+            "expectedPreviewHash": artifact_preview["previewHash"],
+            "idempotencyKey": artifact_preview["idempotencyKey"],
+            "confirmationNonce": artifact_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(artifact_status, StatusCode::OK, "{artifact}");
+    let (_, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/adoption/preview",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy"
+        }),
+    )
+    .await;
+    std::fs::write(skill_root.join("SKILL.md"), "# After\n").expect("mutated target");
+
+    let (commit_status, commit) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/adoption/commit",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy",
+            "expectedFingerprint": preview["targetFingerprint"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit}");
+    assert!(store
+        .list_skill_governance_materializations(
+            SkillGovernanceScope::Workspace,
+            &workspace.id.to_string(),
+        )
+        .await
+        .expect("materializations")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn import_copy_adoption_is_journaled_audited_and_rollback_safe() {
+    let temp = tempdir().expect("temp directory");
+    let workspace_root = temp.path().join("project");
+    let skill_root = workspace_root.join(".fake/skills/reviewer");
+    std::fs::create_dir_all(&skill_root).expect("existing skill root");
+    let original = "---\nname: reviewer\ndescription: adoption fixture\n---\n";
+    std::fs::write(skill_root.join("SKILL.md"), original).expect("existing skill manifest");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "adoption workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+
+    let (artifact_preview_status, artifact_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": skill_root}),
+    )
+    .await;
+    assert_eq!(
+        artifact_preview_status,
+        StatusCode::OK,
+        "{artifact_preview}"
+    );
+    assert_eq!(artifact_preview["blocked"], false, "{artifact_preview}");
+    let (artifact_status, artifact) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": skill_root,
+            "expectedPreviewHash": artifact_preview["previewHash"],
+            "idempotencyKey": artifact_preview["idempotencyKey"],
+            "confirmationNonce": artifact_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(artifact_status, StatusCode::OK, "{artifact}");
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/adoption/preview",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy"
+        }),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["blocked"], false, "{preview}");
+    let (commit_status, adopted) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/adoption/commit",
+        json!({
+            "runtime": "fake",
+            "scope": "workspace",
+            "scopeId": workspace.id,
+            "skillName": "reviewer",
+            "mode": "import_copy",
+            "expectedFingerprint": preview["targetFingerprint"],
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(commit_status, StatusCode::OK, "{adopted}");
+    assert_eq!(adopted["ownership"], "adopted");
+    assert!(skill_root.join(".cocli-managed").is_file());
+    let materialization_id = adopted["id"]
+        .as_str()
+        .expect("materialization id")
+        .parse()
+        .expect("materialization uuid");
+    assert_eq!(
+        store
+            .list_skill_governance_adoption_audit(materialization_id)
+            .await
+            .expect("adoption audit")
+            .len(),
+        1
+    );
+    let runs = store
+        .list_skill_governance_apply_runs(
+            SkillGovernanceScope::Workspace,
+            &workspace.id.to_string(),
+        )
+        .await
+        .expect("adoption runs");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].status,
+        cocli_store::SkillGovernanceApplyRunStatus::Succeeded
+    );
+    let actions = store
+        .list_skill_governance_apply_actions(runs[0].id)
+        .await
+        .expect("adoption actions");
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        actions[0].status,
+        cocli_store::SkillGovernanceApplyActionStatus::Verified
+    );
+    let backup = PathBuf::from(actions[0].backup_path.as_deref().expect("adoption backup"));
+    assert!(backup.join("SKILL.md").is_file());
+    assert!(!backup.join(".cocli-managed").exists());
+
+    let (_, rollback_preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!(
+            "/api/skills/governance/runs/{}/rollback/preview",
+            runs[0].id
+        ),
+        json!({}),
+    )
+    .await;
+    assert_eq!(rollback_preview["rollbackRequired"], true);
+    let (rollback_status, rollback) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/runs/{}/rollback", runs[0].id),
+        json!({
+            "idempotencyKey": rollback_preview["idempotencyKey"],
+            "confirmationNonce": rollback_preview["confirmationNonce"],
+            "confirmRollback": true
+        }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK, "{rollback}");
+    assert_eq!(rollback["rolledBack"], true, "{rollback}");
+    assert_eq!(rollback["recoveryRequired"], false, "{rollback}");
+    assert_eq!(
+        std::fs::read_to_string(skill_root.join("SKILL.md")).expect("restored skill"),
+        original
+    );
+    assert!(!skill_root.join(".cocli-managed").exists());
+    assert!(store
+        .get_skill_governance_materialization(materialization_id)
+        .await
+        .expect("materialization lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn managed_artifact_commit_rejects_source_changes_after_preview() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(source.join("SKILL.md"), "# Before\n").expect("source manifest");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), runtime);
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": source}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    std::fs::write(source.join("SKILL.md"), "# After\n").expect("mutated source manifest");
+
+    let (commit_status, commit) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": source,
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit}");
+    assert!(store
+        .list_skill_governance_managed_artifacts()
+        .await
+        .expect("artifacts")
+        .is_empty());
+}
+
+#[tokio::test]
+async fn gc_commit_rejects_managed_store_content_drift() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(source.join("SKILL.md"), "# GC fixture\n").expect("source manifest");
+    let runtime_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: runtime_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), runtime);
+
+    let (_, artifact_preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/preview",
+        json!({"sourceKind": "local", "localPath": source}),
+    )
+    .await;
+    let (artifact_status, artifact) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/managed/artifacts/commit",
+        json!({
+            "sourceKind": "local",
+            "localPath": source,
+            "expectedPreviewHash": artifact_preview["previewHash"],
+            "idempotencyKey": artifact_preview["idempotencyKey"],
+            "confirmationNonce": artifact_preview["confirmationNonce"]
+        }),
+    )
+    .await;
+    assert_eq!(artifact_status, StatusCode::OK, "{artifact}");
+    let relative = artifact["storeRelativePath"]
+        .as_str()
+        .expect("store relative path");
+    let stored_manifest = runtime_root
+        .join("../managed-skills/v1/artifacts")
+        .join(relative)
+        .join("SKILL.md");
+    std::fs::write(&stored_manifest, "# Corrupted after preview\n")
+        .expect("corrupt managed artifact");
+
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/gc/preview",
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert!(preview["candidates"]
+        .as_array()
+        .is_some_and(|candidates| candidates
+            .iter()
+            .any(|candidate| candidate["entityId"] == artifact["id"])));
+    let (commit_status, commit) = json_request(
+        app,
+        "POST",
+        "/api/skills/governance/gc/commit",
+        json!({
+            "expectedPreviewHash": preview["previewHash"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"]
+        }),
+    )
+    .await;
+
+    assert_eq!(commit_status, StatusCode::CONFLICT, "{commit}");
+    assert!(stored_manifest.exists(), "drifted bytes are not deleted");
+    assert_eq!(
+        store
+            .list_skill_governance_managed_artifacts()
+            .await
+            .expect("artifacts")
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn gc_preview_excludes_foreign_materializations() {
+    let store = Store::in_memory().await.expect("store should open");
+    let artifact = store
+        .create_skill_governance_managed_artifact(NewSkillGovernanceManagedArtifact {
+            artifact_key: "foreign-gc-artifact".to_owned(),
+            artifact_kind: "adopted_skill".to_owned(),
+            source_provenance: json!({"kind": "test"}),
+            content_digest: "sha256:foreigncontent".to_owned(),
+            manifest_digest: "sha256:foreignmanifest".to_owned(),
+            schema_version: 1,
+            revision: "sha256:foreigncontent".to_owned(),
+            store_relative_path: "record-only/foreign/reviewer".to_owned(),
+            artifact: json!({"adoptionMode": "keep_foreign"}),
+            metadata: json!({}),
+        })
+        .await
+        .expect("artifact");
+    let materialization = store
+        .create_skill_governance_materialization(NewSkillGovernanceMaterialization {
+            artifact_id: artifact.id,
+            scope: SkillGovernanceScope::Workspace,
+            scope_id: "workspace-foreign".to_owned(),
+            target_path: "/tmp/foreign/reviewer".to_owned(),
+            target_runtime: "fake".to_owned(),
+            root_kind: SkillGovernanceMaterializationRootKind::Workspace,
+            installation_mode: SkillGovernanceInstallationMode::InPlace,
+            ownership: SkillGovernanceMaterializationOwnership::Foreign,
+            content_digest: "sha256:foreigncontent".to_owned(),
+            expected_destination: "/tmp/foreign/reviewer".to_owned(),
+            expected_fingerprint: "foreign-fingerprint".to_owned(),
+            verify_status: SkillGovernanceVerifyStatus::Verified,
+            receipt: json!({"mode": "keep_foreign"}),
+        })
+        .await
+        .expect("foreign materialization");
+    let app = router(
+        store,
+        Arc::new(GovernanceApplyRuntime {
+            workspace_root: tempdir()
+                .expect("runtime temp")
+                .path()
+                .join("runtime-workspaces"),
+        }),
+    );
+
+    let (status, preview) =
+        json_request(app, "POST", "/api/skills/governance/gc/preview", json!({})).await;
+
+    assert_eq!(status, StatusCode::OK, "{preview}");
+    assert!(!preview["candidates"]
+        .as_array()
+        .is_some_and(|candidates| candidates
+            .iter()
+            .any(|candidate| candidate["entityType"] == "materialization"
+                && candidate["entityId"] == materialization.id.to_string())));
+}
+
+#[tokio::test]
+async fn workspace_governance_apply_materializes_managed_artifact_and_real_lockfile() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: workspace fixture\n---\n",
+    )
+    .expect("source manifest");
+    let digests = governance_artifact_digests(&source).expect("artifact digests");
+    let workspace_root = temp.path().join("project");
+    std::fs::create_dir_all(&workspace_root).expect("workspace root");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: temp.path().join("runtime-workspaces"),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("directory").expect("provider"),
+            "governed workspace",
+            None,
+            json!({}),
+        )
+        .await
+        .expect("workspace");
+    store
+        .bind_workspace(
+            workspace.id,
+            workspace_root.to_str().expect("workspace utf8"),
+            None,
+        )
+        .await
+        .expect("workspace binding");
+    let app = router(store.clone(), runtime);
+
+    let (profile_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        json!({
+            "schemaVersion": 1,
+            "name": "workspace-managed-local",
+            "skills": [{
+                "logicalIdentity": "reviewer",
+                "source": {"kind": "local", "location": source.to_string_lossy()},
+                "contentDigest": digests.content_digest,
+                "manifestDigest": digests.manifest_digest,
+                "targetRuntime": "fake",
+                "installScope": "workspace",
+                "installationMode": "copy",
+                "enabled": true,
+                "updatePolicy": "pinned",
+                "allowedSources": ["local"],
+                "riskPolicy": "trusted"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(profile_status, StatusCode::CREATED, "{profile}");
+    let profile_id = profile["id"].as_str().expect("profile id");
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({"profileId": profile_id, "scope": "workspace", "scopeId": workspace.id}),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED, "{binding}");
+    let request = json!({
+        "scope": "workspace",
+        "scopeId": workspace.id,
+        "workspaceId": workspace.id,
+        "force": true
+    });
+    let (plan_status, plan) =
+        json_request(app.clone(), "POST", "/api/skills/governance/plans", request).await;
+    assert_eq!(plan_status, StatusCode::CREATED, "{plan}");
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "{approved}");
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert_eq!(preview["highRisk"], true);
+    let installed = workspace_root.join(".fake/skills/reviewer/SKILL.md");
+    let lockfile = workspace_root.join(".cocli/skills.lock.json");
+    assert!(!installed.exists());
+    assert!(!lockfile.exists());
+    let (apply_status, applied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        json!({
+            "expectedVersion": approved["plan"]["version"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"],
+            "confirmHighRisk": true
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["applied"], true, "{applied}");
+    assert!(installed.exists());
+    assert!(lockfile.exists());
+    let lock_bytes = std::fs::read_to_string(&lockfile).expect("lockfile");
+    assert!(!lock_bytes.contains(source.to_string_lossy().as_ref()));
+    assert!(!lock_bytes.contains("credentialRef"));
+    assert_eq!(
+        store
+            .list_skill_governance_managed_artifacts()
+            .await
+            .expect("artifacts")
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .list_skill_governance_materializations(
+                SkillGovernanceScope::Workspace,
+                &workspace.id.to_string(),
+            )
+            .await
+            .expect("materializations")
+            .len(),
+        1
+    );
+    let lock_record = store
+        .get_skill_governance_workspace_lockfile(
+            &workspace.id.to_string(),
+            ".cocli/skills.lock.json",
+        )
+        .await
+        .expect("lock record")
+        .expect("persisted lock record");
+    assert_eq!(
+        lock_record.lock_hash,
+        plan["preview"]["content"]["lockfileHash"]
+    );
+
+    std::fs::write(&lockfile, "user edit after apply\n").expect("user lock edit");
+    let run_id = applied["run"]["id"].as_str().expect("run id");
+    let (_, rollback_preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback/preview"),
+        json!({}),
+    )
+    .await;
+    let (rollback_status, rollback) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/runs/{run_id}/rollback"),
+        json!({
+            "idempotencyKey": rollback_preview["idempotencyKey"],
+            "confirmationNonce": rollback_preview["confirmationNonce"],
+            "confirmRollback": true
+        }),
+    )
+    .await;
+    assert_eq!(rollback_status, StatusCode::OK, "{rollback}");
+    assert_eq!(rollback["recoveryRequired"], true);
+    assert_eq!(
+        std::fs::read_to_string(lockfile).expect("preserved user lock edit"),
+        "user edit after apply\n"
+    );
+}
+
+#[tokio::test]
+async fn machine_governance_apply_uses_runtime_derived_user_root_without_an_agent() {
+    let temp = tempdir().expect("temp directory");
+    let source = temp.path().join("trusted-source");
+    std::fs::create_dir_all(&source).expect("source directory");
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: reviewer\ndescription: machine fixture\n---\n",
+    )
+    .expect("source manifest");
+    let digests = governance_artifact_digests(&source).expect("artifact digests");
+    let runtime_workspace_root = temp.path().join("runtime-workspaces");
+    let runtime = Arc::new(GovernanceApplyRuntime {
+        workspace_root: runtime_workspace_root.clone(),
+    });
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), runtime);
+    let (_, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        json!({
+            "schemaVersion": 1,
+            "name": "machine-managed-local",
+            "skills": [{
+                "logicalIdentity": "reviewer",
+                "source": {"kind": "local", "location": source.to_string_lossy()},
+                "contentDigest": digests.content_digest,
+                "manifestDigest": digests.manifest_digest,
+                "targetRuntime": "fake",
+                "installScope": "machine",
+                "installationMode": "copy",
+                "enabled": true,
+                "updatePolicy": "pinned",
+                "allowedSources": ["local"],
+                "riskPolicy": "trusted"
+            }]
+        }),
+    )
+    .await;
+    let (_, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({"profileId": profile["id"], "scope": "machine", "scopeId": "machine"}),
+    )
+    .await;
+    let (_, plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        json!({"scope": "machine", "scopeId": "machine", "force": true}),
+    )
+    .await;
+    let plan_id = plan["plan"]["id"].as_str().expect("plan id");
+    let (_, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    let (_, preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview["highRisk"], true);
+    let (apply_status, applied) = json_request(
+        app,
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        json!({
+            "expectedVersion": approved["plan"]["version"],
+            "idempotencyKey": preview["idempotencyKey"],
+            "confirmationNonce": preview["confirmationNonce"],
+            "confirmHighRisk": true
+        }),
+    )
+    .await;
+    assert_eq!(apply_status, StatusCode::OK, "{applied}");
+    assert_eq!(applied["applied"], true, "{applied}");
+    let installed = runtime_workspace_root.join("../machine-home/.fake/skills/reviewer/SKILL.md");
+    assert!(installed.exists());
+    assert_eq!(
+        store
+            .list_skill_governance_materializations(SkillGovernanceScope::Machine, "machine")
+            .await
+            .expect("machine materializations")
+            .len(),
+        1
+    );
+    assert!(store
+        .get_skill_governance_workspace_lockfile("machine", ".cocli/skills.lock.json")
+        .await
+        .expect("machine lock lookup")
+        .is_none());
+}
+
+#[tokio::test]
+async fn expired_interrupted_apply_is_recovered_as_persisted_manual_recovery() {
+    let temp = tempdir().expect("temp directory");
+    let database = temp.path().join("governance-recovery.sqlite3");
+    let store = Store::open(&database).await.expect("store should open");
+    let boundaries = [
+        SkillGovernanceApplyActionStatus::Preflight,
+        SkillGovernanceApplyActionStatus::Locked,
+        SkillGovernanceApplyActionStatus::BackedUp,
+        SkillGovernanceApplyActionStatus::Staged,
+        SkillGovernanceApplyActionStatus::Written,
+        SkillGovernanceApplyActionStatus::LockfileWritten,
+        SkillGovernanceApplyActionStatus::Refreshing,
+        SkillGovernanceApplyActionStatus::RollingBack,
+    ];
+    let mut run_ids = Vec::new();
+    for (index, boundary) in boundaries.into_iter().enumerate() {
+        let scope_id = format!("machine-{index}");
+        let lock = store
+            .acquire_skill_governance_lock(
+                SkillGovernanceScope::Machine,
+                &scope_id,
+                "interrupted-process",
+                Some(4242),
+                None,
+                &format!("expired-lease-{index}"),
+                Utc::now() - ChronoDuration::seconds(1),
+            )
+            .await
+            .expect("expired lease record")
+            .lock;
+        let run = store
+            .create_skill_governance_apply_run(NewSkillGovernanceApplyRun {
+                scope: SkillGovernanceScope::Machine,
+                scope_id,
+                plan_id: None,
+                lock_id: Some(lock.id),
+                idempotency_key: format!("restart-recovery-{index}"),
+                nonce: format!("restart-nonce-{index}"),
+                observation_hash: "observation".to_owned(),
+                desired_hash: "desired".to_owned(),
+                lock_hash: "lock".to_owned(),
+                backup_path: None,
+                quarantine_path: None,
+                evidence: json!({"phase": "preflight", "applied": false}),
+            })
+            .await
+            .expect("run should persist");
+        let run = store
+            .transition_skill_governance_apply_run(
+                run.id,
+                run.version,
+                if boundary == SkillGovernanceApplyActionStatus::RollingBack {
+                    SkillGovernanceApplyRunStatus::RollingBack
+                } else {
+                    SkillGovernanceApplyRunStatus::Running
+                },
+                SkillGovernanceRecoveryStatus::NotRequired,
+                None,
+                None,
+                json!({"phase": boundary.as_str(), "applied": false}),
+                None,
+            )
+            .await
+            .expect("run boundary should persist");
+        let action = store
+            .create_skill_governance_apply_action(NewSkillGovernanceApplyAction {
+                run_id: run.id,
+                sequence: 0,
+                action_key: format!("boundary-{index}"),
+                request_hash: format!("request-{index}"),
+                backup_path: None,
+                quarantine_path: None,
+                evidence: json!({"phase": "pending"}),
+            })
+            .await
+            .expect("action should persist");
+        store
+            .transition_skill_governance_apply_action(
+                action.id,
+                action.version,
+                boundary,
+                None,
+                None,
+                None,
+                json!({"phase": boundary.as_str()}),
+                None,
+            )
+            .await
+            .expect("action boundary should persist");
+        run_ids.push(run.id);
+    }
+    store.close().await;
+
+    let reopened = Store::open(&database).await.expect("store should reopen");
+    let app = router(reopened.clone(), Arc::new(FakeRuntime));
+    for run_id in run_ids {
+        let (status, response) = json_request(
+            app.clone(),
+            "GET",
+            &format!("/api/skills/governance/runs/{run_id}"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{response}");
+        assert_eq!(response["status"], "recovery_required");
+        assert!(response["recoveryReasons"]
+            .as_array()
+            .is_some_and(|reasons| reasons
+                .iter()
+                .any(|reason| reason == "lease_expired_after_restart")));
+        let persisted = reopened
+            .get_skill_governance_apply_run(run_id)
+            .await
+            .expect("run lookup")
+            .expect("persisted run");
+        assert_eq!(
+            persisted.status,
+            SkillGovernanceApplyRunStatus::RecoveryRequired
+        );
+        assert_eq!(
+            reopened
+                .list_skill_governance_apply_actions(run_id)
+                .await
+                .expect("actions")
+                .first()
+                .expect("action")
+                .status,
+            SkillGovernanceApplyActionStatus::RecoveryRequired
+        );
+    }
+}
+
+#[tokio::test]
+async fn machine_skill_inventory_exists_without_agents_and_isolates_failures() {
+    let store = Store::in_memory().await.expect("store should open");
+    let runtime = Arc::new(SnapshotSkillRuntime::default());
+    let app = router(store.clone(), runtime);
+
+    let (inventory_status, inventory) = json_request(
+        app.clone(),
+        "GET",
+        "/api/runtimes/skills/inventory",
+        json!({}),
+    )
+    .await;
+    assert_eq!(inventory_status, StatusCode::OK);
+    assert!(inventory["observedAt"].is_string());
+    assert_eq!(inventory["agents"].as_array().map(Vec::len), Some(0));
+
+    let (empty_status, empty) =
+        json_request(app.clone(), "GET", "/api/runtimes/skills/doctor", json!({})).await;
+    assert_eq!(empty_status, StatusCode::OK);
+    assert_eq!(empty["agents"].as_array().map(Vec::len), Some(0));
+    assert!(empty["runtimes"].as_array().is_some_and(|runtimes| runtimes
+        .iter()
+        .any(|runtime| { runtime["runtime"] == "fake" && runtime["skillCount"] == 1 })));
+    assert!(empty["diagnostics"]
+        .as_array()
+        .is_some_and(|diagnostics| diagnostics.iter().any(|item| item["runtime"] == "grok")));
+
+    let channel = store
+        .create_channel("partial-skills")
+        .await
+        .expect("channel");
+    store
+        .create_agent(channel.id, "healthy", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("healthy agent");
+    store
+        .create_agent(channel.id, "broken", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("broken agent");
+
+    let (status, body) = json_request(
+        app,
+        "GET",
+        "/api/runtimes/skills/doctor?force=true",
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["agents"].as_array().map(Vec::len), Some(1));
+    assert!(body["diagnostics"]
+        .as_array()
+        .is_some_and(|diagnostics| diagnostics
+            .iter()
+            .any(|item| { item["subject"] == "agent" && item["agentName"] == "broken" })));
 }
 
 #[tokio::test]

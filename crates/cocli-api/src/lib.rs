@@ -1,6 +1,7 @@
 //! Local HTTP API and runtime-neutral application service.
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,8 +33,31 @@ pub use cocli_driver_core::{
 };
 
 mod mcp_http;
+mod skill_apply;
+mod skill_apply_http;
+mod skill_governance;
+mod skill_governance_http;
 mod skill_http;
 mod skill_import;
+mod skill_managed_http;
+
+/// Deterministic content and manifest digests used by trusted local Skill
+/// profiles. This helper is read-only and never executes artifact content.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceArtifactDigests {
+    pub content_digest: String,
+    pub manifest_digest: String,
+}
+
+/// Computes Phase 3B digests for a local Skill directory without mutating it.
+pub fn governance_artifact_digests(root: &FsPath) -> Result<GovernanceArtifactDigests, String> {
+    let artifact = skill_apply::load_local_artifact(root)?;
+    Ok(GovernanceArtifactDigests {
+        content_digest: artifact.content_digest,
+        manifest_digest: artifact.manifest_digest,
+    })
+}
 
 /// Reconciles SQLite-managed skill installs with runtime workspace files.
 ///
@@ -107,6 +131,32 @@ impl LiveEvent {
 #[async_trait]
 pub trait LiveEventSink: Send + Sync {
     async fn emit(&self, event: LiveEvent);
+}
+
+/// Durable checkpoint sink invoked by MCP adapters at mutation boundaries.
+/// The adapter must await each checkpoint before advancing to the next
+/// non-idempotent phase.
+#[async_trait]
+pub trait McpApplyJournalSink: Send + Sync {
+    async fn checkpoint(
+        &self,
+        run_id: &str,
+        entry: &cocli_driver_core::McpApplyJournalEntry,
+    ) -> Result<(), RuntimeError>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoMcpApplyJournalSink;
+
+#[async_trait]
+impl McpApplyJournalSink for NoMcpApplyJournalSink {
+    async fn checkpoint(
+        &self,
+        _run_id: &str,
+        _entry: &cocli_driver_core::McpApplyJournalEntry,
+    ) -> Result<(), RuntimeError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -255,6 +305,8 @@ pub struct RuntimeSkillSearchPath {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSkillIssue {
+    /// Stable identifier for the logical root cause, independent of display order.
+    pub fingerprint: String,
     pub code: String,
     pub severity: String,
     pub message: String,
@@ -262,6 +314,10 @@ pub struct RuntimeSkillIssue {
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub skill_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related_codes: Vec<String>,
 }
 
 /// One discovered candidate plus the evidence needed to interpret it.
@@ -271,6 +327,8 @@ pub struct RuntimeSkillFinding {
     #[serde(flatten)]
     pub skill: RuntimeSkill,
     pub runtime: String,
+    /// Stable identity used to deduplicate filesystem aliases and machine/Agent overlays.
+    pub fingerprint: String,
     pub scope: String,
     pub source_path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,10 +344,45 @@ pub struct RuntimeSkillFinding {
     pub issues: Vec<RuntimeSkillIssue>,
 }
 
+/// Runtime-owned canonical destination for one governed Agent Skill.
+///
+/// The governance applier never accepts an arbitrary target path from an API
+/// caller. It asks the Runtime adapter to derive the search root and entry from
+/// the Agent workspace and logical Skill name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GovernanceSkillTarget {
+    pub scope_root: PathBuf,
+    pub search_root: PathBuf,
+    pub entry_path: PathBuf,
+}
+
+/// Read-only capability evidence for one Runtime-derived Skill root.
+///
+/// API callers never provide `path` back as an automatic mutation target. The
+/// Runtime service resolves the target again from the canonical scope before
+/// every governed write.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GovernanceScopeCapability {
+    pub runtime: String,
+    pub scope: String,
+    pub root_kind: String,
+    pub path: String,
+    pub status: String,
+    pub exists: bool,
+    pub writable: bool,
+    pub atomic_rename: bool,
+    pub supported: bool,
+    pub evidence: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+}
+
 /// Filesystem/native-probe report returned by the runtime boundary.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSkillInspection {
+    pub observed_at: DateTime<Utc>,
     pub runtime: String,
     pub compatibility: RuntimeSkillCompatibility,
     pub evidence: RuntimeSkillEvidence,
@@ -760,6 +853,56 @@ pub trait RuntimeService: Send + Sync {
         Ok(cocli_driver_core::McpInventory::default())
     }
 
+    /// Negotiates the versioned MCP adapter contract without mutating Runtime
+    /// or user configuration state.
+    async fn inspect_mcp_capabilities(
+        &self,
+    ) -> Result<cocli_driver_core::McpCapabilitySnapshot, RuntimeError> {
+        let mut snapshot = cocli_driver_core::McpCapabilitySnapshot::default();
+        snapshot.hash = cocli_driver_core::hash_mcp_capabilities(&snapshot);
+        Ok(snapshot)
+    }
+
+    /// Revalidates adapter/version/source constraints for a persisted plan.
+    async fn preflight_mcp(
+        &self,
+        plan: &cocli_driver_core::McpPlan,
+    ) -> Result<cocli_driver_core::McpPreflightReport, RuntimeError> {
+        Ok(cocli_driver_core::McpPreflightReport {
+            plan_id: plan.id.clone(),
+            plan_hash: plan.plan_hash.clone(),
+            capability_hash: plan.capability_hash.clone(),
+            observation_hash: plan.observation_hash.clone(),
+            config_hash: plan.config_hash.clone(),
+            actions: Vec::new(),
+            stale_reasons: Vec::new(),
+            executable: false,
+        })
+    }
+
+    /// Applies an already-approved MCP plan through runtime-specific writers.
+    /// Implementations must enforce per-source CAS and atomic backup/write
+    /// semantics; the default is deliberately unsupported.
+    async fn apply_mcp(
+        &self,
+        _request: cocli_driver_core::McpApplyExecutionRequest,
+        _journal: Arc<dyn McpApplyJournalSink>,
+    ) -> Result<cocli_driver_core::McpApplyExecutionResult, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "MCP configuration apply is not supported".to_owned(),
+        ))
+    }
+
+    /// Restores opaque backups produced by [`RuntimeService::apply_mcp`].
+    async fn rollback_mcp(
+        &self,
+        _request: cocli_driver_core::McpRollbackExecutionRequest,
+    ) -> Result<cocli_driver_core::McpRollbackExecutionResult, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "MCP configuration rollback is not supported".to_owned(),
+        ))
+    }
+
     /// Returns skill compatibility for one runtime name.
     fn skill_compatibility(&self, _runtime: &str) -> RuntimeSkillCompatibility {
         RuntimeSkillCompatibility::Unknown
@@ -781,6 +924,7 @@ pub trait RuntimeService: Send + Sync {
             .await?
             .into_iter()
             .map(|skill| RuntimeSkillFinding {
+                fingerprint: format!("{}:{}", runtime, skill.path),
                 scope: skill.skill_type.clone(),
                 source_path: skill.path.clone(),
                 resolved_path: None,
@@ -796,6 +940,7 @@ pub trait RuntimeService: Send + Sync {
             })
             .collect();
         Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
             runtime,
             compatibility: self.skill_compatibility(&agent.runtime),
             evidence,
@@ -803,6 +948,70 @@ pub trait RuntimeService: Send + Sync {
             skills,
             issues: Vec::new(),
         })
+    }
+
+    /// Inspects user/global skill roots for a Runtime without creating an Agent.
+    async fn inspect_machine_skills(
+        &self,
+        runtime: &str,
+    ) -> Result<RuntimeSkillInspection, RuntimeError> {
+        Ok(RuntimeSkillInspection {
+            observed_at: Utc::now(),
+            runtime: runtime.to_owned(),
+            compatibility: self.skill_compatibility(runtime),
+            evidence: RuntimeSkillEvidence::default(),
+            search_paths: Vec::new(),
+            skills: Vec::new(),
+            issues: Vec::new(),
+        })
+    }
+
+    /// Resolves a canonical Agent-workspace target without creating it or
+    /// stopping/restarting a Runtime Session.
+    async fn governance_skill_target(
+        &self,
+        _agent: &Agent,
+        _skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed Agent Skill target".to_owned(),
+        ))
+    }
+
+    /// Reports canonical Runtime Skill roots for a machine/user or resolved
+    /// Workspace scope without creating any directory.
+    async fn governance_scope_capabilities(
+        &self,
+        _runtime: &str,
+        _scope: &str,
+        _scope_root: Option<&FsPath>,
+    ) -> Result<Vec<GovernanceScopeCapability>, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed machine/workspace Skill root contract".to_owned(),
+        ))
+    }
+
+    /// Resolves one canonical machine/user or Workspace Skill target. The
+    /// optional root is supplied only after cocli resolves a durable Workspace
+    /// binding; arbitrary HTTP paths are never forwarded here.
+    async fn governance_skill_target_in_scope(
+        &self,
+        _runtime: &str,
+        _scope: &str,
+        _scope_root: Option<&FsPath>,
+        _skill_name: &str,
+    ) -> Result<GovernanceSkillTarget, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime has no governed machine/workspace Skill target".to_owned(),
+        ))
+    }
+
+    /// Returns the cocli-owned immutable artifact root. This is not a Runtime
+    /// Skill search path and never confers ownership over a whole Runtime root.
+    async fn governance_managed_artifact_root(&self) -> Result<PathBuf, RuntimeError> {
+        Err(RuntimeError::Unsupported(
+            "runtime service has no managed Skill artifact store".to_owned(),
+        ))
     }
 
     /// Atomically installs or refreshes one library skill in the agent workspace.
@@ -909,10 +1118,13 @@ pub(crate) struct AppState {
     deliveries: Arc<DeliveryCoordinator>,
     _delivery_worker: Arc<DeliveryWorker>,
     skill_mutation_locks: SkillMutationLocks,
+    mcp_apply_locks: McpApplyLocks,
+    skill_snapshots: Arc<skill_http::SkillSnapshotCoordinator>,
     bridge_mutation_lock: Arc<Mutex<()>>,
 }
 
 type SkillMutationLocks = Arc<Mutex<HashMap<Uuid, Arc<Mutex<()>>>>>;
+type McpApplyLocks = Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>;
 
 /// Tuning for the local SQLite-backed delivery worker.
 #[derive(Clone, Copy, Debug)]
@@ -1284,6 +1496,9 @@ fn router_with_delivery_config_and_live_events(
         ));
     Router::new()
         .merge(mcp_http::router())
+        .merge(skill_apply_http::router())
+        .merge(skill_governance_http::router())
+        .merge(skill_managed_http::router())
         .merge(skill_http::router())
         .merge(bridge_router)
         .route("/healthz", get(health))
@@ -1421,6 +1636,8 @@ fn router_with_delivery_config_and_live_events(
             deliveries,
             _delivery_worker: delivery_worker,
             skill_mutation_locks: Arc::new(Mutex::new(HashMap::new())),
+            mcp_apply_locks: Arc::new(Mutex::new(HashMap::new())),
+            skill_snapshots: skill_http::SkillSnapshotCoordinator::new(),
             bridge_mutation_lock: Arc::new(Mutex::new(())),
         })
 }
@@ -4271,9 +4488,27 @@ impl From<StoreError> for ApiError {
                 Some(StatusCode::NOT_FOUND)
             }
             StoreError::InvalidWorkspacePortableLocator { .. } => Some(StatusCode::BAD_REQUEST),
+            StoreError::McpProfileNotFound(_)
+            | StoreError::McpProfileBindingNotFound(_)
+            | StoreError::McpPlanNotFound(_)
+            | StoreError::McpApplyRunNotFound(_)
+            | StoreError::McpBundleImportNotFound(_) => Some(StatusCode::NOT_FOUND),
+            StoreError::McpProfileVersionConflict { .. }
+            | StoreError::McpProfileBindingVersionConflict { .. }
+            | StoreError::McpBundleImportConflict(_) => Some(StatusCode::CONFLICT),
+            StoreError::InvalidMcpProfile(_)
+            | StoreError::InvalidMcpBindingTarget(_)
+            | StoreError::InvalidMcpPlanDecision(_)
+            | StoreError::InvalidMcpApplyRun(_)
+            | StoreError::InvalidMcpBundleImport(_) => Some(StatusCode::BAD_REQUEST),
             StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
                 Some(StatusCode::CONFLICT)
             }
+            StoreError::SkillGovernanceNotFound { .. } => Some(StatusCode::NOT_FOUND),
+            StoreError::SkillGovernanceVersionConflict { .. }
+            | StoreError::SkillGovernanceTransitionConflict { .. }
+            | StoreError::SkillGovernanceLockHeld { .. }
+            | StoreError::SkillGovernanceIdempotencyConflict { .. } => Some(StatusCode::CONFLICT),
             StoreError::InvalidSkillName(_)
             | StoreError::InvalidSkillFilePath(_)
             | StoreError::InvalidSkillFileSize { .. } => Some(StatusCode::BAD_REQUEST),

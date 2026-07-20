@@ -47,6 +47,14 @@ pub(crate) async fn probe_skills(
     codex_binary: &Path,
     workspace: &Path,
 ) -> Result<NativeSkillProbe, DriverError> {
+    probe_skills_with_timeout(codex_binary, workspace, PROBE_TIMEOUT).await
+}
+
+async fn probe_skills_with_timeout(
+    codex_binary: &Path,
+    workspace: &Path,
+    timeout: Duration,
+) -> Result<NativeSkillProbe, DriverError> {
     let mut child = Command::new(codex_binary)
         .arg("app-server")
         .arg("--listen")
@@ -82,7 +90,7 @@ pub(crate) async fn probe_skills(
             }),
         )
         .await?;
-        read_response(&mut stdout, 1).await?;
+        read_response(&mut stdout, 1, timeout).await?;
 
         write_message(
             &mut stdin,
@@ -99,7 +107,7 @@ pub(crate) async fn probe_skills(
             }),
         )
         .await?;
-        let response = read_response(&mut stdout, 2).await?;
+        let response = read_response(&mut stdout, 2, timeout).await?;
         parse_skills_response(&response)
     }
     .await;
@@ -121,8 +129,12 @@ async fn write_message(
     stdin.flush().await.map_err(DriverError::Io)
 }
 
-async fn read_response(stdout: &mut BufReader<ChildStdout>, id: u64) -> Result<Value, DriverError> {
-    tokio::time::timeout(PROBE_TIMEOUT, async {
+async fn read_response(
+    stdout: &mut BufReader<ChildStdout>,
+    id: u64,
+    timeout: Duration,
+) -> Result<Value, DriverError> {
+    tokio::time::timeout(timeout, async {
         loop {
             let mut line = String::new();
             let read = stdout.read_line(&mut line).await.map_err(DriverError::Io)?;
@@ -209,6 +221,83 @@ mod tests {
         assert_eq!(probe.skills[0].enabled, Some(true));
     }
 
+    #[tokio::test]
+    async fn missing_codex_cli_is_reported() {
+        let temp = tempfile::tempdir().expect("temp directory");
+        let error = probe_skills(&temp.path().join("missing-codex"), temp.path())
+            .await
+            .expect_err("missing executable should fail");
+        assert!(matches!(error, DriverError::Io(_)));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn app_server_timeout_is_bounded() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let binary = temp.path().join("slow-codex");
+        fs::write(&binary, "#!/bin/sh\nsleep 1\n").expect("fake executable");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("permissions");
+
+        let error = probe_skills_with_timeout(&binary, temp.path(), Duration::from_millis(20))
+            .await
+            .expect_err("probe should time out");
+        assert!(error.to_string().contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nonzero_app_server_exit_is_reported() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let binary = temp.path().join("failing-codex");
+        fs::write(&binary, "#!/bin/sh\nexit 42\n").expect("fake executable");
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("permissions");
+
+        let error = probe_skills(&binary, temp.path())
+            .await
+            .expect_err("nonzero exit should fail");
+        assert!(error.to_string().contains("exited before response 1"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn malformed_json_and_json_rpc_errors_are_reported() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().expect("temp directory");
+        let malformed = temp.path().join("malformed-codex");
+        fs::write(
+            &malformed,
+            "#!/bin/sh\nread _line\nprintf '%s\\n' '{bad json'\n",
+        )
+        .expect("fake executable");
+        fs::set_permissions(&malformed, fs::Permissions::from_mode(0o755)).expect("permissions");
+        let error = probe_skills(&malformed, temp.path())
+            .await
+            .expect_err("malformed JSON should fail");
+        assert!(error
+            .to_string()
+            .contains("decode codex app-server response"));
+
+        let rpc_error = temp.path().join("rpc-error-codex");
+        fs::write(
+            &rpc_error,
+            "#!/bin/sh\nread _line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}'\nread _line\nread _line\nprintf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32603,\"message\":\"boom\"}}'\n",
+        )
+        .expect("fake executable");
+        fs::set_permissions(&rpc_error, fs::Permissions::from_mode(0o755)).expect("permissions");
+        let error = probe_skills(&rpc_error, temp.path())
+            .await
+            .expect_err("JSON-RPC error should fail");
+        assert!(error.to_string().contains("request 2 failed"));
+    }
+
     #[test]
     fn parses_skills_list_without_claiming_session_visibility() {
         let response = json!({
@@ -241,5 +330,14 @@ mod tests {
     fn rejects_a_response_without_a_result() {
         let error = parse_skills_response(&json!({"id": 2})).expect_err("missing result");
         assert!(error.to_string().contains("has no result"));
+    }
+
+    #[test]
+    fn rejects_a_partial_skills_list_result() {
+        let error = parse_skills_response(&json!({"id": 2, "result": {}}))
+            .expect_err("partial result should fail");
+        assert!(error
+            .to_string()
+            .contains("decode codex skills/list result"));
     }
 }
