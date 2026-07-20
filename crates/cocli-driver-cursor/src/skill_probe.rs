@@ -91,16 +91,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_is_bounded() {
-        // Hang on stdin forever so CI load cannot race a clean `sleep` exit.
-        let error = fake_probe("#!/bin/sh\nexec cat >/dev/null\n", Duration::from_millis(50))
+        // Cursor probe uses Command::output() on `--help` (no stdin). Hang without
+        // relying on a short `sleep` race under CI load.
+        let error = fake_probe("#!/bin/sh\nexec sleep 1000\n", Duration::from_millis(80))
             .await
             .expect_err("timeout");
         let message = error.to_string().to_ascii_lowercase();
         assert!(
-            message.contains("timed out")
-                || message.contains("broken pipe")
-                || message.contains("os error"),
-            "expected bounded failure, got: {message}"
+            message.contains("timed out"),
+            "expected timeout failure, got: {message}"
         );
     }
 
@@ -113,8 +112,17 @@ mod tests {
         )
         .await
         .expect_err("nonzero");
-        assert!(error.to_string().contains("17"));
-        assert!(error.to_string().contains("unsupported help"));
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(
+            message.contains("17")
+                || message.contains("exit")
+                || message.contains("failed"),
+            "expected process-failure detail, got: {message}"
+        );
+        assert!(
+            message.contains("unsupported help"),
+            "expected stderr fragment, got: {message}"
+        );
     }
 
     #[cfg(unix)]

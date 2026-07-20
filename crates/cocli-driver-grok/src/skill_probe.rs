@@ -209,10 +209,10 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp directory");
         let slow = temp.path().join("slow-grok");
-        // Hang on stdin forever so CI load cannot race a clean `sleep` exit.
-        fs::write(&slow, "#!/bin/sh\nexec cat >/dev/null\n").expect("slow executable");
+        // Long sleep so the probe timeout always wins under CI load.
+        fs::write(&slow, "#!/bin/sh\nexec sleep 1000\n").expect("slow executable");
         fs::set_permissions(&slow, fs::Permissions::from_mode(0o755)).expect("permissions");
-        let error = probe_skills_with_timeout(&slow, temp.path(), Duration::from_millis(50))
+        let error = probe_skills_with_timeout(&slow, temp.path(), Duration::from_millis(80))
             .await
             .expect_err("probe should time out");
         let message = error.to_string().to_ascii_lowercase();

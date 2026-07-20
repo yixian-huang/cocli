@@ -200,20 +200,24 @@ mod tests {
             assert_eq!(mode, 0o600);
         }
 
+        let cocli_bin = Path::new(".cocli").join("bin");
+        let cocli_bin = cocli_bin.to_string_lossy();
+        assert!(injection.env_vars.iter().any(|(k, v)| {
+            k == "COCLI_ACTION_CONFIG"
+                && Path::new(v).ends_with(Path::new(".cocli").join("action.json"))
+        }));
         assert!(injection
             .env_vars
             .iter()
-            .any(|(k, v)| k == "COCLI_ACTION_CONFIG" && v.ends_with(".cocli/action.json")));
+            .any(|(k, v)| k == "PATH" && v.contains(cocli_bin.as_ref())));
         assert!(injection
             .env_vars
             .iter()
-            .any(|(k, v)| k == "PATH" && v.contains(".cocli/bin")));
-        assert!(injection
-            .env_vars
-            .iter()
-            .any(|(k, v)| k == "COCLI_ACTION_ROOT" && v.ends_with(".cocli")));
+            .any(|(k, v)| k == "COCLI_ACTION_ROOT" && Path::new(v).ends_with(".cocli")));
     }
 
+    // Injected wrapper is a POSIX shell script; execute it only on Unix.
+    #[cfg(unix)]
     #[test]
     fn injected_wrapper_audits_task_update_status() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -255,6 +259,7 @@ mod tests {
         assert!(audit_raw.contains("\"tool\":\"update_task_status\""));
     }
 
+    #[cfg(unix)]
     #[test]
     fn injected_wrapper_appends_audit_jsonl() {
         let tmp = tempfile::tempdir().expect("tempdir");

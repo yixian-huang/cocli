@@ -238,12 +238,12 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp directory");
         let binary = temp.path().join("slow-codex");
-        // Hang on stdin forever so the probe cannot observe a clean exit race
-        // before the response timeout (plain `sleep` was flaky under CI load).
-        fs::write(&binary, "#!/bin/sh\nexec cat >/dev/null\n").expect("fake executable");
+        // Hang without producing JSON so the response timeout always wins.
+        // `cat` alone can race with closed stdin under `.output()`-style setups.
+        fs::write(&binary, "#!/bin/sh\nexec sleep 1000\n").expect("fake executable");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("permissions");
 
-        let error = probe_skills_with_timeout(&binary, temp.path(), Duration::from_millis(50))
+        let error = probe_skills_with_timeout(&binary, temp.path(), Duration::from_millis(80))
             .await
             .expect_err("probe should time out");
         let message = error.to_string().to_ascii_lowercase();
