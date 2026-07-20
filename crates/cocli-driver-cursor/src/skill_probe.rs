@@ -114,9 +114,7 @@ mod tests {
         .expect_err("nonzero");
         let message = error.to_string().to_ascii_lowercase();
         assert!(
-            message.contains("17")
-                || message.contains("exit")
-                || message.contains("failed"),
+            message.contains("17") || message.contains("exit") || message.contains("failed"),
             "expected process-failure detail, got: {message}"
         );
         assert!(

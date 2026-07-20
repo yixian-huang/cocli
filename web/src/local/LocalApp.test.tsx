@@ -2064,21 +2064,32 @@ describe('LocalApp', () => {
     fireEvent.click(screen.getByRole('button', { name: 'MCP' }))
 
     expect(await screen.findByRole('heading', { name: 'MCP inventory and doctor' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: /Runtime x Server matrix/i })).toBeInTheDocument()
-    expect(screen.getByRole('row', { name: /cursor D✓ C✓ L✓ E✓ P× A· H× S· I·/ })).toBeInTheDocument()
-    expect(screen.getByText(/cursor-agent mcp list-tools/)).toBeInTheDocument()
+    // Doctor/matrix loads asynchronously after the shell heading paints.
+    expect(
+      await screen.findByRole('heading', { name: /Runtime x Server matrix/i }),
+    ).toBeInTheDocument()
+    expect(
+      await screen.findByRole('row', { name: /cursor D✓ C✓ L✓ E✓ P× A· H× S· I·/ }),
+    ).toBeInTheDocument()
+    expect(await screen.findByText(/cursor-agent mcp list-tools/)).toBeInTheDocument()
     expect(screen.getByText(/approval_missing/)).toBeInTheDocument()
     expect(screen.getByText(/Phase 2C applies only valid approvals/)).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Runtime adapter capabilities' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: 'Runtime adapter capabilities' }),
+    ).toBeInTheDocument()
     expect(screen.getAllByText(/cursor_structured_json_fallback/).length).toBeGreaterThan(0)
-    expect(screen.getByRole('heading', { name: 'Portability' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Adapter conformance' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Portability' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: 'Adapter conformance' }),
+    ).toBeInTheDocument()
     expect(screen.getByText(/conformance-hash-1/)).toBeInTheDocument()
     expect(screen.getByText(/fake adapter conformance passed/)).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Profiles' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Profiles' })).toBeInTheDocument()
     expect(screen.getByText('Ops baseline')).toBeInTheDocument()
     expect(screen.getAllByText(/machine:machine-local/).length).toBeGreaterThan(0)
-    expect(screen.getByRole('heading', { name: 'Effective desired state' })).toBeInTheDocument()
+    expect(
+      await screen.findByRole('heading', { name: 'Effective desired state' }),
+    ).toBeInTheDocument()
     expect(screen.getByText(/same-precedence profiles/)).toBeInTheDocument()
     expect(screen.getByText(/high-risk context/)).toBeInTheDocument()
 

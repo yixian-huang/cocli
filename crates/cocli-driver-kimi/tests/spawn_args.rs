@@ -59,19 +59,28 @@ fn spawn_args_includes_model() {
 fn spawn_args_canonical_order() {
     let c = ctx("SYS", "INIT", Some("sid"), "model-x");
     let args = build_spawn_args(&c);
+    let working_dir = Path::new("/tmp/ws");
+    let agent_file = working_dir
+        .join(".cocli-kimi-agent.yaml")
+        .to_string_lossy()
+        .into_owned();
+    let mcp_file = working_dir
+        .join(".cocli-kimi-mcp.json")
+        .to_string_lossy()
+        .into_owned();
     assert_eq!(
         args,
         vec![
-            "--wire",
-            "--yolo",
-            "--agent-file",
-            "/tmp/ws/.cocli-kimi-agent.yaml",
-            "--mcp-config-file",
-            "/tmp/ws/.cocli-kimi-mcp.json",
-            "--session",
-            "sid",
-            "--model",
-            "model-x",
+            "--wire".to_string(),
+            "--yolo".to_string(),
+            "--agent-file".to_string(),
+            agent_file,
+            "--mcp-config-file".to_string(),
+            mcp_file,
+            "--session".to_string(),
+            "sid".to_string(),
+            "--model".to_string(),
+            "model-x".to_string(),
         ]
     );
 }
