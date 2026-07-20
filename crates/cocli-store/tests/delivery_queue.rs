@@ -182,7 +182,7 @@ async fn reopening_releases_in_flight_deliveries_for_retry() {
         .reserve_due_deliveries(1, 5, Utc::now())
         .await
         .expect("reserve");
-    drop(store);
+    store.close().await;
 
     let reopened = Store::open(&database_path).await.expect("reopen");
     assert_eq!(
@@ -199,8 +199,11 @@ async fn reopening_releases_in_flight_deliveries_for_retry() {
     assert_eq!(reserved.len(), 1);
     assert_eq!(reserved[0].attempts, 2);
 
-    drop(reopened);
-    std::fs::remove_file(database_path).expect("remove temporary database");
+    reopened.close().await;
+    // Windows may keep the SQLite file briefly locked after drop; cleanup is best-effort.
+    let _ = std::fs::remove_file(&database_path);
+    let _ = std::fs::remove_file(format!("{}-wal", database_path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", database_path.display()));
 }
 
 #[tokio::test]

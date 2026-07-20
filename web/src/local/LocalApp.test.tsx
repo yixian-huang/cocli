@@ -2174,7 +2174,9 @@ describe('LocalApp', () => {
       target: { value: 'Implementation verified' },
     })
     fireEvent.click(screen.getByRole('button', { name: 'Save progress' }))
-    expect(await screen.findByDisplayValue('Implementation verified')).toBeInTheDocument()
+    // Prefer text content: progress is rendered on the task card after save; the
+    // controlled input can lag a frame under slower CI runners.
+    expect(await screen.findByText('Implementation verified')).toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('New task'), {
       target: { value: 'Ship release' },
