@@ -386,6 +386,9 @@ impl RuntimeService for UnifiedGovernanceRuntime {
     }
 }
 
+// Skill materialization uses Unix filesystem semantics (permissions/sync);
+// Windows apply currently rolls back on governance directory sync.
+#[cfg(unix)]
 #[tokio::test]
 async fn skill_and_mcp_governance_share_store_without_cross_domain_collisions() {
     let temp = tempdir().expect("temp directory");
