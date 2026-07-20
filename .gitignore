@@ -24,6 +24,7 @@ Thumbs.db
 # Test artifacts
 /tests/e2e/tmp/
 /tmp/
+/.playwright-cli/
 
 # Worktrees (if someone uses them later)
 /.worktrees/

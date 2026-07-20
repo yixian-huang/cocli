@@ -67,9 +67,9 @@ describe('<ChannelList>', () => {
         <ChannelList />
       </>,
     )
-    expect(screen.queryByText(/# stale/)).toBeNull()
+    expect(screen.queryByText(/stale/)).toBeNull()
     fireEvent.click(screen.getByText(/show 1 archived/i))
-    expect(await screen.findByText(/# stale/)).toBeInTheDocument()
+    expect(await screen.findByText(/stale/)).toBeInTheDocument()
   })
 
   it('right-click row shows the context menu with Archive option for admin', () => {
@@ -84,7 +84,7 @@ describe('<ChannelList>', () => {
         <ChannelList />
       </>,
     )
-    fireEvent.contextMenu(screen.getByText(/# alpha/), { clientX: 10, clientY: 10 })
+    fireEvent.contextMenu(screen.getByText('alpha').closest('li')!, { clientX: 10, clientY: 10 })
     expect(screen.getByText('Archive')).toBeInTheDocument()
   })
 
@@ -99,7 +99,7 @@ describe('<ChannelList>', () => {
         <ChannelList />
       </>,
     )
-    fireEvent.contextMenu(screen.getByText(/# alpha/), { clientX: 10, clientY: 10 })
+    fireEvent.contextMenu(screen.getByText('alpha').closest('li')!, { clientX: 10, clientY: 10 })
     expect(screen.queryByText('Archive')).toBeNull()
     expect(screen.getByText(/mark all as read/i)).toBeInTheDocument()
   })

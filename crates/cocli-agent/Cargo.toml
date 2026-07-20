@@ -9,10 +9,8 @@ license.workspace = true
 cocli-protocol      = { path = "../cocli-protocol" }
 cocli-actor         = { path = "../cocli-actor" }
 cocli-pidfile       = { path = "../cocli-pidfile" }
-cocli-driver        = { path = "../cocli-driver" }
-cocli-driver-claude = { path = "../cocli-driver-claude" }
+cocli-driver-core   = { path = "../cocli-driver-core" }
 cocli-runtime-pool  = { path = "../cocli-runtime-pool" }
-cocli-bridge-config = { path = "../cocli-bridge-config" }
 
 tokio       = { workspace = true }
 async-trait = { workspace = true }

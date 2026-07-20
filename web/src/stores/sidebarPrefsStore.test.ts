@@ -1,5 +1,8 @@
 import { beforeEach, describe, expect, it } from 'vitest'
+import { storageKey } from '@/brand'
 import { useSidebarPrefsStore } from './sidebarPrefsStore'
+
+const hiddenDMStorageKey = (zoneId: string) => storageKey(`hidden-dms:${zoneId}`)
 
 describe('sidebarPrefsStore', () => {
   beforeEach(() => {
@@ -26,17 +29,17 @@ describe('sidebarPrefsStore', () => {
 
     useSidebarPrefsStore.getState().hideDM('dm1')
     expect(useSidebarPrefsStore.getState().isDMHidden('dm1')).toBe(true)
-    expect(JSON.parse(localStorage.getItem('chatrs-hidden-dms:z1') ?? '[]')).toEqual(['dm1'])
+    expect(JSON.parse(localStorage.getItem(hiddenDMStorageKey('z1')) ?? '[]')).toEqual(['dm1'])
 
     useSidebarPrefsStore.getState().unhideDM('dm1')
     expect(useSidebarPrefsStore.getState().isDMHidden('dm1')).toBe(false)
-    expect(JSON.parse(localStorage.getItem('chatrs-hidden-dms:z1') ?? '[]')).toEqual([])
+    expect(JSON.parse(localStorage.getItem(hiddenDMStorageKey('z1')) ?? '[]')).toEqual([])
   })
 
   it('reads invalid localStorage values as empty hidden DMs', () => {
-    localStorage.setItem('chatrs-hidden-dms:bad-json', '{')
-    localStorage.setItem('chatrs-hidden-dms:not-array', JSON.stringify({ dm1: true }))
-    localStorage.setItem('chatrs-hidden-dms:mixed', JSON.stringify(['dm1', 1, null, 'dm2']))
+    localStorage.setItem(hiddenDMStorageKey('bad-json'), '{')
+    localStorage.setItem(hiddenDMStorageKey('not-array'), JSON.stringify({ dm1: true }))
+    localStorage.setItem(hiddenDMStorageKey('mixed'), JSON.stringify(['dm1', 1, null, 'dm2']))
 
     expect(() => useSidebarPrefsStore.getState().setZone('bad-json')).not.toThrow()
     expect(useSidebarPrefsStore.getState().isDMHidden('dm1')).toBe(false)

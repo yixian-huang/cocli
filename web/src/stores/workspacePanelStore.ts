@@ -5,7 +5,6 @@ export type WorkspacePanel =
   | 'history'
   | 'zone_members'
   | 'zone_tasks'
-  | 'zone_wiki'
   | 'zone_credentials'
 
 interface WorkspacePanelState {

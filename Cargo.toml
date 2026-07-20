@@ -5,10 +5,16 @@ members = [
     "crates/cocli-actor",
     "crates/cocli-pidfile",
     "crates/cocli-reaper",
-    "crates/cocli-driver",
     "crates/cocli-driver-core",
     "crates/cocli-runtime-pool",
     "crates/cocli-driver-claude",
+    "crates/cocli-driver-cursor",
+    "crates/cocli-driver-codex",
+    "crates/cocli-driver-gemini",
+    "crates/cocli-driver-kimi",
+    "crates/cocli-driver-grok",
+    "crates/cocli-driver-chatrs",
+    "crates/cocli-driver-opencode",
     "crates/cocli-bridge-config",
     "crates/cocli-agent",
     "crates/cocli-health",
@@ -20,6 +26,7 @@ members = [
     "crates/cocli-plugin",
     "crates/cocli-plugin-sdk",
     "bin/cocli",
+    "bin/cocli-bridge",
 ]
 
 [workspace.package]
@@ -27,7 +34,7 @@ version = "0.0.0"
 edition = "2021"
 rust-version = "1.78"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/yixian/cocli"
+repository = "https://github.com/yixian-huang/cocli"
 authors = ["yixian.huang <yixian.huang.cn@gmail.com>"]
 
 [workspace.dependencies]
@@ -47,6 +54,8 @@ nix = { version = "0.27", features = ["signal"] }
 dirs = "5"
 clap = { version = "=4.5.23", features = ["derive", "env"] }
 url = "=2.5.2"
+native-tls = "=0.2.12"
+security-framework = "=2.11.1"
 tempfile = "=3.10.1"
 base64 = "0.22"
 # rayon 1.11+ / rayon-core 1.13+ require rustc 1.80; pin the last lineage
@@ -56,11 +65,13 @@ rayon = "=1.10.0"
 rayon-core = "=1.12.1"
 axum = "0.7"
 sqlx = { version = "0.7", features = ["runtime-tokio", "sqlite", "macros", "migrate", "chrono", "uuid", "json"] }
-rust-embed = "8"
+rust-embed = "=8.11.0"
 mime_guess = "2"
 argon2 = "0.5"
 rand = "0.8"
 futures = "0.3"
+sha2 = "=0.10.8"
+unicode-normalization = "=0.1.25"
 
 [profile.release]
 opt-level = 3

@@ -24,7 +24,7 @@ After 1.0: latest 2 minor versions.
 
 ## Out of scope
 
-- Self-hosted instances bound to non-loopback addresses without the user
-  enabling the `X-Cocli-Token` requirement — that's documented as
-  user-controlled and not a vulnerability
+- Exposure through a separate reverse proxy or port-forwarding setup. The
+  bundled local server rejects non-loopback bind addresses and is not a
+  remote-daemon surface.
 - Issues in third-party Rust/Node dependencies — please report upstream

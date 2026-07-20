@@ -12,6 +12,10 @@
 //! }
 //! ```
 
+mod action_inject;
+mod action_manifest;
+mod action_wrapper;
+
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
@@ -20,12 +24,65 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+pub use action_inject::{inject_action_cli, merge_action_env_vars, ActionInjection};
+pub use action_manifest::{
+    compact_reinforcement_commands, core_cli_phrases, embedded_manifest, embedded_manifest_bytes,
+    format_platform_cli_prompt, tool_for_action, tool_for_cli, ActionManifest, ManifestCommand,
+};
+pub use action_wrapper::render_cocli_wrapper;
+
 /// Inputs required to render the MCP config for the claude-bridge.
 pub struct BridgeConfig<'a> {
     pub bridge_binary: &'a Path,
     pub agent_id: &'a str,
     pub server_url: &'a str,
     pub auth_token: &'a str,
+}
+
+/// Canonical MCP server entry used by runtime-specific config writers.
+pub struct McpServerEntry<'a> {
+    pub command: &'a Path,
+    pub args: Vec<String>,
+}
+
+/// Build the canonical bridge argument vector.
+pub fn bridge_args(agent_id: &str, server_url: &str, auth_token: &str) -> Vec<String> {
+    vec![
+        "--agent-id".into(),
+        agent_id.into(),
+        "--server-url".into(),
+        bridge_http_base_url(server_url),
+        "--auth-token".into(),
+        auth_token.into(),
+    ]
+}
+
+/// Normalize a daemon websocket URL to the HTTP base URL used by the bridge.
+pub fn bridge_http_base_url(server_url: &str) -> String {
+    let raw = server_url.trim();
+    let Ok(mut url) = url::Url::parse(raw) else {
+        return raw.trim_end_matches('/').to_string();
+    };
+
+    match url.scheme() {
+        "ws" => {
+            let _ = url.set_scheme("http");
+        }
+        "wss" => {
+            let _ = url.set_scheme("https");
+        }
+        _ => {}
+    }
+
+    url.set_query(None);
+    url.set_fragment(None);
+
+    let path = url.path().trim_end_matches('/').to_string();
+    if path == "/daemon/connect" || path.ends_with("/daemon/connect") {
+        url.set_path(path.trim_end_matches("/daemon/connect"));
+    }
+
+    url.as_str().trim_end_matches('/').to_string()
 }
 
 #[derive(Serialize)]
@@ -78,4 +135,33 @@ pub fn write_mcp_config(work_dir: &Path, cfg: &BridgeConfig) -> io::Result<PathB
     #[cfg(unix)]
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod bridge_args_tests {
+    use super::*;
+
+    #[test]
+    fn bridge_args_use_http_base_url() {
+        assert_eq!(
+            bridge_args(
+                "agent-1",
+                "wss://cocli.example.com/base/daemon/connect?key=k#frag",
+                "token"
+            ),
+            vec![
+                "--agent-id",
+                "agent-1",
+                "--server-url",
+                "https://cocli.example.com/base",
+                "--auth-token",
+                "token",
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_bridge_url_is_preserved_without_trailing_slash() {
+        assert_eq!(bridge_http_base_url("not a url///"), "not a url");
+    }
 }

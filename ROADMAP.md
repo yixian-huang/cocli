@@ -1,37 +1,200 @@
 # Roadmap
 
-Public-facing roadmap for cocli local. Subject to change. Mirrors the
-internal milestone breakdown in `docs/superpowers/specs/`.
+The roadmap follows the product contract in [DESIGN.md](DESIGN.md): cocli is a
+general-purpose local environment organized around persistent Agents and
+Channels. Project and Git workflows are optional Workspace adapters.
 
-## Milestones
+## Current foundation
 
-```
-M0 ─ M0.0.1 ─ M0.0.2 ─ M0.0.3 ─ M0.0.4 ─── M0.1.0 ─── M0.2.0 ─── M1.0.0
-bootstrap  channels  first    tasks +    polish +    plugin     brew +    stable +
-          + UI      agent    sessions +  soft       protocol   docker +  HN launch
-                   reply     workspace  launch     + crates.io  adapter
-```
+Implemented foundations include the local Rust server, SQLite state, embedded
+React client, eight Runtime adapters, durable message delivery, Channel Tasks
+and dependencies, Agent Memory and Skills, runtime history, live execution
+events, global search, and recoverable SQLite backup/restore.
 
-| Milestone | Headline | Status |
-|-----------|----------|--------|
-| M0        | repo bootstrap, workspace skeleton | **in progress** (2026-05) |
-| M0.0.1    | channels + messages (no agent) | planned |
-| M0.0.2    | first local runtime replies (Claude, Cursor, Codex, Gemini) | planned |
-| M0.0.3    | tasks + sessions + workspace UI | planned |
-| M0.0.4    | polish + soft launch | planned |
-| M0.1.0    | plugin protocol + Rust/TS SDK | planned |
-| M0.2.0    | Telegram reference adapter + brew + Docker | planned |
-| M1.0.0    | stable runtime API + HN launch | planned |
+The durable subject migration is now landed. Remaining alpha work focuses on
+Workspace provider depth, portable rebinding, distribution, onboarding, and
+cross-platform release evidence.
+
+## Alpha milestones
+
+| Milestone | Outcome | Status |
+|---|---|---|
+| A1 — Durable subjects | Independent persistent Agents, Channels, many-to-many memberships, direct Agent conversation, lifecycle/execution state separation | complete |
+| A2 — Agent self-organization | Capability-scoped Bridge operations for Agents to create Agents, Channels, memberships, and durable work | complete |
+| A3 — Subject-first client | Channels and Agents become primary navigation; Tasks and shared context live under Channels; Memory, Skills, Workspace, and diagnostics live under subjects | complete |
+| A4 — Workspace providers | Optional managed, directory, Git, and external Workspace attachments without making any provider a startup prerequisite | in progress |
+| A5 — Recovery and portability | Restore/import, schema compatibility checks, migration safety, and documented cross-machine rebinding | in progress |
+| A6 — Installable public alpha | Signed/checksummed binaries, installer, release workflow, green cross-platform CI, accurate onboarding and support matrix | planned |
+
+### Supporting capability track — Skill governance
+
+- **Phase 1 — inventory and doctor (complete):** reuse the Skill Library,
+  `agent_skill_installs`, Runtime drivers, local API, and desktop Skills
+  workspace to show filesystem-discovered candidates, ordered search paths,
+  Runtime compatibility, managed/external/broken state, scope and provenance,
+  invalid frontmatter, broken symlinks, duplicate targets, and shadowing.
+  Filesystem evidence is explicitly not treated as proof of Session visibility
+  or activation, and no user-global Skill directory is mutated by discovery.
+- **Phase 2A — native discovery evidence (complete):** the driver contract now
+  supports read-only native Skill probes. Codex app-server `skills/list` and
+  `grok inspect --json` are merged with filesystem inventory, including native
+  source evidence, Runtime-reported disabled state, filesystem fallback, and
+  probe-failure diagnostics. Native discovery still does not claim active
+  Session visibility or activation.
+- **Phase 2B — snapshot and diagnostic hardening (complete):** add explicit
+  observation timestamps, bounded short-TTL caching, in-flight native-probe
+  coalescing, force refresh, lightweight filesystem-only Agent lists, true
+  machine Runtime inventory without synthetic Agents, partial-failure
+  diagnostics, and stable Skill/issue fingerprints with grouped root causes.
+- **Phase 3A — read-only governed desired state (complete):** add versioned
+  SkillProfile documents, machine/workspace/Agent profile bindings, deterministic
+  effective desired-state inheritance, same-layer conflict reporting, immutable
+  lock snapshots, stable SHA-256 observation/config/lock/plan hashes, drift and
+  dry-run plan previews, approval/rejection audit rows, optimistic
+  `expectedVersion` checks, approval staleness checks, and the
+  `/api/skills/governance` API surface. Runtime and filesystem Skill evidence
+  remains read-only, Cursor native Skill/session probing is explicitly
+  unsupported by current stable CLI contracts, and no discovery result is
+  treated as Session-effective proof.
+- **Phase 3B — governed apply and verification (complete for the safe local
+  subset):** apply only approved, non-stale plans whose observation, desired,
+  and lock hashes still match. The first automatic writer established
+  Runtime-target-derived Skill entries for digest-verified local or
+  cocli-vendored copy/symlink actions,
+  cocli-managed or symlink removal through quarantine, scoped leases, backup
+  manifests, staging plus atomic rename, force-refresh verification, CAS-safe
+  rollback, idempotent retries, and recovery-required state. Remote downloads,
+  private credentials, Git clone, Registry/Marketplace sources, installation
+  scripts, Runtime reload, and Session-effective adapters remain blocked/manual
+  until stable source and Runtime contracts exist. Phase 3C extends this writer
+  to canonical machine, Workspace, and Agent scopes and real Workspace
+  lockfiles.
+- **Phase 3C — canonical scopes, materialization, lockfile, and GC contracts
+  (complete for the safe local governance loop):** define machine/user,
+  workspace/project, and Agent scope semantics; expose Runtime capability
+  evidence for runtime-specific and shared Skill roots; block reserved roots,
+  legacy command roots, whole-root symlink takeover, symlink escape, read-only
+  roots, cross-filesystem atomic-rename hazards, and out-of-scope roots; persist
+  immutable managed artifacts, per-Skill materializations, ownership state (`managed`, `adopted`,
+  `unmanaged`, `foreign`), adoption audit, workspace lockfile records with CAS
+  and restore metadata, and GC protection references. Versioned HTTP APIs and
+  the Skills workspace expose Scopes, Managed Store, Materializations,
+  three-mode Adoption, Workspace Lockfile, and GC. Approved apply supports
+  capability-approved machine, Workspace, and Agent targets, uses the managed
+  store for per-Skill copy/symlink materialization, and performs real Workspace
+  lockfile writes with journaled backup and rollback. GC is preview/nonce/CAS
+  protected and quarantines managed artifact bytes before deletion. This phase
+  does not add remote source support, install-script execution, arbitrary target
+  paths, Runtime reload, or Session-effective proof.
+- **Phase 3D — remote sources and Runtime/session integration (planned):** add
+  explicit Registry/Marketplace and private-source credential policy without
+  executing untrusted installation scripts; add Runtime reload adapters and
+  session-bound verification only where a Runtime publishes a stable native
+  contract. Filesystem or discovery evidence continues to require a new Session
+  and must not be promoted to Session-effective proof.
+
+This track remains subordinate to cocli's persistent Agent and Channel model;
+it is Runtime governance for multi-Agent desktop work, not a standalone Skill
+package-manager direction.
+
+### Supporting capability track — MCP governance
+
+- **Phase 1 — inventory and doctor (complete):** discover redacted definitions,
+  probe Runtime-native state, preserve independent evidence fields, and report
+  drift, duplicates, approval/authentication gaps, startup failures, and probe
+  failures without modifying Runtime configuration.
+- **Phase 2A — profiles and deterministic planning (complete):** persist
+  versioned Runtime-neutral profiles and canonical machine/Workspace/Agent
+  bindings; resolve `machine < workspace < agent` desired state with explicit
+  same-level conflicts; generate stable, evidence-bound, fully redacted
+  dry-run plans; and record hash-bound approve/reject decisions that become
+  stale after desired-state or observation drift. Approval authorizes a future
+  operation only and is never treated as applied.
+- **Phase 2B — apply, reload, verify, and recovery (complete):** consume only
+  live, hash-matching approvals; isolate Runtime adapter writers behind CAS,
+  per-source locks, pre-write backups, and atomic subtree updates; preserve
+  action-level partial-failure evidence; defer active-session reloads; verify
+  against a fresh inventory; and expose audited rollback.
+- **Phase 2C — native adapter negotiation and durable recovery (complete):**
+  add a versioned capability matrix for Codex, Cursor, Claude, and Grok; bind
+  plan hashes to adapter capabilities and binary/config schema evidence; expose
+  preflight previews; persist action-level apply journals with idempotency
+  keys, backup references, recovery-required states, rollback evidence, and
+  saga-style partial-failure results; and verify with fresh inventory/doctor
+  readback while reporting new-session-only activation separately from active
+  Session effectiveness.
+- **Phase 3A — portable bundles and adapter conformance (complete):** export
+  deterministic governance bundles containing profiles, relative bindings,
+  desired servers, opaque secret references, provenance, optional capability
+  expectations, portability diagnostics, and a stable content hash; require
+  explicit import rebinding for machine/Workspace/Agent/Runtime/secret and
+  machine-local values; commit imports only to desired-state profiles and
+  bindings without approval/apply side effects; and expose a library-only
+  adapter SDK plus conformance harness for redaction, capability evidence,
+  unsupported downgrade, write confinement, reload/verify, and recovery.
+
+MCP governance does not introduce a Gateway or Registry and is not a secret
+store. Unsupported/authentication actions remain blocked, Grok write support
+stays manual until a stable transactional writer exists, and cocli never
+restarts an active Runtime session without separate future authorization.
+
+### Supporting governance integration (complete)
+
+The completed Skill and MCP histories now run together through one Store, API,
+and desktop without promoting either track into the Agent/Channel core model.
+The integrated migration sequence reserves 0013-0016 for MCP and 0017-0019 for
+Skill governance, reconciles the temporary Skill-only 0013-0015 development
+lineage by exact recorded name, and regression-tests fresh, 0012, MCP-only,
+Skill-only, restart, and failed-migration recovery paths. Domain-specific
+approval, nonce, idempotency, lock, journal, run, audit, bundle, artifact, and
+lockfile state remains isolated.
+
+## Beta milestones
+
+| Milestone | Outcome |
+|---|---|
+| B1 — Stable extension contract | Capability, permission, lifecycle, and storage contracts for optional plugins |
+| B2 — Optional knowledge plugins | Wiki or other knowledge products implemented outside the core subject model |
+| B3 — Community Runtime adapters | Documented third-party adapter SDK and compatibility suite |
+| B4 — Stable local API | Versioned APIs, migration guarantees, deprecation policy, and external integration examples |
+
+## Core completion criteria
+
+The core product is complete for v1 when all of these are continuously tested:
+
+1. Useful work can begin from either a Channel or Agent without a Project,
+   repository, directory, or Workspace.
+2. An Agent can participate in multiple Channels, and deleting a Channel does
+   not delete the Agent.
+3. Direct Agent conversation preserves one durable message substrate while
+   hiding its system-managed private Channel.
+4. Authorized Agents can create durable Agents and Channels and organize Tasks
+   through audited, idempotent Bridge operations.
+5. Agent identity, instructions, Memory, Skills, memberships, and work state
+   survive Runtime restarts and model changes.
+6. Normal users can operate through working/waiting/paused/error states without
+   understanding Session, Turn, PID, or CLI concepts; diagnostics remain
+   available when needed.
+7. Workspace is optional and domain-neutral; Git and worktree behavior is an
+   adapter rather than a global product assumption.
+8. Durable state is searchable, backed up, restored, migrated, and verified.
+
+## Explicit non-goals
+
+- Multi-tenant authentication, hosted billing, and cloud operations
+- Central intelligent task assignment; Agents use durable claim/dependency
+  primitives to organize work
+- Agent-owned diff review, checkpoint policy, rollback policy, or validation
+  judgment inside cocli
+- Hard cross-Runtime token or budget enforcement
+- Requiring software-development concepts in the base Agent contract
+- Wiki as a core product module; it is reserved for a future plugin
 
 ## Stability
 
-`0.0.x` is alpha. Schema and APIs may break without migration support.
-`0.1.0+` is beta. APIs settle. Schema migrations preserved.
-`1.0.0+` is stable. SemVer guarantees. Breaking changes ride v2 paths.
+`0.0.x` is alpha and may include forward migrations with documented transition
+paths. `0.1.x` is beta: stored user data remains migratable and public APIs gain
+deprecation periods. `1.x` follows SemVer and stable migration guarantees.
 
-## Non-goals (explicit)
-
-- Multi-tenant / multi-user authentication — use cocli cloud for that
-- Skills marketplace (Phase 1+)
-- Cron scheduling (Phase 1+)
-- Production deployment guidance (cocli local targets the laptop)
+The reusable Runtime/Driver crates maintain their independent `0.1.x` line and
+compatibility policy in [docs/runtime-ownership.md](docs/runtime-ownership.md).

@@ -31,7 +31,7 @@ interface InUseAgent {
 
 // Phase 2 stub. Phase 3 replaces with a real fetch against
 // agent_skill_installs joined to agents.
-function useInUseAgents(_zoneId: string, _libraryId: string | undefined): {
+function useInUseAgents(): {
   agents: InUseAgent[]; loading: boolean
 } {
   return { agents: [], loading: false }
@@ -41,7 +41,7 @@ export function SkillsLibraryDetailModal({ open, zoneId, entry, onClose }: Props
   const [files, setFiles] = useState<SkillLibraryFileMeta[]>([])
   const [readme, setReadme] = useState<string>('')
   const [loading, setLoading] = useState(false)
-  const { agents, loading: agentsLoading } = useInUseAgents(zoneId, entry?.id)
+  const { agents, loading: agentsLoading } = useInUseAgents()
 
   useEffect(() => {
     if (!entry) return

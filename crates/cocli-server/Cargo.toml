@@ -14,6 +14,12 @@ axum = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+unicode-normalization = { workspace = true }
 cocli-store = { path = "../cocli-store" }
 cocli-api = { path = "../cocli-api" }
 cocli-ws = { path = "../cocli-ws" }
@@ -21,3 +27,18 @@ cocli-agent = { path = "../cocli-agent" }
 cocli-protocol = { path = "../cocli-protocol" }
 cocli-actor = { path = "../cocli-actor" }
 cocli-health = { path = "../cocli-health" }
+cocli-web = { path = "../cocli-web", features = ["embed-web"] }
+cocli-runtime-pool = { path = "../cocli-runtime-pool" }
+cocli-driver-core = { path = "../cocli-driver-core" }
+cocli-driver-chatrs = { path = "../cocli-driver-chatrs" }
+cocli-driver-claude = { path = "../cocli-driver-claude" }
+cocli-driver-cursor = { path = "../cocli-driver-cursor" }
+cocli-driver-codex = { path = "../cocli-driver-codex" }
+cocli-driver-gemini = { path = "../cocli-driver-gemini" }
+cocli-driver-grok = { path = "../cocli-driver-grok" }
+cocli-driver-kimi = { path = "../cocli-driver-kimi" }
+cocli-driver-opencode = { path = "../cocli-driver-opencode" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+cocli-pidfile = { path = "../cocli-pidfile" }

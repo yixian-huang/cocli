@@ -6,7 +6,8 @@ Thanks for your interest! Here's how to get up and running.
 
 - Rust 1.78+ (`rustup install 1.78`)
 - Node 20+ (for frontend dev)
-- claude CLI installed (for end-to-end testing; not needed for unit tests)
+- One supported Agent CLI for real Runtime end-to-end testing; not needed for
+  unit tests or the fake-runtime local loop
 - SQLite 3.38+ (sqlx bundles its own; only needed if you run sqlx-cli locally)
 
 ## Quick start
@@ -16,15 +17,20 @@ Thanks for your interest! Here's how to get up and running.
     cargo build --workspace
     cargo test --workspace
 
-The runtime stack is being assembled milestone-by-milestone — see
-ROADMAP.md. As of M0, `cargo run --bin cocli` only prints a version
-string. The full server bootstraps in M0.0.1.
+Build the web client, then start the loopback-only local server:
+
+    cd web && npm run build && cd ..
+    cargo run --bin cocli -- --fake-runtime
+
+Open `http://127.0.0.1:8090`. Omit `--fake-runtime` to discover installed
+first-party Runtime CLIs.
 
 ## Tests
 
     cargo test --workspace                 # Rust unit tests
     cd web && npm test                     # Vitest
-    # tests/e2e/ end-to-end suites land in later milestones
+    npm run lint
+    npm run build
 
 ## Coding style
 
@@ -43,26 +49,40 @@ A GitHub Action checks that every commit in a PR carries the
 
 ## Pull requests
 
-- Keep PRs focused. One milestone non-goal at a time.
-- Reference the relevant spec section in the PR description.
+- Keep PRs focused and preserve the product model in `DESIGN.md`.
+- Reference the relevant `DESIGN.md` or `ROADMAP.md` section in the PR description.
 - For changes touching > 1 crate, new public API surface, or schema
   migrations: open an RFC issue first (label `rfc:proposed`).
 
 ## Daemon / driver layer scope
 
-The canonical shared driver layer lives in this repository. M0 targets four
-first-party runtime adapters: Claude, Cursor, Codex, and Gemini. Shared
-runtime fixes should land here first with contract fixtures; cloud consumes
-an explicit OSS revision or release and keeps SaaS-only adapters private.
+The canonical shared driver layer lives in this repository. The first-party
+production matrix is Claude, Cursor, Codex, Gemini, Kimi, Grok, Chatrs, and
+OpenCode. Shared runtime fixes land here first with contract fixtures; cloud
+consumes an exact OSS revision and does not retain parallel adapter,
+discovery, bridge-injection, or driver-core implementations.
 
-New runtime families beyond the initial four require an `rfc:proposed`
+New runtime families beyond this production matrix require an `rfc:proposed`
 issue. Changes to an existing adapter do not require an RFC when they preserve
 the shared driver contract and include parser/spawn regression tests.
 
-## Plugin authors
+Before requesting review for runtime changes, run:
 
-See `docs/plugin-protocol.md` (lands in M0.0.4). Adapters live in their
-own repos or under `plugins/` if you want them shipped first-party.
+    cargo +1.78 test --workspace
+    cargo +1.78 clippy --workspace --all-targets -- -D warnings
+    cargo fmt --all -- --check
+    scripts/check-runtime-release.sh
+
+## Product boundaries
+
+- Agent and Channel are persistent first-class subjects.
+- Runtime, Session, Turn, and CLI process are implementation/diagnostic layers.
+- Workspace is optional and domain-neutral; Git is one possible provider.
+- Base Agent behavior must not assume software development.
+- Wiki is reserved for a future plugin and must not be reintroduced into core
+  navigation or Agent tools without an approved extension contract.
+
+Plugin authoring documentation will land with the stable extension contract.
 
 ## Reporting bugs / requesting features
 

@@ -18,7 +18,7 @@ describe('ZoneSettingsView', () => {
         <ZoneSettingsView zoneId="z1" />
       </MemoryRouter>
     )
-    expect(screen.getByRole('button', { name: /skills library/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /skills library/i })).toBeInTheDocument()
     expect(screen.getByTestId('library-tab')).toHaveTextContent('zone=z1')
   })
 
@@ -37,7 +37,7 @@ describe('ZoneSettingsView', () => {
         <ZoneSettingsView zoneId="z1" />
       </MemoryRouter>
     )
-    fireEvent.click(screen.getByRole('button', { name: /skills library/i }))
+    fireEvent.click(screen.getByRole('tab', { name: /skills library/i }))
     expect(screen.getByTestId('library-tab')).toBeInTheDocument()
   })
 })

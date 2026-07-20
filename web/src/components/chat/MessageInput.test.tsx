@@ -42,7 +42,7 @@ describe('MessageInput send path', () => {
   it('sends content without an urgency argument', async () => {
     render(<MessageInput channelId={channelId} />)
 
-    const textarea = screen.getByPlaceholderText('Write a message... (@ to mention)')
+    const textarea = screen.getByRole('textbox')
     fireEvent.change(textarea, { target: { value: 'hello team' } })
     fireEvent.keyDown(textarea, { key: 'Enter' })
 

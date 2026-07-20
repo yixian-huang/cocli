@@ -60,7 +60,6 @@ export const router = createBrowserRouter([
           { path: 'history', element: <ZonePanelRoute panel="history" /> },
           { path: 'tasks', element: <ZonePanelRoute panel="zone_tasks" /> },
           { path: 'members', element: <ZonePanelRoute panel="zone_members" /> },
-          { path: 'wiki', element: <ZonePanelRoute panel="zone_wiki" /> },
           { path: 'keys', element: <ZonePanelRoute panel="zone_credentials" /> },
           { path: 'devtools', element: <ZoneDevToolsRoute><Suspense fallback={<LazyFallback />}><DevToolsPage /></Suspense></ZoneDevToolsRoute> },
           { path: 'devtools/daemon/:machineId', element: <LegacyDevtoolsRedirect /> },

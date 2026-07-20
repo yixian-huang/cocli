@@ -1,13 +1,32 @@
 [package]
 name              = "cocli-runtime-pool"
-version.workspace = true
+version           = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description       = "Runtime registry and local discovery catalog for cocli drivers"
+readme            = "README.md"
 
 [dependencies]
-cocli-driver = { path = "../cocli-driver" }
-async-trait  = { workspace = true }
+cocli-driver-core = { version = "0.1.0", path = "../cocli-driver-core" }
+cocli-driver-grok = { version = "0.1.0", path = "../cocli-driver-grok" }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+dirs              = { workspace = true }
+url               = { workspace = true }
+native-tls        = { workspace = true }
+security-framework = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+async-trait         = { workspace = true }
+tokio               = { workspace = true }
+tempfile            = { workspace = true }
+cocli-driver-claude = { version = "0.1.0", path = "../cocli-driver-claude" }
+cocli-driver-cursor = { version = "0.1.0", path = "../cocli-driver-cursor" }
+cocli-driver-codex  = { version = "0.1.0", path = "../cocli-driver-codex" }
+cocli-driver-gemini = { version = "0.1.0", path = "../cocli-driver-gemini" }
+cocli-driver-kimi   = { version = "0.1.0", path = "../cocli-driver-kimi" }
+cocli-driver-chatrs = { version = "0.1.0", path = "../cocli-driver-chatrs" }
+cocli-driver-opencode = { version = "0.1.0", path = "../cocli-driver-opencode" }

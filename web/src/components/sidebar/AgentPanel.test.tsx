@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { AgentPanel } from './AgentPanel'
 import { AgentView } from '@/components/agents/AgentView'
 import { useAgentStore } from '@/stores/agentStore'
@@ -32,6 +33,13 @@ const setCurrentUser = (role: User['role']) => {
     },
   })
 }
+
+const renderAgentView = () =>
+  render(
+    <MemoryRouter>
+      <AgentView />
+    </MemoryRouter>,
+  )
 
 describe('AgentPanel runtime turn control gating', () => {
   beforeEach(() => {
@@ -185,9 +193,9 @@ describe('AgentView overflow tab (via Settings)', () => {
       text: async () => '[]',
     })
 
-    render(<AgentView />)
+    renderAgentView()
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }))
-    fireEvent.click(screen.getByRole('button', { name: /^overflow$/i }))
+    fireEvent.click(screen.getByRole('tab', { name: /^overflow$/i }))
 
     expect(await screen.findByText('Current Backstop')).toBeInTheDocument()
     expect(screen.getByText('91%')).toBeInTheDocument()
@@ -213,10 +221,10 @@ describe('AgentView overflow tab (via Settings)', () => {
       activeDrawer: null,
     })
 
-    render(<AgentView />)
+    renderAgentView()
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }))
 
-    expect(screen.queryByRole('button', { name: /^overflow$/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /^overflow$/i })).not.toBeInTheDocument()
   })
 
   it('Esc in Settings returns to main mode', () => {
@@ -230,7 +238,7 @@ describe('AgentView overflow tab (via Settings)', () => {
       activeDrawer: null,
     })
 
-    render(<AgentView />)
+    renderAgentView()
     fireEvent.click(screen.getByRole('button', { name: /open settings/i }))
     expect(useViewStore.getState().getSubview(agent.id)).toBe('settings')
 
@@ -275,7 +283,7 @@ describe('AgentView new header', () => {
       agentSubview: {},
       activeDrawer: null,
     })
-    render(<AgentView />)
+    renderAgentView()
 
     expect(screen.getByRole('button', { name: /open live/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /open history/i })).toBeInTheDocument()
@@ -293,7 +301,7 @@ describe('AgentView new header', () => {
       agentSubview: {},
       activeDrawer: null,
     })
-    render(<AgentView />)
+    renderAgentView()
 
     fireEvent.click(screen.getByRole('button', { name: /open live/i }))
     expect(useViewStore.getState().activeDrawer).toBe('live')
