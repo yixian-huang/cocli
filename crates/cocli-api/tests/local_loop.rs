@@ -2965,6 +2965,8 @@ async fn skill_governance_profiles_lock_and_dry_run_plans_are_versioned_and_stal
     assert!(!secret_error.to_string().contains("raw-secret"));
 }
 
+// Skill materialization / governance directory sync uses Unix FS semantics.
+#[cfg(unix)]
 #[tokio::test]
 async fn approved_governance_apply_is_idempotent_verified_and_cas_rollback_safe() {
     let temp = tempdir().expect("temp directory");
@@ -3376,6 +3378,7 @@ async fn workspace_lockfile_restore_rejects_user_edit_before_writing() {
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn workspace_lockfile_restore_is_atomic_versioned_and_reversible() {
     let temp = tempdir().expect("temp directory");
@@ -3561,6 +3564,7 @@ async fn adoption_preview_blocks_symlink_escape_targets() {
         .is_some_and(|hazards| hazards.iter().any(|hazard| hazard == "symlink_escape")));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn adoption_commit_rejects_target_changes_after_preview() {
     let temp = tempdir().expect("temp directory");
@@ -3656,6 +3660,7 @@ async fn adoption_commit_rejects_target_changes_after_preview() {
         .is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn import_copy_adoption_is_journaled_audited_and_rollback_safe() {
     let temp = tempdir().expect("temp directory");
@@ -3869,6 +3874,7 @@ async fn managed_artifact_commit_rejects_source_changes_after_preview() {
         .is_empty());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn gc_commit_rejects_managed_store_content_drift() {
     let temp = tempdir().expect("temp directory");
@@ -4008,6 +4014,7 @@ async fn gc_preview_excludes_foreign_materializations() {
                 && candidate["entityId"] == materialization.id.to_string())));
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn workspace_governance_apply_materializes_managed_artifact_and_real_lockfile() {
     let temp = tempdir().expect("temp directory");
@@ -4187,6 +4194,7 @@ async fn workspace_governance_apply_materializes_managed_artifact_and_real_lockf
     );
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn machine_governance_apply_uses_runtime_derived_user_root_without_an_agent() {
     let temp = tempdir().expect("temp directory");

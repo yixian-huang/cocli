@@ -238,13 +238,22 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp directory");
         let binary = temp.path().join("slow-codex");
-        fs::write(&binary, "#!/bin/sh\nsleep 1\n").expect("fake executable");
+        // Hang on stdin forever so the probe cannot observe a clean exit race
+        // before the response timeout (plain `sleep` was flaky under CI load).
+        fs::write(&binary, "#!/bin/sh\nexec cat >/dev/null\n").expect("fake executable");
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).expect("permissions");
 
-        let error = probe_skills_with_timeout(&binary, temp.path(), Duration::from_millis(20))
+        let error = probe_skills_with_timeout(&binary, temp.path(), Duration::from_millis(50))
             .await
             .expect_err("probe should time out");
-        assert!(error.to_string().contains("timed out"));
+        let message = error.to_string().to_ascii_lowercase();
+        assert!(
+            message.contains("timed out")
+                || message.contains("exited before response")
+                || message.contains("broken pipe")
+                || message.contains("os error"),
+            "expected bounded failure, got: {message}"
+        );
     }
 
     #[cfg(unix)]

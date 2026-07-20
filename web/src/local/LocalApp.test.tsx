@@ -1836,7 +1836,11 @@ describe('LocalApp', () => {
     fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
     fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
     expect(await screen.findByText('builder')).toBeInTheDocument()
-    expect(screen.getByText(/1 Agent\(s\) will receive this message/)).toBeInTheDocument()
+    // Channel membership + receiving hint update in the same async create path;
+    // wait so CI runners do not race the composer hint re-render.
+    expect(
+      await screen.findByText(/1 Agent\(s\) will receive this message/),
+    ).toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     expect(await screen.findByRole('heading', { name: '@builder' })).toBeInTheDocument()
