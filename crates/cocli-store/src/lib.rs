@@ -54,7 +54,7 @@ pub use workspace::{
 };
 
 /// Latest SQLite schema version understood by this build.
-pub const CURRENT_SCHEMA_VERSION: i64 = 12;
+pub const CURRENT_SCHEMA_VERSION: i64 = 19;
 
 /// Errors returned by the local SQLite store.
 #[derive(Debug, thiserror::Error)]
