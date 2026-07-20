@@ -652,9 +652,16 @@ fn workspace_skill_roots(
         .collect()
 }
 
+fn user_home_dir() -> Option<PathBuf> {
+    // Windows runners expose USERPROFILE; Unix uses HOME. Prefer both without
+    // pulling the dirs crate into cocli-server just for this probe.
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+}
+
 fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
-    // Prefer dirs::home_dir so Windows USERPROFILE is covered (HOME alone is Unix-centric).
-    let home = dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let home = user_home_dir();
     let mut paths = match runtime {
         "claude" => vec![workspace.join(".claude/skills")],
         "codex" => vec![
