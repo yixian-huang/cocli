@@ -2,7 +2,7 @@
 title: Portable Backup and Rebinding Session Log
 category: execution-log
 tags: [self-bootstrap, dogfood, workspace, backup, rebinding]
-updated: 2026-07-18
+updated: 2026-07-21
 ---
 
 # Portable Backup and Rebinding Session Log
@@ -15,7 +15,7 @@ safety, and cross-installation rebinding evidence.
 
 ## cocli-native dogfood control-plane
 
-- Data directory: `/Users/yixian.huang/.local/share/cocli-bootstrap-m2`
+- Data directory: `$DATA_DIR/cocli-bootstrap-m2`
 - Listener: `http://127.0.0.1:55714`
 - Channel `cocli-bootstrap`: `6f3440ac-1915-4da4-87f8-46cf674a9fd7`
 - Workspace Agent: `7c31d984-f4e2-419f-b29a-82ebb7914148`
@@ -55,7 +55,7 @@ ran, then reached `done` after both reviews cleared.
 - Provider: `git`
 - Portable locator: `https://github.com/yixian-huang/cocli.git`
 - Preferred ref hint: `codex/local-platform-goal`
-- Current-machine binding: `/Users/yixian.huang/code/cocli`
+- Current-machine binding: `$REPO_CHECKOUT`
 - Verification state: `ready`
 - Capabilities: `filesystem=true`, `git=true`
 - Verification error: none
@@ -84,7 +84,7 @@ ledger until a real Runtime execution is explicitly configured and approved.
 
 ## Cross-installation migration evidence
 
-- Bundle: `/Users/yixian.huang/.local/share/cocli-bootstrap-m2-bundle`
+- Bundle: `$DATA_DIR/cocli-bootstrap-m2-bundle`
 - Bundle format/version: `cocli-portable-backup` / `1`
 - Inventory version: `1` (manifests created before the field was added default
   to version 1 and still pass current preflight)
@@ -94,11 +94,11 @@ ledger until a real Runtime execution is explicitly configured and approved.
 - Manifest inventory: 1 Channel, 3 Agents, 3 Tasks, 1 Workspace,
   1 attachment, 1 source binding hint, Provider `git`, Runtime `fake`
 - Restored data directory:
-  `/Users/yixian.huang/.local/share/cocli-bootstrap-m2-restored`
+  `$DATA_DIR/cocli-bootstrap-m2-restored`
 - Restored listener: `http://127.0.0.1:55715`
 - Fresh installation id: `75bc80e6-8a98-4ba7-8497-d01e2789ac32`
 - Moved Git binding:
-  `/Users/yixian.huang/.local/share/cocli-bootstrap-m2-moved-repo`
+  `$DATA_DIR/cocli-bootstrap-m2-moved-repo`
 - Moved Git remote: `https://github.com/yixian-huang/cocli.git`
 - Rebound/verified state: `ready`
 

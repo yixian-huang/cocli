@@ -8,12 +8,16 @@ software development, operations, or a domain you define. Agent identity,
 memory, tasks, and relationships survive the underlying CLI process and
 runtime session.
 
-**Status:** early alpha. The local server, SQLite state, web client, eight
-Runtime adapters, durable delivery, optional Tasks, Memory, Skills, runtime
-history, live execution events, search, state backup/restore, and Skill
-governance are implemented. The persistent Agent/Channel model in
+**Status:** early alpha (`0.0.x`). The local server, SQLite state, web client,
+eight Runtime adapters, durable delivery, optional Tasks, Memory, Skills,
+runtime history, live execution events, search, state backup/restore, and
+Skill governance are implemented. The persistent Agent/Channel model in
 [DESIGN.md](DESIGN.md) is landed; installers and release guarantees are still
 evolving toward a public alpha.
+
+**Honest support surface:** see [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md).
+**Official real-Runtime smoke today:** Grok via `scripts/smoke-grok-e2e.sh`.
+Other Runtimes are best-effort when their CLI is installed and authenticated.
 
 ## Product model
 
@@ -98,6 +102,8 @@ the live database in place. Runtime Workspace files are separate from the
 SQLite snapshot and must be copied independently when needed.
 
 ## Supported Runtime adapters
+
+See the full table in [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md).
 
 The first-party adapter matrix is Claude, Cursor, Codex, Gemini, Kimi, Grok,
 Chatrs, and OpenCode. Availability and capabilities are discovered locally;

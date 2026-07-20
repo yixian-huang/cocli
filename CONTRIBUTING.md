@@ -12,7 +12,7 @@ Thanks for your interest! Here's how to get up and running.
 
 ## Quick start
 
-    git clone https://github.com/yixian/cocli && cd cocli
+    git clone https://github.com/yixian-huang/cocli.git && cd cocli
     cd web && npm ci && cd ..
     cargo build --workspace
     cargo test --workspace
@@ -25,12 +25,17 @@ Build the web client, then start the loopback-only local server:
 Open `http://127.0.0.1:8090`. Omit `--fake-runtime` to discover installed
 first-party Runtime CLIs.
 
+Support expectations (which Runtimes are officially smoked, what is alpha /
+experimental) are documented in [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md).
+
 ## Tests
 
     cargo test --workspace                 # Rust unit tests
     cd web && npm test                     # Vitest
     npm run lint
     npm run build
+    # optional real Grok Runtime (costs tokens; needs `grok` on PATH):
+    ./scripts/smoke-grok-e2e.sh
 
 ## Coding style
 
