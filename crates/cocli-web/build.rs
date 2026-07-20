@@ -36,13 +36,15 @@ fn main() {
 }
 
 fn run_npm(web_dir: &std::path::Path, args: &[&str], action: &str) {
-    let status = Command::new("npm")
+    // Windows runners expose `npm.cmd`; bare `npm` is often not on PATH for build scripts.
+    let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    let status = Command::new(npm)
         .args(args)
         .current_dir(web_dir)
         .status()
-        .unwrap_or_else(|error| panic!("failed to {action}: could not run npm: {error}"));
+        .unwrap_or_else(|error| panic!("failed to {action}: could not run {npm}: {error}"));
     assert!(
         status.success(),
-        "failed to {action}: npm exited with {status}"
+        "failed to {action}: {npm} exited with {status}"
     );
 }
