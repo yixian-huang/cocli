@@ -98,6 +98,31 @@ async fn workspace_routes_preserve_legacy_shape_and_support_share_rebind_and_det
     assert_eq!(created["locator"], "/definitely/missing/portable");
     assert_eq!(created["provider_key"], "directory");
     let workspace_id = created["id"].as_str().expect("workspace id");
+    let (canonical_status, canonical) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/workspaces/{workspace_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(canonical_status, StatusCode::OK);
+    assert_eq!(canonical["provider_key"], "directory");
+    assert!(
+        canonical.get("owner_type").is_none(),
+        "canonical workspace must not expose legacy owner_type"
+    );
+    assert!(
+        canonical.get("owner_id").is_none(),
+        "canonical workspace must not expose legacy owner_id"
+    );
+    assert!(
+        canonical.get("kind").is_none(),
+        "canonical workspace must not expose legacy kind"
+    );
+    assert!(
+        canonical.get("locator").is_none(),
+        "canonical workspace must not expose local binding locator"
+    );
 
     let (unbound_status, unbound) = json_request(
         app.clone(),
@@ -160,6 +185,10 @@ async fn workspace_routes_preserve_legacy_shape_and_support_share_rebind_and_det
     assert_eq!(update_status, StatusCode::OK);
     assert_eq!(updated["display_name"], "Moved files");
     assert_eq!(updated["metadata"]["opaque"], true);
+    assert!(updated.get("owner_type").is_none());
+    assert!(updated.get("owner_id").is_none());
+    assert!(updated.get("kind").is_none());
+    assert!(updated.get("locator").is_none());
 
     let (rebind_status, rebound) = json_request(
         app.clone(),
@@ -198,6 +227,10 @@ async fn workspace_routes_preserve_legacy_shape_and_support_share_rebind_and_det
     .await;
     assert_eq!(read_status, StatusCode::OK);
     assert_eq!(read["id"], workspace_id);
+    assert!(read.get("owner_type").is_none());
+    assert!(read.get("owner_id").is_none());
+    assert!(read.get("kind").is_none());
+    assert!(read.get("locator").is_none());
 
     let (delete_status, _) = json_request(
         app.clone(),
@@ -208,13 +241,119 @@ async fn workspace_routes_preserve_legacy_shape_and_support_share_rebind_and_det
     .await;
     assert_eq!(delete_status, StatusCode::NO_CONTENT);
     let (missing_status, _) = json_request(
-        app,
+        app.clone(),
         "GET",
         &format!("/api/workspaces/{workspace_id}"),
         json!({}),
     )
     .await;
     assert_eq!(missing_status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn canonical_workspace_routes_create_update_and_keep_binding_local() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store, Arc::new(FakeRuntime));
+    let (create_status, workspace) = json_request(
+        app.clone(),
+        "POST",
+        "/api/workspaces",
+        json!({
+            "provider_key": "git",
+            "descriptor_version": 1,
+            "display_name": "Project remote",
+            "portable_locator": "https://example.invalid/acme/project.git",
+            "metadata": {"default_branch": "main"}
+        }),
+    )
+    .await;
+    assert_eq!(create_status, StatusCode::CREATED);
+    assert_eq!(workspace["provider_key"], "git");
+    assert_eq!(
+        workspace["portable_locator"],
+        "https://example.invalid/acme/project.git"
+    );
+    assert!(workspace.get("owner_type").is_none());
+    assert!(workspace.get("owner_id").is_none());
+    assert!(workspace.get("kind").is_none());
+    assert!(workspace.get("locator").is_none());
+    let workspace_id = workspace["id"].as_str().expect("workspace id");
+
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/workspaces/{workspace_id}/binding"),
+        json!({"local_locator": "/definitely/missing/project-worktree"}),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::OK);
+    assert_eq!(binding["state"], "needs_attention");
+    assert_eq!(
+        binding["local_locator"],
+        "/definitely/missing/project-worktree"
+    );
+
+    let (read_status, read) = json_request(
+        app.clone(),
+        "GET",
+        &format!("/api/workspaces/{workspace_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(read_status, StatusCode::OK);
+    assert_eq!(
+        read["portable_locator"],
+        "https://example.invalid/acme/project.git"
+    );
+    assert!(read.get("locator").is_none());
+
+    let (update_status, updated) = json_request(
+        app.clone(),
+        "PUT",
+        &format!("/api/workspaces/{workspace_id}"),
+        json!({
+            "display_name": "Renamed remote",
+            "portable_locator": "https://example.invalid/acme/renamed.git",
+            "metadata": {"default_branch": "trunk"}
+        }),
+    )
+    .await;
+    assert_eq!(update_status, StatusCode::OK);
+    assert_eq!(updated["display_name"], "Renamed remote");
+    assert_eq!(
+        updated["portable_locator"],
+        "https://example.invalid/acme/renamed.git"
+    );
+    assert_eq!(updated["metadata"]["default_branch"], "trunk");
+    assert!(updated.get("locator").is_none());
+
+    let (git_path_status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/workspaces",
+        json!({
+            "provider_key": "git",
+            "display_name": "Not portable",
+            "portable_locator": "/Users/example/repository",
+            "metadata": {}
+        }),
+    )
+    .await;
+    assert_eq!(git_path_status, StatusCode::BAD_REQUEST);
+
+    let (directory_path_status, _) = json_request(
+        app,
+        "POST",
+        "/api/workspaces",
+        json!({
+            "provider_key": "directory",
+            "display_name": "Local directory",
+            "portable_locator": "/Users/example/documents",
+            "metadata": {}
+        }),
+    )
+    .await;
+    assert_eq!(directory_path_status, StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
@@ -232,18 +371,29 @@ async fn unknown_provider_is_readable_and_reports_unavailable() {
     let (status, workspace) = json_request(
         app.clone(),
         "POST",
-        &format!("/api/channels/{channel_id}/workspaces"),
+        "/api/workspaces",
         json!({
-            "kind": "vendor.future",
-            "locator": "vendor://portable",
+            "provider_key": "vendor.future",
+            "display_name": "Future provider",
+            "portable_locator": "vendor://portable",
             "metadata": {"opaque": {"keep": true}}
         }),
     )
     .await;
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(workspace["provider_key"], "vendor.future");
+    assert!(workspace.get("kind").is_none());
+    assert!(workspace.get("locator").is_none());
     assert_eq!(workspace["metadata"]["opaque"]["keep"], true);
     let workspace_id = workspace["id"].as_str().expect("workspace id");
+    let (attach_status, _) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/channels/{channel_id}/workspaces/{workspace_id}"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(attach_status, StatusCode::CREATED);
     let (_, binding) = json_request(
         app.clone(),
         "PUT",

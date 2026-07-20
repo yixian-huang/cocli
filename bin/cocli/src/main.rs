@@ -9,6 +9,8 @@ use clap::{Parser, Subcommand};
 use cocli_api::{EchoRuntimeService, RuntimeService};
 use cocli_server::{LocalRuntimeConfig, LocalRuntimeService, Server, ServerConfig};
 
+mod portable;
+
 #[derive(Parser, Debug)]
 #[command(name = "cocli", version, about = "Local-first multi-agent platform")]
 struct Args {
@@ -39,10 +41,19 @@ enum Command {
         /// New destination file. The command refuses to overwrite it.
         #[arg(long)]
         output: PathBuf,
+        /// Write a versioned portable bundle directory instead of a legacy SQLite snapshot.
+        #[arg(long)]
+        portable: bool,
     },
     /// Restore and migrate a SQLite snapshot while cocli is stopped.
     Restore {
-        /// SQLite snapshot to validate, migrate, and install.
+        /// SQLite snapshot or portable bundle to validate, migrate, and install.
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Validate a portable backup bundle without changing local state.
+    Preflight {
+        /// Portable bundle directory to validate.
         #[arg(long)]
         input: PathBuf,
     },
@@ -110,7 +121,7 @@ async fn main() -> Result<()> {
 
 async fn run_state_command(command: Command, data_dir: &std::path::Path) -> Result<()> {
     match command {
-        Command::Backup { output } => {
+        Command::Backup { output, portable } => {
             if output.exists() {
                 anyhow::bail!("backup destination already exists: {}", output.display());
             }
@@ -122,15 +133,44 @@ async fn run_state_command(command: Command, data_dir: &std::path::Path) -> Resu
             let store = cocli_store::Store::open(data_dir.join("cocli.sqlite3"))
                 .await
                 .context("failed to open local state")?;
-            store
-                .export_snapshot(&output)
-                .await
-                .context("failed to export local state")?;
+            if portable {
+                let manifest = portable::create_bundle(&store, &output).await?;
+                println!("portable backup written: {}", output.display());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&manifest)
+                        .context("failed to print portable backup manifest")?
+                );
+            } else {
+                store
+                    .export_snapshot(&output)
+                    .await
+                    .context("failed to export local state")?;
+                println!("backup written: {}", output.display());
+            }
             store.close().await;
-            println!("backup written: {}", output.display());
+            Ok(())
+        }
+        Command::Restore { input } if input.is_dir() => {
+            let restored = portable::restore_bundle(data_dir, &input).await?;
+            println!("portable state restored: {}", data_dir.display());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&restored)
+                    .context("failed to print portable restore result")?
+            );
             Ok(())
         }
         Command::Restore { input } => restore_snapshot(data_dir, &input).await,
+        Command::Preflight { input } => {
+            let preflight = portable::preflight_bundle(&input).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&preflight)
+                    .context("failed to print portable preflight result")?
+            );
+            Ok(())
+        }
     }
 }
 
@@ -160,29 +200,136 @@ async fn restore_snapshot(data_dir: &std::path::Path, input: &std::path::Path) -
     store.close().await;
 
     let target = data_dir.join("cocli.sqlite3");
-    let backup_dir = data_dir.join("backups");
-    tokio::fs::create_dir_all(&backup_dir)
-        .await
-        .context("failed to create restore safety-backup directory")?;
-    let previous = backup_dir.join(format!("pre-restore-{nonce}.sqlite3"));
-    let had_previous = target.exists();
-    if had_previous {
-        tokio::fs::rename(&target, &previous)
-            .await
-            .context("failed to preserve current state before restore")?;
-    }
-    if let Err(error) = tokio::fs::rename(&staged, &target).await {
-        if had_previous {
-            let _ = tokio::fs::rename(&previous, &target).await;
-        }
-        let _ = tokio::fs::remove_file(&staged).await;
-        return Err(error).context("failed to install restored state");
-    }
+    let previous = install_staged_database(data_dir, &staged, "pre-restore").await?;
     println!("state restored: {}", target.display());
-    if had_previous {
+    if let Some(previous) = previous {
         println!("previous state preserved: {}", previous.display());
     }
     Ok(())
+}
+
+async fn install_staged_database(
+    data_dir: &std::path::Path,
+    staged: &std::path::Path,
+    backup_prefix: &str,
+) -> Result<Option<PathBuf>> {
+    let target = data_dir.join("cocli.sqlite3");
+    let previous = if target.exists() {
+        let backup_dir = data_dir.join("backups");
+        tokio::fs::create_dir_all(&backup_dir)
+            .await
+            .context("failed to create restore safety-backup directory")?;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        Some(backup_dir.join(format!("{backup_prefix}-{nonce}.sqlite3")))
+    } else {
+        None
+    };
+
+    if let Err(error) = atomic_install_database(staged, &target, previous.as_deref()).await {
+        let _ = tokio::fs::remove_file(staged).await;
+        return Err(error).context("failed to install restored state");
+    }
+    Ok(previous)
+}
+
+#[cfg(unix)]
+async fn atomic_install_database(
+    staged: &std::path::Path,
+    target: &std::path::Path,
+    previous: Option<&std::path::Path>,
+) -> Result<()> {
+    if let Some(previous) = previous {
+        tokio::fs::copy(target, previous)
+            .await
+            .context("failed to preserve current state before restore")?;
+        let backup = tokio::fs::OpenOptions::new()
+            .read(true)
+            .open(previous)
+            .await
+            .context("failed to open restore safety backup")?;
+        backup
+            .sync_all()
+            .await
+            .context("failed to sync restore safety backup")?;
+    }
+
+    let staged_file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .open(staged)
+        .await
+        .context("failed to open staged restore state")?;
+    staged_file
+        .sync_all()
+        .await
+        .context("failed to sync staged restore state")?;
+    tokio::fs::rename(staged, target)
+        .await
+        .context("failed to atomically replace current state")
+}
+
+#[cfg(windows)]
+async fn atomic_install_database(
+    staged: &std::path::Path,
+    target: &std::path::Path,
+    previous: Option<&std::path::Path>,
+) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let staged = staged.to_owned();
+    let target = target.to_owned();
+    let previous = previous.map(std::path::Path::to_owned);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        if let Some(previous) = previous {
+            let wide = |path: &std::path::Path| {
+                path.as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect::<Vec<_>>()
+            };
+            let staged = wide(&staged);
+            let target = wide(&target);
+            let previous = wide(&previous);
+            // SAFETY: all paths are NUL-terminated and remain alive for the call. The final two
+            // reserved pointers are required to be null by ReplaceFileW.
+            let replaced = unsafe {
+                windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
+                    target.as_ptr(),
+                    staged.as_ptr(),
+                    previous.as_ptr(),
+                    windows_sys::Win32::Storage::FileSystem::REPLACEFILE_WRITE_THROUGH,
+                    std::ptr::null(),
+                    std::ptr::null(),
+                )
+            };
+            if replaced == 0 {
+                return Err(std::io::Error::last_os_error())
+                    .context("failed to atomically replace current state");
+            }
+        } else {
+            std::fs::rename(&staged, &target)
+                .context("failed to atomically install restored state")?;
+        }
+        Ok(())
+    })
+    .await
+    .context("atomic restore installation task failed")?
+}
+
+#[cfg(not(any(unix, windows)))]
+async fn atomic_install_database(
+    staged: &std::path::Path,
+    target: &std::path::Path,
+    previous: Option<&std::path::Path>,
+) -> Result<()> {
+    if previous.is_some() {
+        anyhow::bail!("atomic database replacement is unsupported on this platform");
+    }
+    tokio::fs::rename(staged, target)
+        .await
+        .context("failed to atomically install restored state")
 }
 
 fn default_web_dir() -> Option<PathBuf> {
@@ -250,6 +397,38 @@ mod tests {
                 .expect("backup directory")
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_install_leaves_current_state_in_place() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp.path().join("target");
+        tokio::fs::create_dir_all(&data_dir)
+            .await
+            .expect("target dir");
+        let target = data_dir.join("cocli.sqlite3");
+        let current = b"current installation state";
+        tokio::fs::write(&target, current)
+            .await
+            .expect("current state");
+
+        let error = install_staged_database(
+            &data_dir,
+            &data_dir.join("missing-staged.sqlite3"),
+            "pre-failed-restore",
+        )
+        .await
+        .expect_err("missing staged state must fail");
+
+        assert!(error
+            .to_string()
+            .contains("failed to install restored state"));
+        assert_eq!(
+            tokio::fs::read(&target)
+                .await
+                .expect("current state remains"),
+            current
         );
     }
 }

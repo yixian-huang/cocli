@@ -14,6 +14,8 @@ this index without depending on an earlier chat session.
   gates, and first-use behavior.
 - [[execution-goal-workspace-foundation]] — the first implementation goal and
   its acceptance criteria.
+- [[session-log-portable-backup-rebinding]] — cocli-native control-plane IDs,
+  Workspace binding evidence, execution boundary, and milestone verification.
 
 ## Source-of-truth documents
 

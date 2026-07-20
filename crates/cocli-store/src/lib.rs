@@ -22,9 +22,12 @@ pub use skills::{
 };
 mod workspace;
 pub use workspace::{
-    SubjectType, SubjectWorkspace, Workspace, WorkspaceBinding, WorkspaceBindingState,
-    WorkspaceProviderKey,
+    LegacyWorkspace, SubjectType, SubjectWorkspace, Workspace, WorkspaceBinding,
+    WorkspaceBindingState, WorkspaceProviderKey,
 };
+
+/// Latest SQLite schema version understood by this build.
+pub const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 /// Errors returned by the local SQLite store.
 #[derive(Debug, thiserror::Error)]
@@ -41,6 +44,14 @@ pub enum StoreError {
         /// The domain field being decoded.
         kind: &'static str,
         /// The unexpected persisted value.
+        value: String,
+    },
+    /// A canonical Workspace descriptor contains an installation-local locator.
+    #[error("invalid portable locator for Workspace provider {provider_key}: {value}")]
+    InvalidWorkspacePortableLocator {
+        /// Provider whose canonical locator rule was violated.
+        provider_key: String,
+        /// Rejected locator or `<missing>`.
         value: String,
     },
     /// A delivery completion was attempted after it was already finalized or released.
@@ -809,6 +820,29 @@ pub struct Store {
     installation_id: String,
 }
 
+/// Portable-state inventory embedded in backup manifests and preflight output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortableInventory {
+    /// SQLite schema version recorded by this installation.
+    pub schema_version: i64,
+    /// Durable Channel count.
+    pub channels: i64,
+    /// Durable Agent count.
+    pub agents: i64,
+    /// Durable Task count.
+    pub tasks: i64,
+    /// Logical Workspace descriptor count.
+    pub workspaces: i64,
+    /// Subject-to-Workspace attachment count.
+    pub workspace_attachments: i64,
+    /// Source-installation binding hint count.
+    pub workspace_binding_hints: i64,
+    /// Provider keys required to interpret every Workspace descriptor.
+    pub required_provider_keys: Vec<String>,
+    /// Runtime keys referenced by durable Agents.
+    pub required_runtime_keys: Vec<String>,
+}
+
 impl Store {
     /// Opens or creates a file-backed SQLite database and applies migrations.
     ///
@@ -844,6 +878,18 @@ impl Store {
     ///
     /// Returns [`StoreError`] when SQLite cannot create the snapshot.
     pub async fn export_snapshot(&self, destination: &Path) -> Result<(), StoreError> {
+        self.export_portable_snapshot(destination).await.map(|_| ())
+    }
+
+    /// Writes a sanitized SQLite snapshot and returns inventory from that exact snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when SQLite cannot create or inspect the snapshot.
+    pub async fn export_portable_snapshot(
+        &self,
+        destination: &Path,
+    ) -> Result<PortableInventory, StoreError> {
         query("VACUUM INTO ?")
             .bind(destination.to_string_lossy().as_ref())
             .execute(&self.pool)
@@ -852,14 +898,44 @@ impl Store {
             .max_connections(1)
             .connect_with(SqliteConnectOptions::new().filename(destination))
             .await?;
-        query("DELETE FROM cocli_installation")
-            .execute(&snapshot)
-            .await?;
-        query("DELETE FROM agent_bridge_tokens")
-            .execute(&snapshot)
-            .await?;
+        sanitize_portable_state(&snapshot, true).await?;
+        let inventory = portable_inventory_from_pool(&snapshot).await?;
         snapshot.close().await;
-        Ok(())
+        Ok(inventory)
+    }
+
+    /// Returns the durable inventory needed for portable-backup preflight.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when inventory queries fail.
+    pub async fn portable_inventory(&self) -> Result<PortableInventory, StoreError> {
+        portable_inventory_from_pool(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Sanitizes a staged portable restore and assigns a fresh installation id.
+    ///
+    /// The returned id takes effect after this handle is closed and the staged
+    /// database is reopened. Existing Workspace bindings remain as source-machine
+    /// hints and are never selected for the new installation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] when staged-state sanitization fails.
+    pub async fn prepare_portable_restore(&self) -> Result<String, StoreError> {
+        sanitize_portable_state(&self.pool, true).await?;
+        let installation_id = Uuid::new_v4().to_string();
+        query(
+            "INSERT INTO cocli_installation (singleton, installation_id, created_at) \
+             VALUES (1, ?, ?)",
+        )
+        .bind(&installation_id)
+        .bind(Utc::now())
+        .execute(&self.pool)
+        .await?;
+        Ok(installation_id)
     }
 
     /// Returns the locally generated identifier used to select machine bindings.
@@ -1583,7 +1659,7 @@ impl Store {
         kind: &str,
         locator: Option<&str>,
         metadata: serde_json::Value,
-    ) -> Result<Workspace, StoreError> {
+    ) -> Result<LegacyWorkspace, StoreError> {
         let subject_type = SubjectType::parse(owner_type)?;
         let provider_key = WorkspaceProviderKey::new(kind)?;
         let display_name = metadata
@@ -1593,7 +1669,7 @@ impl Store {
             .to_owned();
         let portable_locator = (kind == "external").then_some(locator).flatten();
         let workspace = self
-            .create_workspace(provider_key, &display_name, portable_locator, metadata)
+            .insert_workspace(provider_key, &display_name, portable_locator, metadata)
             .await?;
         self.attach_existing_workspace(workspace.id, subject_type, owner_id, None)
             .await?;
@@ -1613,20 +1689,28 @@ impl Store {
         portable_locator: Option<&str>,
         metadata: serde_json::Value,
     ) -> Result<Workspace, StoreError> {
+        workspace::validate_portable_locator(&provider_key, portable_locator)?;
+        self.insert_workspace(provider_key, display_name, portable_locator, metadata)
+            .await
+    }
+
+    async fn insert_workspace(
+        &self,
+        provider_key: WorkspaceProviderKey,
+        display_name: &str,
+        portable_locator: Option<&str>,
+        metadata: serde_json::Value,
+    ) -> Result<Workspace, StoreError> {
         let now = Utc::now();
         let workspace = Workspace {
             id: Uuid::new_v4(),
             provider_key: provider_key.clone(),
             descriptor_version: 1,
             display_name: display_name.to_owned(),
-            portable_locator: portable_locator.map(str::to_owned),
+            portable_locator: portable_locator.map(str::trim).map(str::to_owned),
             metadata,
             created_at: now,
             updated_at: now,
-            owner_type: None,
-            owner_id: None,
-            kind: None,
-            locator: None,
         };
         query(
             "INSERT INTO workspaces \
@@ -1743,7 +1827,7 @@ impl Store {
         &self,
         owner_type: &str,
         owner_id: Uuid,
-    ) -> Result<Vec<Workspace>, StoreError> {
+    ) -> Result<Vec<LegacyWorkspace>, StoreError> {
         let subject_type = SubjectType::parse(owner_type)?;
         let rows = query(
             "SELECT w.id, w.provider_key, w.descriptor_version, w.display_name, \
@@ -1759,20 +1843,16 @@ impl Store {
         .bind(owner_id)
         .fetch_all(&self.pool)
         .await?;
-        rows.into_iter().map(workspace_from_row).collect()
+        rows.into_iter().map(legacy_workspace_from_row).collect()
     }
 
     /// Returns one portable logical workspace by identifier.
     pub async fn get_workspace(&self, workspace_id: Uuid) -> Result<Option<Workspace>, StoreError> {
         let row = query(
             "SELECT w.id, w.provider_key, w.descriptor_version, w.display_name, \
-                    w.portable_locator, w.metadata_json, w.created_at, w.updated_at, \
-                    NULL AS owner_type, NULL AS owner_id, w.provider_key AS kind, \
-                    wb.local_locator AS locator \
-             FROM workspaces w LEFT JOIN workspace_bindings wb \
-                  ON wb.workspace_id = w.id AND wb.installation_id = ? WHERE w.id = ?",
+                    w.portable_locator, w.metadata_json, w.created_at, w.updated_at \
+             FROM workspaces w WHERE w.id = ?",
         )
-        .bind(&self.installation_id)
         .bind(workspace_id)
         .fetch_optional(&self.pool)
         .await?;
@@ -1784,7 +1864,7 @@ impl Store {
         workspace_id: Uuid,
         subject_type: SubjectType,
         subject_id: Uuid,
-    ) -> Result<Option<Workspace>, StoreError> {
+    ) -> Result<Option<LegacyWorkspace>, StoreError> {
         let row = query(
             "SELECT w.id, w.provider_key, w.descriptor_version, w.display_name, \
                     w.portable_locator, w.metadata_json, w.created_at, w.updated_at, \
@@ -1800,7 +1880,7 @@ impl Store {
         .bind(subject_id)
         .fetch_optional(&self.pool)
         .await?;
-        row.map(workspace_from_row).transpose()
+        row.map(legacy_workspace_from_row).transpose()
     }
 
     /// Updates portable descriptor fields without changing attachments or bindings.
@@ -1811,12 +1891,16 @@ impl Store {
         portable_locator: Option<&str>,
         metadata: serde_json::Value,
     ) -> Result<Option<Workspace>, StoreError> {
+        let Some(existing) = self.get_workspace(workspace_id).await? else {
+            return Ok(None);
+        };
+        workspace::validate_portable_locator(&existing.provider_key, portable_locator)?;
         let result = query(
             "UPDATE workspaces SET display_name = ?, portable_locator = ?, metadata_json = ?, \
              updated_at = ? WHERE id = ?",
         )
         .bind(display_name)
-        .bind(portable_locator)
+        .bind(portable_locator.map(str::trim))
         .bind(serde_json::to_string(&metadata)?)
         .bind(Utc::now())
         .bind(workspace_id)
@@ -3660,6 +3744,87 @@ async fn ensure_installation_id(pool: &SqlitePool) -> Result<String, sqlx_core::
     Ok(installation_id)
 }
 
+async fn sanitize_portable_state(
+    pool: &SqlitePool,
+    remove_installation: bool,
+) -> Result<(), sqlx_core::Error> {
+    let now = Utc::now();
+    let mut transaction = pool.begin().await?;
+    if remove_installation {
+        query("DELETE FROM cocli_installation")
+            .execute(&mut *transaction)
+            .await?;
+    }
+    query("DELETE FROM agent_bridge_tokens")
+        .execute(&mut *transaction)
+        .await?;
+    query("DELETE FROM agent_working_state")
+        .execute(&mut *transaction)
+        .await?;
+    query("UPDATE agents SET status = 'stopped' WHERE status = 'running'")
+        .execute(&mut *transaction)
+        .await?;
+    query(
+        "UPDATE agent_sessions SET end_reason = 'portable_restore', ended_at = ? \
+         WHERE ended_at IS NULL",
+    )
+    .bind(now)
+    .execute(&mut *transaction)
+    .await?;
+    query(
+        "UPDATE delivery_queue SET state = 'pending', next_attempt_at = ?, \
+         last_error = 'released by portable backup', updated_at = ? \
+         WHERE state = 'in_flight'",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await?;
+    query("UPDATE workspace_bindings SET secret_ref = NULL")
+        .execute(&mut *transaction)
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn portable_inventory_from_pool(
+    pool: &SqlitePool,
+) -> Result<PortableInventory, sqlx_core::Error> {
+    Ok(PortableInventory {
+        schema_version: query_scalar(
+            "SELECT COALESCE(MAX(version), 0) FROM cocli_schema_migrations",
+        )
+        .fetch_one(pool)
+        .await?,
+        channels: query_scalar("SELECT COUNT(*) FROM channels")
+            .fetch_one(pool)
+            .await?,
+        agents: query_scalar("SELECT COUNT(*) FROM agents")
+            .fetch_one(pool)
+            .await?,
+        tasks: query_scalar("SELECT COUNT(*) FROM tasks")
+            .fetch_one(pool)
+            .await?,
+        workspaces: query_scalar("SELECT COUNT(*) FROM workspaces")
+            .fetch_one(pool)
+            .await?,
+        workspace_attachments: query_scalar("SELECT COUNT(*) FROM subject_workspaces")
+            .fetch_one(pool)
+            .await?,
+        workspace_binding_hints: query_scalar("SELECT COUNT(*) FROM workspace_bindings")
+            .fetch_one(pool)
+            .await?,
+        required_provider_keys: query_scalar(
+            "SELECT DISTINCT provider_key FROM workspaces ORDER BY provider_key",
+        )
+        .fetch_all(pool)
+        .await?,
+        required_runtime_keys: query_scalar("SELECT DISTINCT runtime FROM agents ORDER BY runtime")
+            .fetch_all(pool)
+            .await?,
+    })
+}
+
 fn channel_from_row(row: SqliteRow) -> Result<Channel, StoreError> {
     Ok(Channel {
         id: row.try_get("id")?,
@@ -3731,9 +3896,27 @@ fn workspace_from_row(row: SqliteRow) -> Result<Workspace, StoreError> {
         metadata: serde_json::from_str(&metadata_json)?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+    })
+}
+
+fn legacy_workspace_from_row(row: SqliteRow) -> Result<LegacyWorkspace, StoreError> {
+    let metadata_json: String = row.try_get("metadata_json")?;
+    let provider_key: String = row.try_get("provider_key")?;
+    let descriptor = Workspace {
+        id: row.try_get("id")?,
+        provider_key: WorkspaceProviderKey::new(provider_key)?,
+        descriptor_version: row.try_get("descriptor_version")?,
+        display_name: row.try_get("display_name")?,
+        portable_locator: row.try_get("portable_locator")?,
+        metadata: serde_json::from_str(&metadata_json)?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    };
+    Ok(LegacyWorkspace {
+        kind: descriptor.provider_key.as_str().to_owned(),
+        descriptor,
         owner_type: row.try_get("owner_type")?,
         owner_id: row.try_get("owner_id")?,
-        kind: row.try_get("kind")?,
         locator: row.try_get("locator")?,
     })
 }

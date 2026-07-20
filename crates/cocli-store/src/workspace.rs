@@ -151,14 +151,30 @@ pub struct Workspace {
     pub created_at: DateTime<Utc>,
     /// Last update timestamp.
     pub updated_at: DateTime<Utc>,
-    /// Compatibility owner type for legacy attach/list API responses.
-    pub owner_type: Option<String>,
-    /// Compatibility owner id for legacy attach/list API responses.
-    pub owner_id: Option<Uuid>,
-    /// Compatibility provider alias for legacy API responses.
-    pub kind: Option<String>,
-    /// Compatibility current-machine locator for legacy API responses.
+}
+
+/// Explicit compatibility shape for legacy owner-scoped attach/list callers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LegacyWorkspace {
+    /// Canonical logical Workspace descriptor.
+    #[serde(flatten)]
+    pub descriptor: Workspace,
+    /// Legacy owner type.
+    pub owner_type: String,
+    /// Legacy owner id.
+    pub owner_id: Uuid,
+    /// Legacy alias of the Provider key.
+    pub kind: String,
+    /// Current-installation locator exposed only on legacy routes.
     pub locator: Option<String>,
+}
+
+impl std::ops::Deref for LegacyWorkspace {
+    type Target = Workspace;
+
+    fn deref(&self) -> &Self::Target {
+        &self.descriptor
+    }
 }
 
 /// Relationship between a logical Workspace and one Agent or Channel.
@@ -205,6 +221,42 @@ pub(crate) struct WorkspaceBindingValidation {
     pub(crate) capabilities: Value,
     pub(crate) error_code: Option<String>,
     pub(crate) error_message: Option<String>,
+}
+
+pub(crate) fn validate_portable_locator(
+    provider_key: &WorkspaceProviderKey,
+    portable_locator: Option<&str>,
+) -> Result<(), StoreError> {
+    let portable_locator = portable_locator
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match provider_key.as_str() {
+        "directory" if portable_locator.is_some_and(|locator| Path::new(locator).is_absolute()) => {
+            Err(StoreError::InvalidWorkspacePortableLocator {
+                provider_key: "directory".to_owned(),
+                value: portable_locator.unwrap_or_default().to_owned(),
+            })
+        }
+        "git" => {
+            let Some(locator) = portable_locator else {
+                return Err(StoreError::InvalidWorkspacePortableLocator {
+                    provider_key: "git".to_owned(),
+                    value: "<missing>".to_owned(),
+                });
+            };
+            let is_local = Path::new(locator).is_absolute() || locator.starts_with("file://");
+            let looks_like_remote = locator.contains("://")
+                || (locator.contains('@') && locator.rsplit_once(':').is_some());
+            if is_local || !looks_like_remote {
+                return Err(StoreError::InvalidWorkspacePortableLocator {
+                    provider_key: "git".to_owned(),
+                    value: locator.to_owned(),
+                });
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// Validates a local binding without mutating external resources.

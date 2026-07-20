@@ -15,10 +15,11 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use cocli_store::{
     Agent, AgentActivity, AgentLifecycleStatus, AgentOperation, AgentSession, AgentSessionFinish,
-    AgentStatus, AgentTurn, Channel, ChannelAgent, Delivery, DeliveryStats, MemoryDocument,
-    MemoryDocumentEntry, MemoryMoveResult, MemoryNamespace, MemoryScope, MemoryTopic, Message,
-    MessageRole, NewAgentTurn, SkillLibraryFile, Store, StoreError, SubjectType, SubjectWorkspace,
-    Task, TaskStatus, Workspace, WorkspaceBinding,
+    AgentStatus, AgentTurn, Channel, ChannelAgent, Delivery, DeliveryStats, LegacyWorkspace,
+    MemoryDocument, MemoryDocumentEntry, MemoryMoveResult, MemoryNamespace, MemoryScope,
+    MemoryTopic, Message, MessageRole, NewAgentTurn, SkillLibraryFile, Store, StoreError,
+    SubjectType, SubjectWorkspace, Task, TaskStatus, Workspace, WorkspaceBinding,
+    WorkspaceProviderKey,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{watch, Mutex, Notify};
@@ -1348,6 +1349,7 @@ fn router_with_delivery_config_and_live_events(
             "/api/agents/:agent_id/workspaces/:workspace_id",
             post(attach_existing_agent_workspace).delete(detach_agent_workspace),
         )
+        .route("/api/workspaces", post(create_workspace))
         .route(
             "/api/workspaces/:workspace_id",
             get(get_workspace)
@@ -1896,11 +1898,76 @@ struct AttachWorkspaceRequest {
     metadata: serde_json::Value,
 }
 
+#[derive(Serialize)]
+struct WorkspaceResponse {
+    id: Uuid,
+    provider_key: String,
+    descriptor_version: i64,
+    display_name: String,
+    portable_locator: Option<String>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+impl From<Workspace> for WorkspaceResponse {
+    fn from(workspace: Workspace) -> Self {
+        Self {
+            id: workspace.id,
+            provider_key: workspace.provider_key.as_str().to_owned(),
+            descriptor_version: workspace.descriptor_version,
+            display_name: workspace.display_name,
+            portable_locator: workspace.portable_locator,
+            metadata: workspace.metadata,
+            created_at: workspace.created_at,
+            updated_at: workspace.updated_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct LegacyWorkspaceResponse {
+    id: Uuid,
+    provider_key: String,
+    descriptor_version: i64,
+    display_name: String,
+    portable_locator: Option<String>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    owner_type: String,
+    owner_id: Uuid,
+    kind: String,
+    locator: Option<String>,
+}
+
+impl LegacyWorkspaceResponse {
+    fn from_workspace(workspace: LegacyWorkspace) -> Self {
+        let provider_key = workspace.descriptor.provider_key.as_str().to_owned();
+        Self {
+            id: workspace.descriptor.id,
+            provider_key: provider_key.clone(),
+            descriptor_version: workspace.descriptor.descriptor_version,
+            display_name: workspace.descriptor.display_name,
+            portable_locator: workspace.descriptor.portable_locator,
+            metadata: workspace.descriptor.metadata,
+            created_at: workspace.descriptor.created_at,
+            updated_at: workspace.descriptor.updated_at,
+            owner_type: workspace.owner_type,
+            owner_id: workspace.owner_id,
+            kind: workspace.kind,
+            locator: workspace.locator,
+        }
+    }
+}
+
 async fn attach_channel_workspace(
     State(state): State<AppState>,
     Path(channel_id): Path<Uuid>,
     Json(request): Json<AttachWorkspaceRequest>,
-) -> Result<(StatusCode, Json<Workspace>), ApiError> {
+) -> Result<(StatusCode, Json<LegacyWorkspaceResponse>), ApiError> {
     require_channel(&state.store, channel_id).await?;
     let kind = non_empty("workspace kind", &request.kind)?;
     let workspace = state
@@ -1913,24 +1980,32 @@ async fn attach_channel_workspace(
             request.metadata,
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(workspace)))
+    Ok((
+        StatusCode::CREATED,
+        Json(LegacyWorkspaceResponse::from_workspace(workspace)),
+    ))
 }
 
 async fn list_channel_workspaces(
     State(state): State<AppState>,
     Path(channel_id): Path<Uuid>,
-) -> Result<Json<Vec<Workspace>>, ApiError> {
+) -> Result<Json<Vec<LegacyWorkspaceResponse>>, ApiError> {
     require_channel(&state.store, channel_id).await?;
-    Ok(Json(
-        state.store.list_workspaces("channel", channel_id).await?,
-    ))
+    let workspaces = state
+        .store
+        .list_workspaces("channel", channel_id)
+        .await?
+        .into_iter()
+        .map(LegacyWorkspaceResponse::from_workspace)
+        .collect();
+    Ok(Json(workspaces))
 }
 
 async fn attach_agent_workspace(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
     Json(request): Json<AttachWorkspaceRequest>,
-) -> Result<(StatusCode, Json<Workspace>), ApiError> {
+) -> Result<(StatusCode, Json<LegacyWorkspaceResponse>), ApiError> {
     require_agent(&state.store, agent_id).await?;
     let kind = non_empty("workspace kind", &request.kind)?;
     let workspace = state
@@ -1943,15 +2018,25 @@ async fn attach_agent_workspace(
             request.metadata,
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(workspace)))
+    Ok((
+        StatusCode::CREATED,
+        Json(LegacyWorkspaceResponse::from_workspace(workspace)),
+    ))
 }
 
 async fn list_agent_workspaces(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
-) -> Result<Json<Vec<Workspace>>, ApiError> {
+) -> Result<Json<Vec<LegacyWorkspaceResponse>>, ApiError> {
     require_agent(&state.store, agent_id).await?;
-    Ok(Json(state.store.list_workspaces("agent", agent_id).await?))
+    let workspaces = state
+        .store
+        .list_workspaces("agent", agent_id)
+        .await?
+        .into_iter()
+        .map(LegacyWorkspaceResponse::from_workspace)
+        .collect();
+    Ok(Json(workspaces))
 }
 
 #[derive(Deserialize)]
@@ -2029,14 +2114,50 @@ async fn detach_agent_workspace(
 async fn get_workspace(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
-) -> Result<Json<Workspace>, ApiError> {
+) -> Result<Json<WorkspaceResponse>, ApiError> {
     Ok(Json(
         state
             .store
             .get_workspace(workspace_id)
             .await?
-            .ok_or_else(|| ApiError::not_found("workspace not found"))?,
+            .ok_or_else(|| ApiError::not_found("workspace not found"))?
+            .into(),
     ))
+}
+
+#[derive(Deserialize)]
+struct CreateWorkspaceRequest {
+    provider_key: String,
+    #[serde(default)]
+    descriptor_version: Option<i64>,
+    display_name: String,
+    #[serde(default)]
+    portable_locator: Option<String>,
+    #[serde(default)]
+    metadata: serde_json::Value,
+}
+
+async fn create_workspace(
+    State(state): State<AppState>,
+    Json(request): Json<CreateWorkspaceRequest>,
+) -> Result<(StatusCode, Json<WorkspaceResponse>), ApiError> {
+    let provider_key = non_empty("workspace provider key", &request.provider_key)?;
+    let display_name = non_empty("workspace display name", &request.display_name)?;
+    if matches!(request.descriptor_version, Some(version) if version != 1) {
+        return Err(ApiError::bad_request(
+            "workspace descriptor_version must be 1 when supplied",
+        ));
+    }
+    let workspace = state
+        .store
+        .create_workspace(
+            WorkspaceProviderKey::new(provider_key)?,
+            display_name,
+            request.portable_locator.as_deref(),
+            request.metadata,
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(workspace.into())))
 }
 
 #[derive(Deserialize)]
@@ -2052,7 +2173,7 @@ async fn update_workspace(
     State(state): State<AppState>,
     Path(workspace_id): Path<Uuid>,
     Json(request): Json<UpdateWorkspaceRequest>,
-) -> Result<Json<Workspace>, ApiError> {
+) -> Result<Json<WorkspaceResponse>, ApiError> {
     let display_name = non_empty("workspace display name", &request.display_name)?;
     Ok(Json(
         state
@@ -2064,7 +2185,8 @@ async fn update_workspace(
                 request.metadata,
             )
             .await?
-            .ok_or_else(|| ApiError::not_found("workspace not found"))?,
+            .ok_or_else(|| ApiError::not_found("workspace not found"))?
+            .into(),
     ))
 }
 
@@ -3016,12 +3138,17 @@ async fn bridge_list_workspaces(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
     Query(query): Query<BridgeWorkspaceQuery>,
-) -> Result<Json<Vec<Workspace>>, ApiError> {
+) -> Result<Json<Vec<LegacyWorkspaceResponse>>, ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
     let (owner_type, owner_id) = bridge_workspace_owner(&state.store, &agent, &query).await?;
-    Ok(Json(
-        state.store.list_workspaces(owner_type, owner_id).await?,
-    ))
+    let workspaces = state
+        .store
+        .list_workspaces(owner_type, owner_id)
+        .await?
+        .into_iter()
+        .map(LegacyWorkspaceResponse::from_workspace)
+        .collect();
+    Ok(Json(workspaces))
 }
 
 #[derive(Deserialize)]
@@ -3041,7 +3168,7 @@ async fn bridge_attach_workspace(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
     Json(request): Json<BridgeAttachWorkspaceRequest>,
-) -> Result<(StatusCode, Json<Workspace>), ApiError> {
+) -> Result<(StatusCode, Json<LegacyWorkspaceResponse>), ApiError> {
     let agent = require_agent(&state.store, agent_id).await?;
     let kind = non_empty("workspace kind", &request.kind)?;
     let query = BridgeWorkspaceQuery {
@@ -3059,7 +3186,10 @@ async fn bridge_attach_workspace(
             request.metadata,
         )
         .await?;
-    Ok((StatusCode::CREATED, Json(workspace)))
+    Ok((
+        StatusCode::CREATED,
+        Json(LegacyWorkspaceResponse::from_workspace(workspace)),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -4140,6 +4270,7 @@ impl From<StoreError> for ApiError {
             StoreError::WorkspaceNotFound(_) | StoreError::WorkspaceBindingNotFound(_) => {
                 Some(StatusCode::NOT_FOUND)
             }
+            StoreError::InvalidWorkspacePortableLocator { .. } => Some(StatusCode::BAD_REQUEST),
             StoreError::SkillNameConflict(_) | StoreError::SkillAlreadyInstalled { .. } => {
                 Some(StatusCode::CONFLICT)
             }

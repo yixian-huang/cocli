@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use chrono::Utc;
-use cocli_store::{AgentLifecycleStatus, AgentStatus, MemoryNamespace, MessageRole, Store};
+use cocli_store::{
+    AgentLifecycleStatus, AgentStatus, MemoryNamespace, MessageRole, Store, WorkspaceProviderKey,
+};
 use sqlx_core::query::query;
 use sqlx_core::query_scalar::query_scalar;
 use sqlx_sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -117,6 +119,146 @@ async fn store_exports_a_consistent_reopenable_snapshot() {
     );
     drop(snapshot);
     drop(store);
+    std::fs::remove_file(database_path).expect("database should be removable");
+    std::fs::remove_file(snapshot_path).expect("snapshot should be removable");
+}
+
+#[tokio::test]
+async fn portable_snapshot_removes_installation_credentials_and_live_execution_state() {
+    let database_path = temporary_database_path();
+    let snapshot_path = temporary_database_path();
+    let store = Store::open(&database_path)
+        .await
+        .expect("store should open");
+    let source_installation_id = store.current_installation_id().to_owned();
+    let channel = store
+        .create_channel("portable-sanitization")
+        .await
+        .expect("channel should be created");
+    let agent = store
+        .create_agent(
+            channel.id,
+            "portable-agent",
+            "fake",
+            None,
+            AgentStatus::Running,
+        )
+        .await
+        .expect("agent should be created");
+    store
+        .ensure_agent_bridge_token(agent.id)
+        .await
+        .expect("source token should exist");
+    store
+        .set_working_state(agent.id, "active work", Some(&channel.name), None, None)
+        .await
+        .expect("working state should exist");
+    store
+        .create_agent_session(
+            agent.id,
+            Some(channel.id),
+            "source-session",
+            Some("source-launch"),
+            None,
+            "chat",
+            Utc::now(),
+        )
+        .await
+        .expect("active session should exist");
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("git").expect("provider key"),
+            "Portable repository",
+            Some("https://example.test/repository.git"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("workspace should be created");
+    store
+        .bind_workspace_for_installation(
+            workspace.id,
+            &source_installation_id,
+            "/source/repository",
+            Some("os-keychain:source-secret"),
+        )
+        .await
+        .expect("source binding hint should exist");
+
+    store
+        .export_snapshot(&snapshot_path)
+        .await
+        .expect("snapshot should export");
+
+    let snapshot = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(SqliteConnectOptions::new().filename(&snapshot_path))
+        .await
+        .expect("snapshot should open without initializing an installation");
+    let installation_count: i64 = query_scalar("SELECT COUNT(*) FROM cocli_installation")
+        .fetch_one(&snapshot)
+        .await
+        .expect("installation count should query");
+    let token_count: i64 = query_scalar("SELECT COUNT(*) FROM agent_bridge_tokens")
+        .fetch_one(&snapshot)
+        .await
+        .expect("token count should query");
+    let working_count: i64 = query_scalar("SELECT COUNT(*) FROM agent_working_state")
+        .fetch_one(&snapshot)
+        .await
+        .expect("working-state count should query");
+    let running_count: i64 = query_scalar("SELECT COUNT(*) FROM agents WHERE status = 'running'")
+        .fetch_one(&snapshot)
+        .await
+        .expect("running-agent count should query");
+    let active_session_count: i64 =
+        query_scalar("SELECT COUNT(*) FROM agent_sessions WHERE ended_at IS NULL")
+            .fetch_one(&snapshot)
+            .await
+            .expect("active-session count should query");
+    let secret_count: i64 =
+        query_scalar("SELECT COUNT(*) FROM workspace_bindings WHERE secret_ref IS NOT NULL")
+            .fetch_one(&snapshot)
+            .await
+            .expect("binding secret count should query");
+    let source_hint_count: i64 = query_scalar(
+        "SELECT COUNT(*) FROM workspace_bindings WHERE installation_id = ? AND local_locator = ?",
+    )
+    .bind(&source_installation_id)
+    .bind("/source/repository")
+    .fetch_one(&snapshot)
+    .await
+    .expect("source binding hint should query");
+
+    assert_eq!(installation_count, 0);
+    assert_eq!(token_count, 0);
+    assert_eq!(working_count, 0);
+    assert_eq!(running_count, 0);
+    assert_eq!(active_session_count, 0);
+    assert_eq!(secret_count, 0);
+    assert_eq!(source_hint_count, 1);
+
+    snapshot.close().await;
+    assert!(store
+        .agent_bridge_token(agent.id)
+        .await
+        .expect("source token query should work")
+        .is_some());
+    assert!(store
+        .get_working_state(agent.id)
+        .await
+        .expect("source working-state query should work")
+        .is_some());
+    assert_eq!(
+        store
+            .get_agent(agent.id)
+            .await
+            .expect("source agent query should work")
+            .expect("source agent should remain")
+            .status,
+        AgentStatus::Running
+    );
+
+    store.close().await;
     std::fs::remove_file(database_path).expect("database should be removable");
     std::fs::remove_file(snapshot_path).expect("snapshot should be removable");
 }

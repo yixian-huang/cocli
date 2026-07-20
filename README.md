@@ -58,11 +58,24 @@ loopback-only.
 
 ## Backup and restore
 
-Create a transactionally consistent SQLite snapshot:
+Create a transactionally consistent SQLite snapshot (the compatibility path):
 
 ```bash
 cargo run --bin cocli -- --data-dir ./local-data backup --output ./cocli-backup.sqlite3
 ```
+
+Create and preflight a portable bundle:
+
+```bash
+cargo run --bin cocli -- --data-dir ./local-data backup \
+  --portable --output ./cocli-portable-backup
+cargo run --bin cocli -- preflight --input ./cocli-portable-backup
+```
+
+The bundle directory contains `manifest.json`, a sanitized `state.sqlite3`,
+and `checksums.json`. It excludes the installation identity, Bridge tokens,
+OS credential references, and active execution state. Source-machine Workspace
+bindings remain as non-current hints for explicit rebinding.
 
 Restore and migrate a snapshot while the server is stopped:
 
@@ -70,10 +83,18 @@ Restore and migrate a snapshot while the server is stopped:
 cargo run --bin cocli -- --data-dir ./local-data restore --input ./cocli-backup.sqlite3
 ```
 
+The same command accepts a portable bundle directory. Portable restore verifies
+the manifest and SHA-256 checksums before staging or changing current state,
+migrates and sanitizes the staged database, creates a fresh installation
+identity, and leaves Workspaces unbound until explicitly rebound. It does not
+merge active installations, resume source Runtime Sessions, or create/delete
+Git worktrees.
+
 Restore validates and migrates a staged copy before installing it. Existing
-state is moved to `local-data/backups/pre-restore-*.sqlite3`, making the
-operation recoverable. Runtime Workspace files are separate from the SQLite
-snapshot and must be copied independently when needed.
+state is copied to `local-data/backups/pre-restore-*.sqlite3`, then the staged
+database atomically replaces the live database; a failed replacement leaves
+the live database in place. Runtime Workspace files are separate from the
+SQLite snapshot and must be copied independently when needed.
 
 ## Supported Runtime adapters
 

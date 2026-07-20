@@ -593,6 +593,54 @@ async fn directory_and_git_bindings_require_absolute_paths() {
 }
 
 #[tokio::test]
+async fn canonical_workspace_writes_reject_installation_local_portable_locators() {
+    let store = Store::in_memory().await.expect("store should open");
+    assert!(matches!(
+        store
+            .create_workspace(
+                WorkspaceProviderKey::new("git").expect("provider key"),
+                "Local Git path",
+                Some("/Users/example/repository"),
+                serde_json::json!({}),
+            )
+            .await,
+        Err(StoreError::InvalidWorkspacePortableLocator { .. })
+    ));
+    assert!(matches!(
+        store
+            .create_workspace(
+                WorkspaceProviderKey::new("directory").expect("provider key"),
+                "Local directory path",
+                Some("/Users/example/documents"),
+                serde_json::json!({}),
+            )
+            .await,
+        Err(StoreError::InvalidWorkspacePortableLocator { .. })
+    ));
+
+    let workspace = store
+        .create_workspace(
+            WorkspaceProviderKey::new("git").expect("provider key"),
+            "Remote Git",
+            Some("https://example.invalid/repository.git"),
+            serde_json::json!({}),
+        )
+        .await
+        .expect("canonical remote should persist");
+    assert!(matches!(
+        store
+            .update_workspace(
+                workspace.id,
+                "Moved incorrectly",
+                Some("/Users/example/moved-repository"),
+                serde_json::json!({}),
+            )
+            .await,
+        Err(StoreError::InvalidWorkspacePortableLocator { .. })
+    ));
+}
+
+#[tokio::test]
 async fn managed_provider_does_not_treat_external_directories_as_ready() {
     let managed_path = temporary_directory_path();
     tokio::fs::create_dir_all(&managed_path)
