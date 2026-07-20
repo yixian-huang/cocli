@@ -677,12 +677,12 @@ export function LocalApp() {
     { count: channelAgents.length },
   )
   const onboardingSteps = [
-    { done: installedRuntimes.length > 0, label: t('onboardingRuntime') },
     { done: Boolean(activeChannel), label: t('onboardingChannel') },
     { done: channelAgents.length > 0, label: t('onboardingAgent') },
     { done: messages.some((message) => message.role === 'user'), label: t('onboardingTask') },
   ]
   const showOnboarding = !onboardingSteps.every((step) => step.done)
+  const showRuntimeHint = installedRuntimes.length === 0
   const primarySection: 'channels' | 'agents' | 'settings' =
     workspaceView === 'settings'
       ? 'settings'
@@ -955,11 +955,12 @@ export function LocalApp() {
             </form>
           </section>
 
-          <section className="runtime-section">
-            <div className="section-heading">
-              <h2>{t('runtimes')}</h2>
-              <span>{installedRuntimes.length}/{runtimes.length}</span>
-            </div>
+          <details className="runtime-section advanced-resource-handles">
+            <summary>
+              <span>{t('runtimesAdvanced')}</span>
+              <span className="quiet-copy">{installedRuntimes.length}/{runtimes.length}</span>
+            </summary>
+            <p className="quiet-copy">{t('runtimesAdvancedHint')}</p>
             <div className="runtime-list">
               {runtimes.map((runtime) => (
                 <div className="runtime-row" key={runtime.name}>
@@ -976,7 +977,7 @@ export function LocalApp() {
               ))}
               {runtimes.length === 0 && <p className="quiet-copy">{t('noRuntimes')}</p>}
             </div>
-          </section>
+          </details>
         </aside>
 
         <section className="conversation" aria-label={t('conversation')}>
@@ -1007,6 +1008,9 @@ export function LocalApp() {
                     </li>
                   ))}
                 </ol>
+                {showRuntimeHint && (
+                  <p className="onboarding-runtime-hint">{t('onboardingRuntimeHint')}</p>
+                )}
               </section>
             )}
             {!activeChannel && (
@@ -1520,18 +1524,53 @@ export function LocalApp() {
           <section className="local-settings-workspace" aria-label={t('settings')}>
             <header className="workspace-section-header">
               <span className="workspace-eyebrow">{t('settings')}</span>
-              <h1>{t('runtimeSettings')}</h1>
-              <p>{t('runtimeSettingsDescription')}</p>
+              <h1>{t('settingsTitle')}</h1>
+              <p>{t('settingsDescription')}</p>
             </header>
-            <div className="runtime-settings-grid">
-              {runtimes.map((runtime) => (
-                <article key={runtime.name} className="runtime-settings-card">
-                  <strong>{runtime.name}</strong>
-                  <span>{runtime.installed ? t('installed') : t('unavailable')}</span>
-                  <p>{runtime.version ?? runtime.unavailable_reason ?? runtime.binary ?? '—'}</p>
-                </article>
-              ))}
-            </div>
+
+            <article className="settings-panel" aria-labelledby="durable-state-title">
+              <header>
+                <h2 id="durable-state-title">{t('durableStateTitle')}</h2>
+                <p>{t('durableStateDescription')}</p>
+              </header>
+              <div className="settings-panel-actions">
+                <a
+                  className="settings-primary-action"
+                  href="/api/backups/state"
+                  download
+                >
+                  <Download size={15} aria-hidden="true" />
+                  {t('downloadBackup')}
+                </a>
+              </div>
+              <div className="settings-callouts">
+                <p>{t('durableStateIncludes')}</p>
+                <p>{t('durableStateExcludes')}</p>
+              </div>
+              <div className="settings-cli-block">
+                <h3>{t('portableBackupTitle')}</h3>
+                <p>{t('portableBackupDescription')}</p>
+                <pre className="settings-code"><code>{t('portableBackupCommands')}</code></pre>
+                <p className="quiet-copy">{t('portableRestoreNote')}</p>
+              </div>
+            </article>
+
+            <article className="settings-panel" aria-labelledby="runtime-settings-title">
+              <header>
+                <h2 id="runtime-settings-title">{t('runtimeSettings')}</h2>
+                <p>{t('runtimeSettingsDescription')}</p>
+              </header>
+              <div className="runtime-settings-grid">
+                {runtimes.map((runtime) => (
+                  <article key={runtime.name} className="runtime-settings-card">
+                    <strong>{runtime.name}</strong>
+                    <span>{runtime.installed ? t('installed') : t('unavailable')}</span>
+                    <p>{runtime.version ?? runtime.unavailable_reason ?? runtime.binary ?? '—'}</p>
+                  </article>
+                ))}
+                {runtimes.length === 0 && <p className="quiet-copy">{t('noRuntimes')}</p>}
+              </div>
+            </article>
           </section>
         ) : (
         <LocalSkillsWorkspace agents={agents} t={t} />

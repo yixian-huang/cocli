@@ -1777,6 +1777,19 @@ describe('LocalApp', () => {
     expect(await screen.findByText('needle in local history')).toBeInTheDocument()
   })
 
+  it('documents durable state backup and portable CLI restore in Settings', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    expect(await screen.findByRole('heading', { name: 'Durable state' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Portable backup (CLI)' })).toBeInTheDocument()
+    expect(screen.getByText(/cocli backup --portable/)).toBeInTheDocument()
+    const backupLinks = screen.getAllByRole('link', { name: 'Download application-state backup' })
+    expect(backupLinks.length).toBeGreaterThanOrEqual(1)
+    expect(backupLinks[0]).toHaveAttribute('href', '/api/backups/state')
+  })
+
   it('refreshes the active channel so durable background replies appear', async () => {
     const baseFetch = vi.mocked(fetch)
     let messageReads = 0
