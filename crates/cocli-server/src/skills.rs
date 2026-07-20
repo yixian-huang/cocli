@@ -653,7 +653,8 @@ fn workspace_skill_roots(
 }
 
 fn static_skill_paths(runtime: &str, workspace: &Path) -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // Prefer dirs::home_dir so Windows USERPROFILE is covered (HOME alone is Unix-centric).
+    let home = dirs::home_dir().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
     let mut paths = match runtime {
         "claude" => vec![workspace.join(".claude/skills")],
         "codex" => vec![
@@ -1883,10 +1884,18 @@ mod tests {
             .expect("machine inspection");
 
         assert!(report.search_paths.iter().all(|path| path.scope == "user"));
-        assert!(report
-            .search_paths
-            .iter()
-            .any(|path| { Path::new(&path.path).ends_with(Path::new(".cursor").join("skills")) }));
+        assert!(
+            report.search_paths.iter().any(|path| {
+                let reported = path.path.replace('\\', "/");
+                reported.ends_with(".cursor/skills") || reported.ends_with("~/.cursor/skills")
+            }),
+            "expected a user .cursor/skills root, got {:?}",
+            report
+                .search_paths
+                .iter()
+                .map(|path| &path.path)
+                .collect::<Vec<_>>()
+        );
         assert!(!config.workspace_root.exists());
     }
 
