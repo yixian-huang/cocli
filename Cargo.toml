@@ -56,7 +56,7 @@ clap = { version = "=4.5.23", features = ["derive", "env"] }
 url = "=2.5.2"
 native-tls = "=0.2.12"
 security-framework = "=2.11.1"
-tempfile = "=3.10.1"
+tempfile = "=3.27.0"
 base64 = "0.22"
 # Keep rayon on a known-good line; cocli-reaper declares these as direct
 # deps so the pin reaches the resolver (also transitively via sysinfo).
