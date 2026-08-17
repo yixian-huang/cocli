@@ -32,6 +32,7 @@ pub use cocli_driver_core::{
     McpTransport, ObservedMcpInstance,
 };
 
+mod doctor_http;
 mod mcp_http;
 mod skill_apply;
 mod skill_apply_http;
@@ -88,6 +89,94 @@ pub struct RuntimeInfo {
     pub capabilities: Vec<String>,
     /// Structured human-readable reason for an unavailable runtime.
     pub unavailable_reason: Option<String>,
+}
+
+/// Severity assigned to one read-only machine Doctor finding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DoctorSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// One actionable finding produced by the unified machine/user/Runtime Doctor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorFinding {
+    pub id: String,
+    pub code: String,
+    pub severity: DoctorSeverity,
+    /// `machine`, `user`, or `runtime`.
+    pub scope: String,
+    /// `context`, `runtime`, `skill`, or `mcp`.
+    pub domain: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
+    pub new_session_required: bool,
+}
+
+/// Health summary for one Doctor scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorScopeSummary {
+    pub status: String,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+}
+
+/// Runtime availability plus the number of findings attributed to it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorRuntime {
+    pub name: String,
+    pub installed: bool,
+    pub binary: Option<String>,
+    pub version: Option<String>,
+    pub unavailable_reason: Option<String>,
+    pub status: String,
+    pub finding_count: usize,
+}
+
+/// Counts and status for one complete unified Doctor run.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineDoctorSummary {
+    pub status: String,
+    pub check_count: usize,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub info_count: usize,
+    pub runtime_count: usize,
+    pub installed_runtime_count: usize,
+    pub agent_count: usize,
+    pub skill_count: usize,
+    pub mcp_server_count: usize,
+    pub context_file_count: usize,
+}
+
+/// Read-only machine/user/Runtime health report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineDoctorReport {
+    pub schema_version: &'static str,
+    pub observed_at: DateTime<Utc>,
+    pub force_refresh: bool,
+    pub summary: MachineDoctorSummary,
+    pub machine: DoctorScopeSummary,
+    pub user: DoctorScopeSummary,
+    pub runtime: DoctorScopeSummary,
+    pub runtimes: Vec<DoctorRuntime>,
+    pub findings: Vec<DoctorFinding>,
+    pub notes: Vec<String>,
 }
 
 /// A best-effort event emitted while a local agent is executing.
@@ -1490,11 +1579,16 @@ fn router_with_delivery_config_and_live_events(
             "/api/bridge/agents/:agent_id/memory/move",
             post(bridge_move_memory_topic),
         )
+        .route(
+            "/api/bridge/agents/:agent_id/doctor",
+            get(bridge_machine_doctor),
+        )
         .route_layer(middleware::from_fn_with_state(
             store.clone(),
             authorize_bridge_request,
         ));
     Router::new()
+        .merge(doctor_http::router())
         .merge(mcp_http::router())
         .merge(skill_apply_http::router())
         .merge(skill_governance_http::router())
@@ -1877,6 +1971,14 @@ async fn list_runtimes(State(state): State<AppState>) -> Json<Vec<RuntimeInfo>> 
 
 async fn runtime_metrics(State(state): State<AppState>) -> Json<RuntimeMetricsSnapshot> {
     Json(state.runtime.metrics().await)
+}
+
+async fn bridge_machine_doctor(
+    State(state): State<AppState>,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Json<MachineDoctorReport>, ApiError> {
+    require_agent(&state.store, agent_id).await?;
+    Ok(Json(skill_http::build_machine_doctor(&state, true).await?))
 }
 
 async fn delivery_stats(State(state): State<AppState>) -> Result<Json<DeliveryStats>, ApiError> {

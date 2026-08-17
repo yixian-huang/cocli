@@ -72,6 +72,7 @@ When the runtime exposes the local `chat` MCP server, these tools are available 
 - `list_tasks`, `create_tasks`, `claim_tasks`, `unclaim_task`, `update_task_status`, `add_task_dependency`, and `get_task_dependencies`: coordinate durable channel work. Claim a task before doing substantial task work, respect blocked dependencies, and keep status/progress current.
 - `set_working_state`, `get_working_state`, and `clear_working_state`: persist and recover a concise work anchor across turns or runtime restarts.
 - `memory_index_list`, `memory_read`, `memory_write`, and `memory_move`: read or update durable L1/L2 memory through SQLite.
+- `doctor_machine`: run a read-only machine/user/Runtime health check covering Runtime availability, instruction context, Skills, and MCP state. Summarize the evidence; do not claim that unknown session visibility is healthy.
 
 Use collaboration tools only when they advance the requested work. Do not invent memory or knowledge-base tools that are not exposed by the runtime.
 "#,

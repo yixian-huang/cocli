@@ -334,6 +334,196 @@ textarea:focus-visible {
   filter: brightness(1.05);
 }
 
+.settings-primary-action:disabled {
+  cursor: wait;
+  opacity: var(--disabled-opacity);
+}
+
+.doctor-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.doctor-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-full);
+  padding: 0.35rem 0.65rem;
+  color: var(--success);
+  background: var(--success-soft);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.doctor-status[data-status="warning"] {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.doctor-status[data-status="error"] {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-line);
+}
+
+.doctor-summary-grid,
+.doctor-scope-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+.doctor-summary-grid > div,
+.doctor-scope-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  padding: var(--space-3);
+}
+
+.doctor-summary-grid strong {
+  display: block;
+  font-family: var(--font-signal);
+  font-size: 1.25rem;
+}
+
+.doctor-summary-grid span,
+.doctor-scope-card span,
+.doctor-scope-card small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.doctor-scope-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.doctor-scope-card {
+  display: grid;
+  gap: var(--space-1);
+  border-left: 3px solid var(--success);
+}
+
+.doctor-scope-card[data-status="warning"] {
+  border-left-color: var(--warning);
+}
+
+.doctor-scope-card[data-status="error"] {
+  border-left-color: var(--danger);
+}
+
+.doctor-findings {
+  margin-top: var(--space-4);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--line);
+}
+
+.doctor-findings h3 {
+  margin: 0 0 var(--space-2);
+  font-size: 0.95rem;
+}
+
+.doctor-findings > ul {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.doctor-findings > ul > li {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--info);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  background: var(--surface-sunken);
+}
+
+.doctor-findings > ul > li[data-severity="warning"] {
+  border-left-color: var(--warning);
+}
+
+.doctor-findings > ul > li[data-severity="error"] {
+  border-left-color: var(--danger);
+}
+
+.doctor-finding-heading {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.doctor-finding-heading > span {
+  color: var(--muted);
+  font-family: var(--font-signal);
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+
+.doctor-finding-heading code {
+  color: var(--text-soft);
+  font-size: 0.76rem;
+}
+
+.doctor-finding-heading small {
+  margin-left: auto;
+  color: var(--muted);
+}
+
+.doctor-findings p {
+  margin: var(--space-2) 0 0;
+}
+
+.doctor-findings .doctor-remediation {
+  color: var(--text-soft);
+  font-size: 0.88rem;
+}
+
+.doctor-findings details {
+  margin-top: var(--space-2);
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.doctor-findings details ul {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+  overflow-wrap: anywhere;
+}
+
+.doctor-empty {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--success);
+}
+
+.doctor-error {
+  margin: var(--space-3) 0 0;
+  color: var(--danger);
+}
+
+.doctor-observed {
+  margin: var(--space-3) 0 0;
+}
+
+.doctor-spin {
+  animation: doctor-spin 900ms linear infinite;
+}
+
+@keyframes doctor-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .settings-callouts {
   margin-top: var(--space-3);
   display: grid;
@@ -368,6 +558,20 @@ textarea:focus-visible {
   font-size: 0.8rem;
   line-height: 1.45;
   white-space: pre-wrap;
+}
+
+@media (max-width: 720px) {
+  .doctor-panel-header {
+    display: grid;
+  }
+
+  .doctor-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .doctor-scope-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .onboarding-runtime-hint {

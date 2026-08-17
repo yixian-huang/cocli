@@ -1,11 +1,16 @@
 ---
 title: Workspace Provider and Portability Contract
 category: architecture
-tags: [workspace, provider, binding, attachment, backup, restore, migration]
-updated: 2026-07-18
+tags: [workspace, provider, binding, attachment, backup, restore, migration, historical]
+updated: 2026-07-24
 ---
 
 # Workspace Provider and Portability Contract
+
+> Historical implementation contract. The portable descriptor and rebinding
+> boundary remain relevant for compatibility and recovery, but Workspace
+> providers were descoped as a product direction on 2026-07-20. Do not use this
+> page to justify new Git, worktree, provider, navigation, or onboarding depth.
 
 ## Core decision
 

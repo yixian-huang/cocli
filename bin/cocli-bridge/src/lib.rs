@@ -327,6 +327,7 @@ impl ToolBackend for HttpToolBackend {
             "clear_working_state" => {
                 self.request_json("POST", &self.agent_path("/working/clear"), Some(&json!({})))
             }
+            "doctor_machine" => self.request_json("GET", &self.agent_path("/doctor"), None),
             "channel_list" => {
                 let mut query = url::form_urlencoded::Serializer::new(String::new());
                 append_optional_query(&arguments, &mut query, "scope", &[]);
@@ -690,6 +691,7 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
             "self.set_working_state" => Ok((args[0].clone(), "set_working_state", payload)),
             "self.get_working_state" => Ok((args[0].clone(), "get_working_state", payload)),
             "self.clear_working_state" => Ok((args[0].clone(), "clear_working_state", payload)),
+            "doctor.run" => Ok(("doctor.run".to_owned(), "doctor_machine", payload)),
             other => Err(BridgeError::Config(format!("unsupported action: {other}"))),
         };
     }
@@ -911,6 +913,7 @@ fn parse_action(args: &[String]) -> Result<(String, &'static str, Value), Bridge
             "clear_working_state",
             json!({}),
         )),
+        ("doctor", "run") => Ok(("doctor.run".to_owned(), "doctor_machine", json!({}))),
         _ => Err(BridgeError::Config(format!(
             "unsupported action: {domain}.{verb}"
         ))),
@@ -1201,6 +1204,11 @@ fn tool_definitions() -> Vec<Value> {
         tool(
             "clear_working_state",
             "Clear the agent's current work anchor.",
+            json!({"type": "object", "properties": {}}),
+        ),
+        tool(
+            "doctor_machine",
+            "Run a read-only machine, user, Runtime, Skill, MCP, and instruction-context health check.",
             json!({"type": "object", "properties": {}}),
         ),
     ]
@@ -1581,6 +1589,11 @@ mod tests {
             .expect("tools")
             .iter()
             .any(|tool| tool["name"] == "agent_create"));
+        assert!(list["result"]["tools"]
+            .as_array()
+            .expect("tools")
+            .iter()
+            .any(|tool| tool["name"] == "doctor_machine"));
 
         let call = handle_mcp_request(
             &backend,

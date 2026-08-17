@@ -8,6 +8,67 @@ export interface RuntimeInfo {
   unavailable_reason: string | null
 }
 
+export type DoctorStatus = 'ok' | 'warning' | 'error'
+export type DoctorSeverity = 'info' | 'warning' | 'error'
+export type DoctorScope = 'machine' | 'user' | 'runtime'
+export type DoctorDomain = 'context' | 'runtime' | 'skill' | 'mcp'
+
+export interface DoctorFinding {
+  id: string
+  code: string
+  severity: DoctorSeverity
+  scope: DoctorScope
+  domain: DoctorDomain
+  runtime?: string
+  subject?: string
+  message: string
+  evidence: string[]
+  remediation?: string
+  newSessionRequired: boolean
+}
+
+export interface DoctorScopeSummary {
+  status: DoctorStatus
+  errorCount: number
+  warningCount: number
+  infoCount: number
+}
+
+export interface DoctorRuntime {
+  name: string
+  installed: boolean
+  binary: string | null
+  version: string | null
+  unavailableReason: string | null
+  status: DoctorStatus | 'unavailable'
+  findingCount: number
+}
+
+export interface MachineDoctorReport {
+  schemaVersion: string
+  observedAt: string
+  forceRefresh: boolean
+  summary: {
+    status: DoctorStatus
+    checkCount: number
+    errorCount: number
+    warningCount: number
+    infoCount: number
+    runtimeCount: number
+    installedRuntimeCount: number
+    agentCount: number
+    skillCount: number
+    mcpServerCount: number
+    contextFileCount: number
+  }
+  machine: DoctorScopeSummary
+  user: DoctorScopeSummary
+  runtime: DoctorScopeSummary
+  runtimes: DoctorRuntime[]
+  findings: DoctorFinding[]
+  notes: string[]
+}
+
 export interface Channel {
   id: string
   name: string
@@ -1686,6 +1747,8 @@ export const localApi = {
     request<Record<string, RuntimeSkillCompatibility>>('/api/runtimes/compatibility'),
   inspectMachineSkills: (force = false) =>
     request<MachineSkillDoctor>(`/api/runtimes/skills/doctor${force ? '?force=true' : ''}`),
+  inspectMachineDoctor: (force = true) =>
+    request<MachineDoctorReport>(`/api/doctor${force ? '?force=true' : ''}`),
   inspectMachineMcp: () =>
     request<McpDoctorReport>('/api/runtimes/mcp/doctor'),
   listMachineMcp: () =>

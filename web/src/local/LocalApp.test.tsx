@@ -97,6 +97,52 @@ describe('LocalApp', () => {
     vi.stubGlobal('fetch', vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
       const path = String(input)
       if (path === '/api/runtimes') return jsonResponse([runtime])
+      if (path === '/api/doctor?force=true') {
+        return jsonResponse({
+          schemaVersion: '1',
+          observedAt: '2026-07-24T08:00:00Z',
+          forceRefresh: true,
+          summary: {
+            status: 'warning',
+            checkCount: 12,
+            errorCount: 0,
+            warningCount: 1,
+            infoCount: 0,
+            runtimeCount: 1,
+            installedRuntimeCount: 1,
+            agentCount: 1,
+            skillCount: 2,
+            mcpServerCount: 1,
+            contextFileCount: 2,
+          },
+          machine: { status: 'ok', errorCount: 0, warningCount: 0, infoCount: 0 },
+          user: { status: 'warning', errorCount: 0, warningCount: 1, infoCount: 0 },
+          runtime: { status: 'ok', errorCount: 0, warningCount: 0, infoCount: 0 },
+          runtimes: [{
+            name: 'fake',
+            installed: true,
+            binary: '/usr/local/bin/fake',
+            version: 'local-loop',
+            unavailableReason: null,
+            status: 'ok',
+            findingCount: 0,
+          }],
+          findings: [{
+            id: 'duplicate-skill',
+            code: 'duplicate_target',
+            severity: 'warning',
+            scope: 'user',
+            domain: 'skill',
+            runtime: 'fake',
+            subject: 'reviewer',
+            message: 'Two Skill entries resolve to the same target.',
+            evidence: ['/tmp/skills/reviewer'],
+            remediation: 'Keep one authoritative Skill copy.',
+            newSessionRequired: false,
+          }],
+          notes: ['Doctor is read-only.'],
+        })
+      }
       if (path === '/api/search?q=needle') {
         return jsonResponse({
           results: [{
@@ -1893,6 +1939,20 @@ describe('LocalApp', () => {
     const backupLinks = screen.getAllByRole('link', { name: 'Download application-state backup' })
     expect(backupLinks.length).toBeGreaterThanOrEqual(1)
     expect(backupLinks[0]).toHaveAttribute('href', '/api/backups/state')
+  })
+
+  it('runs the unified machine user and Runtime Doctor from Settings', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Run Doctor' }))
+
+    expect(await screen.findByText('Two Skill entries resolve to the same target.')).toBeInTheDocument()
+    expect(screen.getByText('skill/duplicate_target')).toBeInTheDocument()
+    expect(screen.getByText('Keep one authoritative Skill copy.', { exact: false })).toBeInTheDocument()
+    expect(screen.getByText('12')).toBeInTheDocument()
+    expect(screen.getAllByText('Attention').length).toBeGreaterThanOrEqual(1)
   })
 
   it('refreshes the active channel so durable background replies appear', async () => {

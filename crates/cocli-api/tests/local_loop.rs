@@ -863,6 +863,58 @@ async fn exposes_read_only_mcp_inventory_and_doctor() {
 }
 
 #[tokio::test]
+async fn unified_doctor_covers_machine_user_runtime_and_bridge_access() {
+    let store = Store::in_memory().await.expect("store should open");
+    let app = router(store.clone(), Arc::new(FakeRuntime));
+    let (_, agent) = json_request(
+        app.clone(),
+        "POST",
+        "/api/agents",
+        json!({"name": "doctor", "runtime": "fake"}),
+    )
+    .await;
+    let agent_id = agent["id"].as_str().expect("agent id");
+
+    let (status, report) =
+        json_request(app.clone(), "GET", "/api/doctor?force=true", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(report["schemaVersion"], "1");
+    assert_eq!(report["forceRefresh"], true);
+    assert_eq!(report["summary"]["runtimeCount"], 1);
+    assert_eq!(report["summary"]["installedRuntimeCount"], 1);
+    assert_eq!(report["summary"]["agentCount"], 1);
+    assert!(report["summary"]["checkCount"].as_u64().unwrap_or_default() > 0);
+    assert!(report.get("machine").is_some());
+    assert!(report.get("user").is_some());
+    assert!(report.get("runtime").is_some());
+    assert!(report["findings"]
+        .as_array()
+        .is_some_and(|findings| findings
+            .iter()
+            .any(|finding| { finding["domain"] == "mcp" && finding["code"] == "cli_missing" })));
+    assert!(report["notes"][0]
+        .as_str()
+        .is_some_and(|note| note.contains("read-only")));
+
+    let token = store
+        .agent_bridge_token(agent_id.parse().expect("agent uuid"))
+        .await
+        .expect("bridge token query")
+        .expect("bridge token");
+    let (bridge_status, bridge_report) = bridge_json_request(
+        app,
+        "GET",
+        &format!("/api/bridge/agents/{agent_id}/doctor"),
+        json!({}),
+        &token,
+    )
+    .await;
+    assert_eq!(bridge_status, StatusCode::OK);
+    assert_eq!(bridge_report["schemaVersion"], "1");
+    assert_eq!(bridge_report["forceRefresh"], true);
+}
+
+#[tokio::test]
 async fn mcp_bundle_export_import_requires_explicit_rebind_and_never_imports_approval() {
     let store = Store::in_memory().await.expect("store should open");
     let machine_id = store.current_installation_id().to_owned();

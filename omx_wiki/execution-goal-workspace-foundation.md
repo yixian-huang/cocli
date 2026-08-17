@@ -1,11 +1,16 @@
 ---
 title: Execution Goal — Portable Workspace Foundation
 category: decision
-tags: [goal, workspace, provider, migration, self-bootstrap]
-updated: 2026-07-18
+tags: [goal, workspace, provider, migration, self-bootstrap, completed]
+updated: 2026-07-24
 ---
 
 # Execution Goal — Portable Workspace Foundation
+
+> Completed historical goal. Migration `0012_portable_workspace_foundation.sql`,
+> Store/API contracts, portable backup, and cross-installation rebinding were
+> implemented and verified. See [[session-log-portable-backup-rebinding]]. Do
+> not execute this goal again.
 
 ## Goal
 
@@ -24,7 +29,7 @@ alpha program.
 - [[cocli-self-bootstrap]]
 - [[workspace-provider-portability]]
 
-## Current implementation facts
+## Historical implementation facts at goal creation
 
 - `crates/cocli-store/migrations/0009_agent_channel_ontology.sql` created a
   single `workspaces` table with inline owner, kind, locator, and metadata.
@@ -36,7 +41,7 @@ alpha program.
 - Migrations 0009-0011 already exist; allocate the next migration number only
   after confirming the current filesystem state.
 
-## Scope
+## Completed scope
 
 1. Define persisted Workspace, SubjectWorkspace attachment, and
    WorkspaceBinding types with typed provider and binding states.

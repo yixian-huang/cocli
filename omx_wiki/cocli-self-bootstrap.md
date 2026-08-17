@@ -1,11 +1,17 @@
 ---
 title: cocli Self-Bootstrap Program
 category: architecture
-tags: [self-bootstrap, agent, channel, workspace, portability, release]
-updated: 2026-07-18
+tags: [self-bootstrap, agent, channel, workspace, portability, release, superseded]
+updated: 2026-07-24
 ---
 
 # cocli Self-Bootstrap Program
+
+> Historical program overview. The Workspace foundation and portable
+> backup/rebinding milestones were completed. `DESIGN.md` and `ROADMAP.md`
+> superseded the Workspace-provider product direction on 2026-07-20; current
+> work is conversation-first polish, recovery evidence, and public-alpha
+> distribution.
 
 ## Objective
 
@@ -32,10 +38,11 @@ the release host. These are explicit external execution and trust boundaries.
 - A missing Workspace, Runtime, credential, or local path degrades execution but
   does not destroy the persistent Agent, Channel, Task, Memory, or Skill state.
 
-The canonical contract is `DESIGN.md`; `ROADMAP.md` tracks A4 Workspace
-providers, A5 recovery and portability, and A6 installable public alpha.
+The canonical contract is `DESIGN.md`. `ROADMAP.md` marks A4 Workspace-provider
+product work as descoped, A5 recovery and portability as in progress, and A6
+installable public alpha as planned.
 
-## Current bootstrap baseline
+## Historical bootstrap baseline
 
 - Durable Agents, Channels, memberships, direct Agent conversation, Tasks,
   Memory, Skills, self-organization Bridge operations, live events, search, and
@@ -48,7 +55,7 @@ providers, A5 recovery and portability, and A6 installable public alpha.
   x86_64 targets.
 - Release workflow and installer scripts are placeholders.
 
-## Bootstrap roles
+## Historical bootstrap roles
 
 - Workspace Agent: Workspace storage model, Provider boundary, Directory and
   Git implementations, API integration.
@@ -62,7 +69,7 @@ providers, A5 recovery and portability, and A6 installable public alpha.
 These are durable Agent responsibilities, not hard-coded runtime identities.
 The same persistent Agent may change Runtime or model later.
 
-## Program dependency graph
+## Historical program dependency graph
 
 1. Workspace logical identity, subject attachment, and machine binding.
 2. Internal Provider contract and common state model.
@@ -77,7 +84,7 @@ Release workflow scaffolding may proceed in parallel, but no public data or
 compatibility promise should freeze before steps 1-3 establish the portable
 Workspace descriptor.
 
-## Bootstrap stages
+## Historical bootstrap stages
 
 ### Stage 1: old capability builds the new boundary
 

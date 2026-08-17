@@ -44,6 +44,7 @@ import {
 } from './api'
 import { LocalSelect } from './LocalSelect'
 import { LocalHistoryWorkspace } from './LocalHistoryWorkspace'
+import { LocalDoctorPanel } from './LocalDoctorPanel'
 import { LocalKnowledgeWorkspace } from './LocalKnowledgeWorkspace'
 import { LocalSkillsWorkspace } from './LocalSkillsWorkspace'
 import { LocalMcpWorkspace } from './LocalMcpWorkspace'
@@ -1905,6 +1906,8 @@ export function LocalApp() {
                 <p className="quiet-copy">{t('portableRestoreNote')}</p>
               </div>
             </article>
+
+            <LocalDoctorPanel t={t} />
 
             <article className="settings-panel" aria-labelledby="runtime-settings-title">
               <header>

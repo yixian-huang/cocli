@@ -20,9 +20,10 @@ use super::skill_import::{
     canonical_skill_name, derive_source_name, fetch_skill, FetchedSkill, SkillImportError,
 };
 use super::{
-    require_agent, ApiError, AppState, RuntimeError, RuntimeSkillCompatibility,
-    RuntimeSkillEvidence, RuntimeSkillFinding, RuntimeSkillInspection, RuntimeSkillIssue,
-    RuntimeSkillSearchPath,
+    require_agent, ApiError, AppState, DoctorFinding, DoctorRuntime, DoctorScopeSummary,
+    DoctorSeverity, MachineDoctorReport, MachineDoctorSummary, McpDiagnosticSeverity, RuntimeError,
+    RuntimeSkillCompatibility, RuntimeSkillEvidence, RuntimeSkillFinding, RuntimeSkillInspection,
+    RuntimeSkillIssue, RuntimeSkillSearchPath,
 };
 
 const SKILL_SNAPSHOT_TTL: Duration = Duration::from_secs(3);
@@ -1079,6 +1080,569 @@ async fn build_machine_skill_inventory(
         agents,
         diagnostics,
     })
+}
+
+pub(super) async fn build_machine_doctor(
+    state: &AppState,
+    force: bool,
+) -> Result<MachineDoctorReport, ApiError> {
+    let (skill_result, mcp_result, runtimes) = tokio::join!(
+        build_machine_skill_inventory(state, force),
+        state.runtime.inspect_mcp(),
+        state.runtime.list(),
+    );
+    let skills = skill_result?;
+    let mcp = mcp_result?;
+    let mut findings = Vec::new();
+    let mut seen_skill_issues = HashSet::new();
+
+    for runtime in &skills.runtimes {
+        for issue in &runtime.issues {
+            if seen_skill_issues.insert(issue.fingerprint.clone()) {
+                findings.push(skill_doctor_finding(issue, "user", &runtime.runtime, None));
+            }
+        }
+    }
+    for agent in &skills.agents {
+        for issue in &agent.issues {
+            if seen_skill_issues.insert(issue.fingerprint.clone()) {
+                findings.push(skill_doctor_finding(
+                    issue,
+                    "runtime",
+                    &agent.runtime,
+                    Some(format!("Agent {} ({})", agent.agent_name, agent.agent_id)),
+                ));
+            }
+        }
+    }
+    for diagnostic in &skills.diagnostics {
+        findings.push(DoctorFinding {
+            id: diagnostic.fingerprint.clone(),
+            code: diagnostic.error_type.to_owned(),
+            severity: DoctorSeverity::Error,
+            scope: if diagnostic.subject == "agent" {
+                "runtime".to_owned()
+            } else {
+                "user".to_owned()
+            },
+            domain: "skill".to_owned(),
+            runtime: Some(diagnostic.runtime.clone()),
+            subject: diagnostic
+                .agent_name
+                .clone()
+                .or_else(|| Some(diagnostic.stage.to_owned())),
+            message: diagnostic.message.clone(),
+            evidence: Vec::new(),
+            remediation: Some(
+                "Verify the Runtime binary and Skill search roots, then run Doctor again."
+                    .to_owned(),
+            ),
+            new_session_required: false,
+        });
+    }
+
+    for diagnostic in &mcp.diagnostics {
+        let evidence = diagnostic
+            .evidence
+            .iter()
+            .map(|item| {
+                item.source_path
+                    .as_ref()
+                    .map(|path| format!("{}: {} ({path})", item.source, item.detail))
+                    .unwrap_or_else(|| format!("{}: {}", item.source, item.detail))
+            })
+            .collect();
+        findings.push(DoctorFinding {
+            id: stable_api_fingerprint(&format!(
+                "mcp|{}|{}|{}",
+                diagnostic.runtime,
+                diagnostic.server_id.as_deref().unwrap_or("aggregate"),
+                diagnostic.code
+            )),
+            code: diagnostic.code.clone(),
+            severity: match diagnostic.severity {
+                McpDiagnosticSeverity::Info => DoctorSeverity::Info,
+                McpDiagnosticSeverity::Warning => DoctorSeverity::Warning,
+                McpDiagnosticSeverity::Error => DoctorSeverity::Error,
+            },
+            scope: if matches!(diagnostic.runtime.as_str(), "machine" | "aggregate") {
+                "user".to_owned()
+            } else {
+                "runtime".to_owned()
+            },
+            domain: "mcp".to_owned(),
+            runtime: (!matches!(diagnostic.runtime.as_str(), "machine" | "aggregate"))
+                .then(|| diagnostic.runtime.clone()),
+            subject: diagnostic.server_id.clone(),
+            message: diagnostic.message.clone(),
+            evidence,
+            remediation: Some(mcp_remediation(&diagnostic.code).to_owned()),
+            new_session_required: matches!(
+                diagnostic.code.as_str(),
+                "mcp_config_runtime_drift" | "mcp_runtime_visibility_unknown"
+            ),
+        });
+    }
+    for observation in &mcp.observations {
+        if observation.configured && observation.current_session_visible == Some(false) {
+            findings.push(DoctorFinding {
+                id: stable_api_fingerprint(&format!(
+                    "mcp_session_invisible|{}|{}",
+                    observation.runtime, observation.server_id
+                )),
+                code: "mcp_not_visible_in_current_session".to_owned(),
+                severity: DoctorSeverity::Warning,
+                scope: "runtime".to_owned(),
+                domain: "mcp".to_owned(),
+                runtime: Some(observation.runtime.clone()),
+                subject: Some(observation.alias.clone()),
+                message: "Configured MCP server is not visible in the current Runtime session."
+                    .to_owned(),
+                evidence: observation
+                    .evidence
+                    .iter()
+                    .map(|item| format!("{}: {}", item.source, item.detail))
+                    .collect(),
+                remediation: Some(
+                    "Start a new Runtime session after confirming the MCP configuration."
+                        .to_owned(),
+                ),
+                new_session_required: true,
+            });
+        }
+    }
+
+    let (context_file_count, context_check_count, mut context_findings) = inspect_context_files();
+    findings.append(&mut context_findings);
+
+    let installed_runtime_count = runtimes.iter().filter(|runtime| runtime.installed).count();
+    if installed_runtime_count == 0 {
+        findings.push(DoctorFinding {
+            id: stable_api_fingerprint("runtime|none_installed"),
+            code: "no_runtime_installed".to_owned(),
+            severity: DoctorSeverity::Error,
+            scope: "machine".to_owned(),
+            domain: "runtime".to_owned(),
+            runtime: None,
+            subject: None,
+            message: "No supported Agent Runtime is available on this machine.".to_owned(),
+            evidence: Vec::new(),
+            remediation: Some(
+                "Install and authenticate at least one supported Agent Runtime CLI.".to_owned(),
+            ),
+            new_session_required: false,
+        });
+    }
+    for runtime in runtimes.iter().filter(|runtime| runtime.installed) {
+        if runtime.binary.is_none() {
+            findings.push(DoctorFinding {
+                id: stable_api_fingerprint(&format!("runtime|{}|binary_missing", runtime.name)),
+                code: "runtime_binary_unresolved".to_owned(),
+                severity: DoctorSeverity::Warning,
+                scope: "machine".to_owned(),
+                domain: "runtime".to_owned(),
+                runtime: Some(runtime.name.clone()),
+                subject: None,
+                message: format!(
+                    "{} is marked installed, but its executable path is unavailable.",
+                    runtime.name
+                ),
+                evidence: Vec::new(),
+                remediation: Some(
+                    "Check PATH and the Runtime installation, then restart cocli.".to_owned(),
+                ),
+                new_session_required: false,
+            });
+        }
+        if runtime.version.is_none() {
+            findings.push(DoctorFinding {
+                id: stable_api_fingerprint(&format!("runtime|{}|version_unknown", runtime.name)),
+                code: "runtime_version_unknown".to_owned(),
+                severity: DoctorSeverity::Info,
+                scope: "machine".to_owned(),
+                domain: "runtime".to_owned(),
+                runtime: Some(runtime.name.clone()),
+                subject: None,
+                message: format!("{} version could not be determined.", runtime.name),
+                evidence: runtime.binary.clone().into_iter().collect(),
+                remediation: Some(
+                    "Verify that the Runtime CLI can print its version without prompting."
+                        .to_owned(),
+                ),
+                new_session_required: false,
+            });
+        }
+    }
+
+    findings.sort_by(|left, right| {
+        doctor_severity_rank(right.severity)
+            .cmp(&doctor_severity_rank(left.severity))
+            .then_with(|| left.domain.cmp(&right.domain))
+            .then_with(|| left.runtime.cmp(&right.runtime))
+            .then_with(|| left.code.cmp(&right.code))
+    });
+
+    let error_count = count_severity(&findings, DoctorSeverity::Error);
+    let warning_count = count_severity(&findings, DoctorSeverity::Warning);
+    let info_count = count_severity(&findings, DoctorSeverity::Info);
+    let unique_skills = skills
+        .runtimes
+        .iter()
+        .flat_map(|runtime| &runtime.skills)
+        .chain(skills.agents.iter().flat_map(|agent| &agent.skills))
+        .map(|skill| skill.fingerprint.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let search_path_count = skills
+        .runtimes
+        .iter()
+        .map(|runtime| runtime.search_paths.len())
+        .sum::<usize>()
+        + skills
+            .agents
+            .iter()
+            .map(|agent| agent.search_paths.len())
+            .sum::<usize>();
+    let check_count = runtimes.len()
+        + skills.agents.len()
+        + unique_skills
+        + search_path_count
+        + mcp.observations.len()
+        + context_check_count;
+    let runtime_reports: Vec<DoctorRuntime> = runtimes
+        .into_iter()
+        .map(|runtime| {
+            let matching: Vec<_> = findings
+                .iter()
+                .filter(|finding| finding.runtime.as_deref() == Some(runtime.name.as_str()))
+                .collect();
+            let status = if !runtime.installed {
+                "unavailable"
+            } else if matching
+                .iter()
+                .any(|finding| finding.severity == DoctorSeverity::Error)
+            {
+                "error"
+            } else if matching
+                .iter()
+                .any(|finding| finding.severity == DoctorSeverity::Warning)
+            {
+                "warning"
+            } else {
+                "ok"
+            };
+            DoctorRuntime {
+                name: runtime.name,
+                installed: runtime.installed,
+                binary: runtime.binary,
+                version: runtime.version,
+                unavailable_reason: runtime.unavailable_reason,
+                status: status.to_owned(),
+                finding_count: matching.len(),
+            }
+        })
+        .collect();
+    let status = doctor_status(error_count, warning_count);
+
+    Ok(MachineDoctorReport {
+        schema_version: "1",
+        observed_at: chrono::Utc::now(),
+        force_refresh: force,
+        summary: MachineDoctorSummary {
+            status: status.to_owned(),
+            check_count,
+            error_count,
+            warning_count,
+            info_count,
+            runtime_count: runtime_reports.len(),
+            installed_runtime_count,
+            agent_count: skills.agents.len(),
+            skill_count: unique_skills,
+            mcp_server_count: mcp.servers.len(),
+            context_file_count,
+        },
+        machine: summarize_scope(&findings, "machine"),
+        user: summarize_scope(&findings, "user"),
+        runtime: summarize_scope(&findings, "runtime"),
+        runtimes: runtime_reports,
+        findings,
+        notes: vec![
+            "Doctor is read-only and never changes Runtime, MCP, Skill, or instruction files."
+                .to_owned(),
+            "Unknown Runtime/session visibility remains unknown; it is not reported as healthy."
+                .to_owned(),
+            "Findings that require a new session are marked explicitly.".to_owned(),
+        ],
+    })
+}
+
+fn skill_doctor_finding(
+    issue: &RuntimeSkillIssue,
+    scope: &str,
+    runtime: &str,
+    subject: Option<String>,
+) -> DoctorFinding {
+    DoctorFinding {
+        id: issue.fingerprint.clone(),
+        code: issue.code.clone(),
+        severity: if issue.severity == "error" {
+            DoctorSeverity::Error
+        } else {
+            DoctorSeverity::Warning
+        },
+        scope: scope.to_owned(),
+        domain: "skill".to_owned(),
+        runtime: Some(runtime.to_owned()),
+        subject: subject.or_else(|| issue.skill_name.clone()),
+        message: issue.message.clone(),
+        evidence: issue
+            .path
+            .clone()
+            .into_iter()
+            .chain(issue.related_paths.iter().cloned())
+            .collect(),
+        remediation: Some(skill_remediation(&issue.code).to_owned()),
+        new_session_required: issue.code == "not_runtime_discovered",
+    }
+}
+
+fn skill_remediation(code: &str) -> &'static str {
+    match code {
+        "broken_symlink" => "Repair or remove the broken Skill symlink.",
+        "duplicate_search_path" | "duplicate_target" | "shadowed_skill" => {
+            "Keep one authoritative Skill copy or adjust Runtime search-path precedence."
+        }
+        "invalid_frontmatter" => "Repair the Skill SKILL.md frontmatter, then rerun Doctor.",
+        "not_runtime_discovered" => {
+            "Confirm the Runtime Skill root and start a new Runtime session."
+        }
+        "missing_managed_install" => {
+            "Reinstall or remove the stale managed Skill record through cocli."
+        }
+        _ => "Inspect the reported Skill path and Runtime discovery evidence.",
+    }
+}
+
+fn mcp_remediation(code: &str) -> &'static str {
+    match code {
+        "mcp_not_approved" => "Approve the MCP server in the target Runtime.",
+        "mcp_not_authenticated" => "Complete Runtime-native authentication for this MCP server.",
+        "mcp_startup_failed" => "Inspect the MCP command, environment, and Runtime startup logs.",
+        "mcp_config_runtime_drift" => {
+            "Reconcile the configured MCP definition, then start a new Runtime session."
+        }
+        "mcp_config_drift" => "Choose one canonical MCP definition for this alias.",
+        _ => "Inspect the MCP evidence and reconcile the Runtime-native configuration.",
+    }
+}
+
+fn inspect_context_files() -> (usize, usize, Vec<DoctorFinding>) {
+    const LARGE_CONTEXT_BYTES: u64 = 64 * 1024;
+
+    let mut candidates = Vec::new();
+    if let Some(codex_home) = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(std::path::PathBuf::from)
+                .map(|home| home.join(".codex"))
+        })
+    {
+        candidates.push(("user", codex_home.join("AGENTS.md")));
+    }
+    match std::env::current_dir() {
+        Ok(directory) => candidates.push(("runtime", directory.join("AGENTS.md"))),
+        Err(error) => {
+            return (
+                0,
+                1,
+                vec![DoctorFinding {
+                    id: stable_api_fingerprint("context|current_directory_unavailable"),
+                    code: "current_directory_unavailable".to_owned(),
+                    severity: DoctorSeverity::Error,
+                    scope: "machine".to_owned(),
+                    domain: "context".to_owned(),
+                    runtime: None,
+                    subject: None,
+                    message: format!("The cocli process current directory is unavailable: {error}"),
+                    evidence: Vec::new(),
+                    remediation: Some(
+                        "Start cocli from an existing readable working directory.".to_owned(),
+                    ),
+                    new_session_required: false,
+                }],
+            );
+        }
+    }
+    candidates.sort_by(|left, right| left.1.cmp(&right.1));
+    candidates.dedup_by(|left, right| left.1 == right.1);
+
+    let check_count = candidates.len();
+    let mut file_count = 0;
+    let mut findings = Vec::new();
+    let mut readable = Vec::new();
+    for (scope, path) in candidates {
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                findings.push(DoctorFinding {
+                    id: stable_api_fingerprint(&format!("context|unreadable|{}", path.display())),
+                    code: "context_file_unreadable".to_owned(),
+                    severity: DoctorSeverity::Error,
+                    scope: scope.to_owned(),
+                    domain: "context".to_owned(),
+                    runtime: None,
+                    subject: Some(path.display().to_string()),
+                    message: format!("Instruction file metadata cannot be read: {error}"),
+                    evidence: vec![path.display().to_string()],
+                    remediation: Some(
+                        "Repair file ownership or permissions before starting a new session."
+                            .to_owned(),
+                    ),
+                    new_session_required: true,
+                });
+                continue;
+            }
+        };
+        if !metadata.is_file() {
+            findings.push(DoctorFinding {
+                id: stable_api_fingerprint(&format!("context|not_file|{}", path.display())),
+                code: "context_path_not_file".to_owned(),
+                severity: DoctorSeverity::Warning,
+                scope: scope.to_owned(),
+                domain: "context".to_owned(),
+                runtime: None,
+                subject: Some(path.display().to_string()),
+                message: "Instruction path exists but is not a regular file.".to_owned(),
+                evidence: vec![path.display().to_string()],
+                remediation: Some("Replace it with a readable AGENTS.md file.".to_owned()),
+                new_session_required: true,
+            });
+            continue;
+        }
+        file_count += 1;
+        match std::fs::read(&path) {
+            Ok(content) => {
+                if metadata.len() > LARGE_CONTEXT_BYTES {
+                    findings.push(DoctorFinding {
+                        id: stable_api_fingerprint(&format!(
+                            "context|large|{}",
+                            path.display()
+                        )),
+                        code: "context_file_large".to_owned(),
+                        severity: DoctorSeverity::Warning,
+                        scope: scope.to_owned(),
+                        domain: "context".to_owned(),
+                        runtime: None,
+                        subject: Some(path.display().to_string()),
+                        message: format!(
+                            "Instruction file is {} KiB and may add excessive startup context.",
+                            metadata.len().div_ceil(1024)
+                        ),
+                        evidence: vec![format!(
+                            "{} bytes · {} lines",
+                            metadata.len(),
+                            content.iter().filter(|byte| **byte == b'\n').count() + 1
+                        )],
+                        remediation: Some(
+                            "Keep only durable, repository-specific rules and move reference material out of AGENTS.md."
+                                .to_owned(),
+                        ),
+                        new_session_required: true,
+                    });
+                }
+                readable.push((scope, path, content));
+            }
+            Err(error) => findings.push(DoctorFinding {
+                id: stable_api_fingerprint(&format!("context|read_failed|{}", path.display())),
+                code: "context_file_unreadable".to_owned(),
+                severity: DoctorSeverity::Error,
+                scope: scope.to_owned(),
+                domain: "context".to_owned(),
+                runtime: None,
+                subject: Some(path.display().to_string()),
+                message: format!("Instruction file cannot be read: {error}"),
+                evidence: vec![path.display().to_string()],
+                remediation: Some(
+                    "Repair file ownership or permissions before starting a new session."
+                        .to_owned(),
+                ),
+                new_session_required: true,
+            }),
+        }
+    }
+    if readable.len() == 2 && !readable[0].2.is_empty() && readable[0].2 == readable[1].2 {
+        findings.push(DoctorFinding {
+            id: stable_api_fingerprint("context|duplicate_user_workspace_instructions"),
+            code: "duplicate_instruction_context".to_owned(),
+            severity: DoctorSeverity::Warning,
+            scope: "user".to_owned(),
+            domain: "context".to_owned(),
+            runtime: None,
+            subject: Some("AGENTS.md".to_owned()),
+            message: "User and workspace instruction files contain identical content.".to_owned(),
+            evidence: readable
+                .iter()
+                .map(|(_, path, _)| path.display().to_string())
+                .collect(),
+            remediation: Some(
+                "Keep global defaults in the user file and repository-only rules in the workspace file."
+                    .to_owned(),
+            ),
+            new_session_required: true,
+        });
+    }
+    (file_count, check_count, findings)
+}
+
+fn summarize_scope(findings: &[DoctorFinding], scope: &str) -> DoctorScopeSummary {
+    let scoped = findings
+        .iter()
+        .filter(|finding| finding.scope == scope)
+        .collect::<Vec<_>>();
+    let error_count = scoped
+        .iter()
+        .filter(|finding| finding.severity == DoctorSeverity::Error)
+        .count();
+    let warning_count = scoped
+        .iter()
+        .filter(|finding| finding.severity == DoctorSeverity::Warning)
+        .count();
+    DoctorScopeSummary {
+        status: doctor_status(error_count, warning_count).to_owned(),
+        error_count,
+        warning_count,
+        info_count: scoped
+            .iter()
+            .filter(|finding| finding.severity == DoctorSeverity::Info)
+            .count(),
+    }
+}
+
+fn count_severity(findings: &[DoctorFinding], severity: DoctorSeverity) -> usize {
+    findings
+        .iter()
+        .filter(|finding| finding.severity == severity)
+        .count()
+}
+
+fn doctor_status(error_count: usize, warning_count: usize) -> &'static str {
+    if error_count > 0 {
+        "error"
+    } else if warning_count > 0 {
+        "warning"
+    } else {
+        "ok"
+    }
+}
+
+fn doctor_severity_rank(severity: DoctorSeverity) -> u8 {
+    match severity {
+        DoctorSeverity::Info => 0,
+        DoctorSeverity::Warning => 1,
+        DoctorSeverity::Error => 2,
+    }
 }
 
 pub(super) async fn governance_observation(

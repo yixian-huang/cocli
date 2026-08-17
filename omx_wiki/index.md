@@ -1,33 +1,30 @@
 # cocli Knowledge Base
 
-This directory is the durable knowledge base for cocli product and delivery work.
-Pages use double-bracket wiki links so an Agent can discover the program from
-this index without depending on an earlier chat session.
+Durable product and delivery knowledge for cocli. `DESIGN.md` and `ROADMAP.md`
+are canonical; Wiki pages are supporting context and historical evidence.
 
-## Self-bootstrap program
+## Current handoff
 
-- [[cocli-self-bootstrap]] — product boundary, bootstrap stages, task DAG, and
-  completion criteria.
-- [[workspace-provider-portability]] — Workspace identity, subject attachments,
-  machine bindings, Provider behavior, backup bundles, and rebinding.
-- [[public-alpha-distribution]] — artifact matrix, signing, installers, release
-  gates, and first-use behavior.
-- [[execution-goal-workspace-foundation]] — the first implementation goal and
-  its acceptance criteria.
-- [[session-log-portable-backup-rebinding]] — cocli-native control-plane IDs,
-  Workspace binding evidence, execution boundary, and milestone verification.
+- Product center: persistent Agents, Channels, conversation, and membership.
+- Current priorities: conversation-first polish, A5 recovery evidence, then A6
+  installable public alpha.
+- A4 Workspace-provider product work was descoped on 2026-07-20. Workspace
+  remains optional infrastructure for Runtime cwd and portable rebinding.
+- Portable Workspace foundation and backup/rebinding implementation are
+  complete; do not restart those historical execution goals.
 
-## Source-of-truth documents
+## Read first
 
 - `DESIGN.md` — canonical product and interaction contract.
 - `ROADMAP.md` — milestone status and product completion criteria.
 - `README.md` — currently supported user-facing behavior.
 
-## Reading order for a new execution session
+## Supporting pages
 
-1. Read `DESIGN.md` and `ROADMAP.md`.
-2. Read [[cocli-self-bootstrap]].
-3. Read [[workspace-provider-portability]].
-4. Execute [[execution-goal-workspace-foundation]].
-5. Use [[public-alpha-distribution]] only after the portable Workspace boundary
-   is stable.
+- [[public-alpha-distribution]] — remaining A6 artifact, signing, installer,
+  onboarding, and release gates.
+- [[session-log-portable-backup-rebinding]] — completed A5 implementation and
+  verification evidence.
+- [[cocli-self-bootstrap]] — historical program overview; partially superseded.
+- [[workspace-provider-portability]] — historical implementation contract.
+- [[execution-goal-workspace-foundation]] — completed historical goal.
