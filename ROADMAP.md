@@ -14,10 +14,11 @@ coordination primitives, Agent Memory and Skills, runtime history, live
 execution events, global search, and recoverable backup/restore (including
 portable bundles).
 
-The durable subject migration is landed. Remaining alpha work focuses on
-conversation-first Channel UX, state recovery and migration evidence,
-distribution, onboarding, and cross-platform release—not Git Workspace product
-depth or Task-centric Channel redesign.
+The durable subject migration is landed. Conversation-first Channel UX and A5
+recovery/portability are complete. A6 is in progress (unsigned installers and
+a draft release workflow; no GitHub Release yet). Remaining alpha work is A6
+distribution, signing, and cross-platform release evidence—not Git Workspace
+product depth or Task-centric Channel redesign.
 
 ## Alpha milestones
 
@@ -27,14 +28,21 @@ depth or Task-centric Channel redesign.
 | A2 — Agent self-organization | Capability-scoped Bridge operations for Agents to create Agents, Channels, memberships, and optional durable coordination work | complete |
 | A3 — Subject-first client | Channels and Agents are primary navigation; conversation and membership define Channel; Memory, Skills, and diagnostics live under subjects | complete |
 | A4 — Workspace providers | **Descoped as product work (2026-07-20).** Optional resource handles and thin adapters (including Git) may exist for Runtime cwd and portable rebind; cocli does **not** maintain Git/worktree/provider product features or provider-depth milestones. Existing schema/APIs stay for compatibility. | descoped |
-| A5 — Recovery and portability | Restore/import, schema compatibility checks, migration safety, and documented cross-machine rebinding of **subjects and durable state** (not Git product workflows) | in progress |
-| A6 — Installable public alpha | Signed/checksummed binaries, installer, release workflow, green cross-platform CI, accurate onboarding and support matrix | planned |
+| A5 — Recovery and portability | Restore/import, schema compatibility checks, migration safety, and documented cross-machine rebinding of **subjects and durable state** (not Git product workflows) | complete |
+| A6 — Installable public alpha | Signed/checksummed binaries, installer, release workflow, green cross-platform CI, accurate onboarding and support matrix | in progress |
 
 ### Product priority after A3 (alpha)
 
-1. **Conversation-first subjects** — Channel empty/primary surfaces emphasize talk and membership; demote Task boards and purpose/goal framing; keep Task APIs for Agent coordination without redefining Channel.
-2. **A5 — state portability** — backup, preflight, restore, installation rebind for Agents/Channels/Memory and related durable rows.
-3. **A6 — installable alpha** — release artifacts, installers, first-run that starts from Agent/Channel without path or Workspace setup.
+1. **Conversation-first subjects (complete)** — Channel empty/primary surfaces emphasize talk and membership; Task UI is hidden as a Channel peer tab and available as optional coordination disclosure; Task APIs remain for Agent coordination without redefining Channel.
+2. **A5 — state portability (complete)** — backup, preflight, restore, and `cocli rebind` for Agents/Channels/Memory and related durable rows. Evidence: schema 12 → 19 fixture, schema-19 portable round-trip, apply-cannot-replay sanitization.
+3. **A6 — installable alpha (in progress)** — unsigned user-scoped
+   `scripts/install.sh` / `scripts/install.ps1` and a draft five-target
+   release workflow are in tree. First-run from an installed prefix opens
+   Channel/Agent (no Workspace required; `/api/doctor` is Settings-only).
+   A6 stays **in progress** until a draft GitHub Release exists for the
+   required targets that actually built; **complete** only after
+   clean-prefix smoke + restore on linux + macOS + windows. Signed
+   macOS/Windows is the same workflow with secrets, not a new product track.
 4. Supporting Skill/MCP governance only where it serves multi-Runtime desktop use; no pivot into package-manager or Git product directions.
 
 ### Supporting capability track — Skill governance

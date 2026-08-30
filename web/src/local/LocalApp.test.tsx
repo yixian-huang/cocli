@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { LocalApp } from './LocalApp'
 
@@ -44,6 +44,15 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: { 'Content-Type': 'application/json' },
   }))
+}
+
+async function addRunningAgent(name = 'builder') {
+  fireEvent.click(screen.getByRole('button', { name: /^Members$/ }))
+  expect(await screen.findByRole('heading', { name: 'Invite agent' })).toBeInTheDocument()
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: name } })
+  fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+  expect(await screen.findByRole('button', { name: 'Pause delivery' })).toBeInTheDocument()
+  expect(screen.getByText(name)).toBeInTheDocument()
 }
 
 describe('LocalApp', () => {
@@ -1757,15 +1766,85 @@ describe('LocalApp', () => {
     }))
   })
 
+  it('shows a conversation-first empty channel without a Goal field', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Start the conversation' })).toBeInTheDocument()
+
+    const onboarding = screen.getByRole('heading', { name: 'Start with a Channel or Agent' }).closest('section')
+    expect(onboarding).not.toBeNull()
+    expect(within(onboarding as HTMLElement).getByText('Send the first message')).toBeInTheDocument()
+    expect(within(onboarding as HTMLElement).queryByText('Tasks')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /^Tasks$/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Tasks$/ })).not.toBeInTheDocument()
+
+    const createChannelForm = screen.getByRole('textbox', { name: 'New channel' }).closest('form')
+    expect(createChannelForm).not.toBeNull()
+    expect(within(createChannelForm as HTMLElement).getByRole('textbox', { name: 'New channel' })).toBeInTheDocument()
+    expect(within(createChannelForm as HTMLElement).getByRole('textbox', { name: 'Description' })).toBeInTheDocument()
+    expect(within(createChannelForm as HTMLElement).queryByRole('textbox', { name: 'Goal' })).not.toBeInTheDocument()
+    expect(within(createChannelForm as HTMLElement).queryByText('Goal')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Goal')).not.toBeInTheDocument()
+
+    expect(screen.getByLabelText('Message in #product-loop')).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Write to the channel…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeInTheDocument()
+    expect(screen.queryByLabelText('Task for #product-loop')).not.toBeInTheDocument()
+    expect(screen.queryByPlaceholderText('Describe the task, constraints, and expected result…')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Run task' })).not.toBeInTheDocument()
+
+    const channelNav = screen.getByRole('navigation', { name: 'Channel workspace' })
+    const conversationTab = within(channelNav).getByRole('button', { name: /^Conversation$/ })
+    const membersTab = within(channelNav).getByRole('button', { name: /^Members$/ })
+    const memoryTab = within(channelNav).getByRole('button', { name: /^Memory$/ })
+    expect(conversationTab.tagName).toBe('BUTTON')
+    expect(membersTab.tagName).toBe('BUTTON')
+    expect(memoryTab.tagName).toBe('BUTTON')
+    expect(within(channelNav).queryByRole('button', { name: /^Tasks$/ })).not.toBeInTheDocument()
+
+    const siblingTabNames = within(channelNav).getAllByRole('button')
+      .filter((control) => control.tagName === 'BUTTON')
+      .map((control) => control.textContent?.replace(/\s+/g, ' ').trim())
+    expect(siblingTabNames).toEqual(['Conversation', 'Members', 'Memory'])
+
+    const tasksDisclosure = within(channelNav).getByRole('button', { name: /^Coordination$/ })
+    expect(tasksDisclosure.tagName).toBe('SUMMARY')
+    expect(tasksDisclosure.closest('details')).not.toBeNull()
+    expect(tasksDisclosure.closest('details')).not.toHaveAttribute('open')
+    expect(tasksDisclosure).toHaveAttribute(
+      'title',
+      'Optional claim/dependency tools for Agents—not the definition of this Channel.',
+    )
+    expect(screen.queryByRole('heading', { name: 'Coordination' })).not.toBeInTheDocument()
+
+    conversationTab.focus()
+    expect(conversationTab).toHaveFocus()
+    membersTab.focus()
+    expect(membersTab).toHaveFocus()
+    memoryTab.focus()
+    expect(memoryTab).toHaveFocus()
+    tasksDisclosure.focus()
+    expect(tasksDisclosure).toHaveFocus()
+
+    fireEvent.click(membersTab)
+    expect(screen.getByLabelText('Channel members')).toBeInTheDocument()
+    expect(screen.getByText('No Agent is in this channel yet. Invite one to collaborate.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add running agent' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Pause delivery' })).not.toBeInTheDocument()
+
+    fireEvent.click(tasksDisclosure)
+    expect(await screen.findByRole('heading', { name: 'Coordination' })).toBeInTheDocument()
+  })
+
   it('creates an agent and runs a task through the local API', async () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
     expect(screen.getByRole('heading', { name: 'Start with a Channel or Agent' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
+    await addRunningAgent()
+    fireEvent.click(screen.getByRole('button', { name: /^Conversation$/ }))
 
-    expect(await screen.findByText('builder')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Message in #product-loop'), {
       target: { value: 'Ship the loop' },
     })
@@ -1774,6 +1853,64 @@ describe('LocalApp', () => {
     expect(await screen.findByText('echo: Ship the loop')).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Ship the loop')).toBeInTheDocument())
     expect(screen.queryByRole('heading', { name: 'Start with a Channel or Agent' })).not.toBeInTheDocument()
+  })
+
+  it('opens direct Agent conversation as the default Agent view', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    await addRunningAgent()
+
+    const membersPane = screen.getByLabelText('Channel members')
+    fireEvent.click(within(membersPane).getByRole('button', { name: /conversation/i }))
+
+    expect(await screen.findByRole('heading', { name: '@builder' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Direct conversation' })).toBeInTheDocument()
+    expect(screen.getByPlaceholderText('Describe the requirement for this Agent…')).toBeInTheDocument()
+    expect(screen.getByText('Send this Agent a requirement to begin durable work.')).toBeInTheDocument()
+
+    const agentNav = screen.getByRole('navigation', { name: 'Agent workspace' })
+    expect(within(agentNav).getByRole('button', { name: /conversation/i })).toHaveClass('active')
+    expect(within(agentNav).getByRole('button', { name: /^Memory$/ })).not.toHaveClass('active')
+    expect(within(agentNav).getByRole('button', { name: /^History$/ })).not.toHaveClass('active')
+    expect(within(agentNav).getByRole('button', { name: /^Skills$/ })).not.toHaveClass('active')
+    expect(within(agentNav).getByRole('button', { name: /^MCP$/ })).not.toHaveClass('active')
+    expect(within(agentNav).queryByRole('button', { name: /^Tasks$/ })).not.toBeInTheDocument()
+    expect(within(agentNav).queryByRole('button', { name: /^Coordination$/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Coordination' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Knowledge workspace' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Runtime history' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Skills workspace' })).not.toBeInTheDocument()
+
+    fireEvent.click(within(agentNav).getByRole('button', { name: /^Memory$/ }))
+    expect(await screen.findByRole('heading', { name: 'Knowledge workspace' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
+    expect(await screen.findByRole('heading', { name: 'Direct conversation' })).toBeInTheDocument()
+    expect(within(screen.getByRole('navigation', { name: 'Agent workspace' }))
+      .getByRole('button', { name: /conversation/i })).toHaveClass('active')
+  })
+
+  it('does not imply Tasks define the Channel in leftover or leaving copy', async () => {
+    render(<LocalApp />)
+
+    expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    expect(screen.getByText(
+      'Invite an Agent, then send a message. Tasks and resource handles stay optional.',
+    )).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /delete .*channel/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /leave .*channel/i })).not.toBeInTheDocument()
+    expect(screen.queryByText(/tasks define (this |the )?channel/i)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /^Coordination$/ }))
+    expect(await screen.findByRole('heading', { name: 'Coordination' })).toBeInTheDocument()
+    expect(screen.getByText(
+      'Optional claim and dependency tools for Agents. A Channel does not require tasks or a formal purpose.',
+    )).toBeInTheDocument()
+    expect(screen.getByText(
+      'Skip this view for normal conversation. Create an item only when Agents need claim or dependency machinery.',
+    )).toBeInTheDocument()
+    expect(screen.queryByText(/delete .*channel.*task/i)).not.toBeInTheDocument()
+    expect(screen.queryByText(/leave .*channel.*task/i)).not.toBeInTheDocument()
   })
 
   it('shows pending deliveries until live completion clears them', async () => {
@@ -1795,9 +1932,8 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
-    expect(await screen.findByText('builder')).toBeInTheDocument()
+    await addRunningAgent()
+    fireEvent.click(screen.getByRole('button', { name: /^Conversation$/ }))
 
     fireEvent.change(screen.getByLabelText('Message in #product-loop'), {
       target: { value: 'Please handle async delivery' },
@@ -1879,9 +2015,8 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
-    expect(await screen.findByText('builder')).toBeInTheDocument()
+    await addRunningAgent()
+    fireEvent.click(screen.getByRole('button', { name: /^Conversation$/ }))
     // Channel membership + receiving hint update in the same async create path;
     // wait so CI runners do not race the composer hint re-render.
     expect(
@@ -1988,6 +2123,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Members$/ }))
     fireEvent.click(screen.getByRole('button', { name: /Appearance: Dark/ }))
     expect(document.documentElement.dataset.localTheme).toBe('light')
     expect(localStorage.getItem('cocli-local-theme')).toBe('light')
@@ -2004,6 +2140,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /^Members$/ }))
     const runtimeSelect = screen.getByRole('button', { name: 'Runtime' })
     fireEvent.keyDown(runtimeSelect, { key: 'ArrowDown' })
 
@@ -2017,9 +2154,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
-    expect(await screen.findByText('builder')).toBeInTheDocument()
+    await addRunningAgent()
 
     fireEvent.click(screen.getByRole('button', { name: 'Agents' }))
     fireEvent.click(screen.getByRole('button', { name: 'Skills' }))
@@ -2215,9 +2350,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
-    expect(await screen.findByText('builder')).toBeInTheDocument()
+    await addRunningAgent()
 
     fireEvent.click(screen.getByRole('button', { name: 'Coordination' }))
     expect(await screen.findByRole('heading', { name: 'Coordination' })).toBeInTheDocument()
@@ -2255,9 +2388,7 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
-    expect(await screen.findByText('builder')).toBeInTheDocument()
+    await addRunningAgent()
 
     fireEvent.click(screen.getByRole('button', { name: 'Memory' }))
     expect(await screen.findByRole('heading', { name: 'Knowledge workspace' })).toBeInTheDocument()
@@ -2286,9 +2417,8 @@ describe('LocalApp', () => {
     render(<LocalApp />)
 
     expect(await screen.findByRole('heading', { name: '# product-loop' })).toBeInTheDocument()
-    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'builder' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Add running agent' }))
-    expect(await screen.findByText('builder')).toBeInTheDocument()
+    await addRunningAgent()
+    fireEvent.click(screen.getByRole('button', { name: /^Conversation$/ }))
 
     fireEvent.change(screen.getByLabelText('Message in #product-loop'), {
       target: { value: 'Ship the loop' },

@@ -22,6 +22,7 @@ import {
   PackageOpen,
   Search,
   Sun,
+  Users,
   Wrench,
   X,
 } from 'lucide-react'
@@ -60,6 +61,7 @@ import {
 type LocalTheme = 'light' | 'dark'
 type WorkspaceView =
   | 'chat'
+  | 'members'
   | 'tasks'
   | 'knowledge'
   | 'agent'
@@ -618,9 +620,12 @@ export function LocalApp() {
     if (!agentName.trim() || !runtimeName) return
     setPending('agent')
     setError(null)
+    const channelIdToJoin = (workspaceView === 'chat' || workspaceView === 'members')
+      ? activeChannelId
+      : null
     try {
       const agent = await localApi.createAgent({
-        ...(workspaceView === 'chat' && activeChannelId ? { channel_id: activeChannelId } : {}),
+        ...(channelIdToJoin ? { channel_id: channelIdToJoin } : {}),
         name: agentName.trim(),
         description: agentDescription.trim() || undefined,
         instructions: agentInstructions.trim() || undefined,
@@ -628,7 +633,7 @@ export function LocalApp() {
         model: model || null,
       })
       setAgents((current) => [...current, agent])
-      if (workspaceView === 'chat' && activeChannelId) {
+      if (channelIdToJoin) {
         setChannelAgents((current) => (
           current.some((member) => member.id === agent.id) ? current : [...current, agent]
         ))
@@ -909,7 +914,7 @@ export function LocalApp() {
   const onboardingSteps = [
     { done: Boolean(activeChannel), label: t('onboardingChannel') },
     { done: channelAgents.length > 0, label: t('onboardingAgent') },
-    { done: messages.some((message) => message.role === 'user'), label: t('onboardingTask') },
+    { done: messages.some((message) => message.role === 'user'), label: t('onboardingMessage') },
   ]
   const showOnboarding = !onboardingSteps.every((step) => step.done)
   const showRuntimeHint = installedRuntimes.length === 0
@@ -1022,7 +1027,15 @@ export function LocalApp() {
             onClick={() => setWorkspaceView('chat')}
           >
             <MessageSquare size={14} aria-hidden="true" />
-            {t('conversation')}
+            {t('chatWorkspace')}
+          </button>
+          <button
+            type="button"
+            className={workspaceView === 'members' ? 'active' : ''}
+            onClick={() => setWorkspaceView('members')}
+          >
+            <Users size={14} aria-hidden="true" />
+            {t('membersWorkspace')}
           </button>
           <button
             type="button"
@@ -1032,15 +1045,23 @@ export function LocalApp() {
             <BookOpen size={14} aria-hidden="true" />
             {t('knowledgeMemory')}
           </button>
-          <button
-            type="button"
-            className={`nav-secondary-tool${workspaceView === 'tasks' ? ' active' : ''}`}
-            onClick={() => setWorkspaceView('tasks')}
-            title={t('tasksWorkspaceHint')}
+          <details
+            className={`nav-secondary-disclosure${workspaceView === 'tasks' ? ' active' : ''}`}
+            open={workspaceView === 'tasks'}
           >
-            <ListTodo size={14} aria-hidden="true" />
-            {t('tasksWorkspace')}
-          </button>
+            <summary
+              role="button"
+              aria-expanded={workspaceView === 'tasks'}
+              title={t('tasksWorkspaceHint')}
+              onClick={(event) => {
+                event.preventDefault()
+                setWorkspaceView((current) => (current === 'tasks' ? 'chat' : 'tasks'))
+              }}
+            >
+              <ListTodo size={14} aria-hidden="true" />
+              {t('tasksWorkspace')}
+            </summary>
+          </details>
         </nav>
       )}
 
@@ -1141,7 +1162,7 @@ export function LocalApp() {
         </div>
       )}
 
-      {workspaceView === 'chat' ? (
+      {workspaceView === 'chat' || workspaceView === 'members' ? (
       <div className="local-grid">
         <aside className="channel-rail" aria-label={t('channelsAndRuntimes')}>
           <section>
@@ -1210,6 +1231,7 @@ export function LocalApp() {
           </details>
         </aside>
 
+        {workspaceView === 'chat' ? (
         <section className="conversation" aria-label={t('conversation')}>
           <header className="conversation-header">
             <div>
@@ -1357,7 +1379,7 @@ export function LocalApp() {
             <p className="composer-shortcut quiet-copy">{t('composerShortcut')}</p>
           </form>
         </section>
-
+        ) : (
         <aside className="agent-panel" aria-label={t('channelAgents')}>
           <div className="section-heading">
             <h2>{t('agents')}</h2>
@@ -1555,6 +1577,7 @@ export function LocalApp() {
             </details>
           )}
         </aside>
+        )}
       </div>
       ) : workspaceView === 'agent' ? (
         <div className="agent-subject-layout">

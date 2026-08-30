@@ -1,14 +1,531 @@
-name: Release (placeholder)
+# Five-target public-alpha release (unsigned first).
+#
+# Contract table (do not silently omit a row):
+#   x86_64-unknown-linux-gnu     native ubuntu-latest
+#   aarch64-unknown-linux-gnu    skipped until OpenSSL is solved
+#                                (dedicated job `package-aarch64-linux` with
+#                                job-level `if: false` — not matrix.if).
+#                                Cross.toml has libssl-dev:arm64 for `cross`;
+#                                embed-web npm also fails inside the cross image.
+#                                Flip that job's `if` to true to attempt cross.
+#   x86_64-apple-darwin          macos-latest --target
+#   aarch64-apple-darwin         native macos-latest
+#   x86_64-pc-windows-msvc       native windows-latest
+#
+# Signing secrets live in the `release` environment so PR CI (ci.yml) cannot
+# see them. `secrets` is not available in `steps.*.if`; Apple/Windows jobs bind
+# secrets into env, set `steps.*.outputs.present`, and skip signing when missing
+# (those steps print `unsigned draft`).
+#
+# Tag push `v0.0.*` is the only path that creates/updates a draft GitHub Release.
+# `workflow_dispatch` still builds, checksums, optionally signs, and smokes;
+# it does not create, move, or clobber a tag.
+#
+# D2 installers expect:
+#   cocli-${VERSION}-${TARGET}.tar.gz | .zip
+#   adjacent SHA256SUMS (archives; optional inner cocli / cocli-bridge names)
+name: Release
 
 on:
+  push:
+    tags:
+      - "v0.0.*"
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  actions: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
-  noop:
+  verify:
+    name: Version + lockfile
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      tag: ${{ steps.ver.outputs.tag }}
+      publish_release: ${{ steps.ver.outputs.publish_release }}
     steps:
-      - name: Release workflow placeholder
+      - uses: actions/checkout@v7
+      - name: Verify tag / workspace version
+        id: ver
+        run: scripts/verify-release-version.sh
+      - name: Five-target contract
         run: |
-          echo "Release workflow lands in M0.0.4."
-          echo "Will: cargo build --release --features embed-web for 5 targets,"
-          echo "       sign artifacts, upload to GitHub Releases."
+          cat <<'EOF'
+          Release target contract:
+            x86_64-unknown-linux-gnu     build (native)
+            aarch64-unknown-linux-gnu    SKIP until OpenSSL/`cross`+embed-web is solved
+                                         (job package-aarch64-linux if: false)
+            x86_64-apple-darwin          build (macos --target)
+            aarch64-apple-darwin         build (native)
+            x86_64-pc-windows-msvc       build (native)
+          EOF
+
+  package:
+    name: ${{ matrix.target }}
+    needs: [verify]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            ext: tar.gz
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            ext: tar.gz
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: zip
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: web && npm ci && npm run build
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.80"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: cargo build --release
+        run: >
+          cargo build --release --locked --target ${{ matrix.target }}
+          --bin cocli --bin cocli-bridge
+
+      - name: Package archive
+        run: |
+          mkdir -p dist
+          scripts/package-release-archive.sh \
+            "${{ needs.verify.outputs.version }}" \
+            "${{ matrix.target }}" \
+            "target/${{ matrix.target }}/release" \
+            dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/cocli-${{ needs.verify.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
+          if-no-files-found: error
+          retention-days: 7
+
+  # Five-target contract row: aarch64-unknown-linux-gnu.
+  # Job-level skip (must not use matrix in jobs.*.if). Flip `if` to true when
+  # OpenSSL/`cross` + embed-web npm in the cross image is solved.
+  package-aarch64-linux:
+    name: aarch64-unknown-linux-gnu
+    needs: [verify]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Job-level skip (not matrix.if). Flip to true when OpenSSL/`cross` is solved.
+    if: false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: web && npm ci && npm run build
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.80"
+          targets: aarch64-unknown-linux-gnu
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release-aarch64-unknown-linux-gnu
+
+      - name: Install cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: cargo build --release (cross)
+        run: >
+          cross build --release --locked --target aarch64-unknown-linux-gnu
+          --bin cocli --bin cocli-bridge
+
+      - name: Package archive
+        run: |
+          mkdir -p dist
+          scripts/package-release-archive.sh \
+            "${{ needs.verify.outputs.version }}" \
+            aarch64-unknown-linux-gnu \
+            target/aarch64-unknown-linux-gnu/release \
+            dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-aarch64-unknown-linux-gnu
+          path: dist/cocli-${{ needs.verify.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-macos:
+    name: Sign macOS
+    needs: [verify, package]
+    runs-on: macos-latest
+    environment: release
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check Apple signing secrets
+        id: apple
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -n "$APPLE_CERTIFICATE_P12" ] && [ -n "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "present=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "present=false" >>"$GITHUB_OUTPUT"
+            echo "unsigned draft"
+          fi
+      - name: Download aarch64 darwin archive
+        if: ${{ steps.apple.outputs.present == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: archive-aarch64-apple-darwin
+          path: dist
+      - name: Download x86_64 darwin archive
+        if: ${{ steps.apple.outputs.present == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: archive-x86_64-apple-darwin
+          path: dist
+      - name: codesign darwin archives
+        if: ${{ steps.apple.outputs.present == 'true' }}
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p signed
+          found=0
+          for archive in dist/cocli-"${VERSION}"-*-apple-darwin.tar.gz; do
+            found=1
+            scripts/sign-macos-archive.sh "$VERSION" "$archive" signed
+          done
+          [[ "$found" -eq 1 ]] || {
+            echo "no darwin archives to sign" >&2
+            exit 1
+          }
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.apple.outputs.present == 'true' }}
+        with:
+          name: signed-archive-apple-darwin
+          path: signed/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-windows:
+    name: Sign Windows
+    needs: [verify, package]
+    runs-on: windows-latest
+    environment: release
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check Windows signing secrets
+        id: windows
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        shell: bash
+        run: |
+          if [ -n "$WINDOWS_CERTIFICATE_PFX" ] && [ -n "$WINDOWS_CERTIFICATE_PASSWORD" ]; then
+            echo "present=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "present=false" >>"$GITHUB_OUTPUT"
+            echo "unsigned draft"
+          fi
+      - name: Download windows archive
+        if: ${{ steps.windows.outputs.present == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: archive-x86_64-pc-windows-msvc
+          path: dist
+      - name: Authenticode-sign windows zip
+        if: ${{ steps.windows.outputs.present == 'true' }}
+        env:
+          WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path signed -Force | Out-Null
+          $archive = Join-Path 'dist' ("cocli-$env:VERSION-x86_64-pc-windows-msvc.zip")
+          ./scripts/sign-windows-archive.ps1 -Version $env:VERSION -Archive $archive -OutDir signed
+      - uses: actions/upload-artifact@v4
+        if: ${{ steps.windows.outputs.present == 'true' }}
+        with:
+          name: signed-archive-x86_64-pc-windows-msvc
+          path: signed/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  checksums:
+    name: SHA256SUMS
+    needs: [verify, package, package-aarch64-linux, sign-macos, sign-windows]
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' && (needs.package-aarch64-linux.result == 'success' || needs.package-aarch64-linux.result == 'skipped') && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: signed-archive-*
+          path: signed
+          merge-multiple: true
+      - name: Prefer signed archives and write SHA256SUMS
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          shopt -s nullglob
+          for f in signed/*; do
+            echo "using signed $(basename "$f")"
+            cp "$f" "dist/$(basename "$f")"
+          done
+          required=(
+            "cocli-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+            "cocli-${VERSION}-x86_64-apple-darwin.tar.gz"
+            "cocli-${VERSION}-aarch64-apple-darwin.tar.gz"
+            "cocli-${VERSION}-x86_64-pc-windows-msvc.zip"
+          )
+          missing=0
+          for name in "${required[@]}"; do
+            if [[ ! -f "dist/$name" ]]; then
+              echo "missing required archive: $name" >&2
+              missing=1
+            fi
+          done
+          if [[ -f "dist/cocli-${VERSION}-aarch64-unknown-linux-gnu.tar.gz" ]]; then
+            echo "aarch64-unknown-linux-gnu archive present"
+          else
+            echo "aarch64-unknown-linux-gnu not built (explicit OpenSSL skip; job package-aarch64-linux if: false)"
+          fi
+          [[ "$missing" -eq 0 ]] || exit 1
+          files=()
+          for f in dist/*.tar.gz dist/*.zip; do
+            files+=("$(basename "$f")")
+          done
+          (cd dist && ../scripts/write-sha256sums.sh . "${files[@]}")
+          echo "--- SHA256SUMS ---"
+          cat dist/SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sha256sums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  draft:
+    name: Draft GitHub Release
+    needs: [verify, package, checksums]
+    runs-on: ubuntu-latest
+    # Tag pushes only. workflow_dispatch must not create/move/clobber v0.0.0.
+    if: ${{ !cancelled() && github.event_name == 'push' && needs.verify.outputs.publish_release == 'true' && needs.verify.result == 'success' && needs.package.result == 'success' && needs.checksums.result == 'success' }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          path: dist
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: signed-archive-*
+          path: signed
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sha256sums
+          path: dist
+      - name: Stage assets
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for f in signed/*; do
+            cp "$f" "dist/$(basename "$f")"
+          done
+          [[ -f dist/SHA256SUMS ]] || { echo "SHA256SUMS missing" >&2; exit 1; }
+          ls -l dist
+      - name: Upload draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+          TAG: ${{ needs.verify.outputs.tag }}
+        run: |
+          set -euo pipefail
+          cat >notes.md <<EOF
+          Draft release for cocli ${VERSION}.
+
+          Archives contain \`cocli\` and \`cocli-bridge\`, licenses, INSTALL.txt,
+          and inner SHA256SUMS. Adjacent \`SHA256SUMS\` hashes the archives.
+
+          Five-target contract:
+          - \`x86_64-unknown-linux-gnu\`
+          - \`aarch64-unknown-linux-gnu\` (skipped until OpenSSL/\`cross\` is solved;
+            job \`package-aarch64-linux\` is \`if: false\`)
+          - \`x86_64-apple-darwin\`
+          - \`aarch64-apple-darwin\`
+          - \`x86_64-pc-windows-msvc\`
+
+          Signing jobs run only when \`release\` environment secrets \`APPLE_*\` /
+          \`WINDOWS_*\` are present. Missing secrets print \`unsigned draft\`.
+
+          Install (user-scoped, no admin):
+          - Unix: \`COCLI_VERSION=${VERSION} ./scripts/install.sh\`
+          - Windows: \`\$env:COCLI_VERSION="${VERSION}"; .\\scripts\\install.ps1\`
+
+          Next: run \`cocli\`, then open http://127.0.0.1:8090
+          EOF
+          shopt -s nullglob
+          assets=(dist/*.tar.gz dist/*.zip dist/SHA256SUMS)
+          [[ ${#assets[@]} -ge 2 ]] || { echo "no release assets staged" >&2; exit 1; }
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${assets[@]}" --clobber
+            gh release edit "$TAG" --draft --title "cocli ${VERSION} (draft)" --notes-file notes.md
+          else
+            gh release create "$TAG" "${assets[@]}" \
+              --draft \
+              --title "cocli ${VERSION} (draft)" \
+              --notes-file notes.md \
+              --target "${GITHUB_SHA}"
+          fi
+
+  smoke-linux:
+    name: Smoke + restore (linux)
+    needs: [verify, package]
+    runs-on: ubuntu-latest
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: archive-x86_64-unknown-linux-gnu
+          path: dist
+      - name: Install from archive, smoke, restore schema-12 fixture
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="dist/cocli-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p extract prefix
+          tar -xzf "$archive" -C extract
+          COCLI_ARTIFACT_DIR="$PWD/extract" COCLI_PREFIX="$PWD/prefix" \
+            ./scripts/install.sh
+          export COCLI_BIN="$PWD/prefix/bin/cocli"
+          ./scripts/smoke-installed.sh
+          ./scripts/restore-release-fixture.sh
+
+  smoke-macos:
+    name: Smoke + restore (macOS)
+    needs: [verify, package]
+    runs-on: macos-latest
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: archive-aarch64-apple-darwin
+          path: dist
+      - name: Install from archive, smoke, restore schema-12 fixture
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="dist/cocli-${VERSION}-aarch64-apple-darwin.tar.gz"
+          mkdir -p extract prefix
+          tar -xzf "$archive" -C extract
+          COCLI_ARTIFACT_DIR="$PWD/extract" COCLI_PREFIX="$PWD/prefix" \
+            ./scripts/install.sh
+          export COCLI_BIN="$PWD/prefix/bin/cocli"
+          ./scripts/smoke-installed.sh
+          ./scripts/restore-release-fixture.sh
+
+  verify-windows:
+    name: Installer + restore (windows)
+    needs: [verify, package]
+    runs-on: windows-latest
+    if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v4
+        with:
+          name: archive-x86_64-pc-windows-msvc
+          path: dist
+      - name: install.ps1 from archive
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = Join-Path 'dist' ("cocli-$env:VERSION-x86_64-pc-windows-msvc.zip")
+          New-Item -ItemType Directory -Path extract, prefix -Force | Out-Null
+          Expand-Archive -LiteralPath $archive -DestinationPath extract -Force
+          $env:COCLI_ARTIFACT_DIR = (Resolve-Path extract).Path
+          $env:COCLI_PREFIX = (Resolve-Path prefix).Path
+          ./scripts/install.ps1
+          & (Join-Path $env:COCLI_PREFIX 'cocli.exe') --version
+          & (Join-Path $env:COCLI_PREFIX 'cocli-bridge.exe') --version
+      - name: Restore schema-12 fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          export COCLI_BIN="$PWD/prefix/cocli.exe"
+          ./scripts/restore-release-fixture.sh

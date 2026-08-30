@@ -1,6 +1,6 @@
 # cocli local implementation record
 
-Updated: 2026-07-18
+Updated: 2026-08-30
 
 This repository has moved beyond its original “port a coding daemon” bootstrap.
 The canonical product contract is now [`DESIGN.md`](../DESIGN.md): cocli is a
@@ -40,6 +40,7 @@ The alpha foundation now makes the durable subject model explicit:
 
 ## Remaining public-alpha work
 
-See [`ROADMAP.md`](../ROADMAP.md) for current milestones. The critical path is
-Workspace provider depth, cross-machine rebinding, and reproducible
-cross-platform release packaging with accurate first-use guidance.
+See [`ROADMAP.md`](../ROADMAP.md) for current milestones. A5 recovery and
+portability is complete (schema 12 → 19 restore, portable bundles, CLI
+`rebind`). Remaining work is A6: reproducible cross-platform release packaging
+with accurate first-use guidance.

@@ -4023,6 +4023,28 @@ async fn sanitize_portable_state(
     query("UPDATE workspace_bindings SET secret_ref = NULL")
         .execute(&mut *transaction)
         .await?;
+    query(
+        "DELETE FROM mcp_apply_runs WHERE status IN \
+         ('pending', 'running', 'preflight', 'locked', 'backed_up', 'written', \
+          'reload_pending', 'reloaded', 'rolling_back', 'recovery_required')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    query(
+        "DELETE FROM mcp_plan_decisions WHERE id NOT IN (SELECT approval_id FROM mcp_apply_runs)",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    query(
+        "DELETE FROM skill_governance_apply_runs WHERE status IN \
+         ('pending', 'running', 'rolling_back', 'recovery_required')",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    // Skill approvals live on the plan row; MCP approvals are decision rows.
+    query("DELETE FROM skill_governance_plans WHERE status = 'approved'")
+        .execute(&mut *transaction)
+        .await?;
     transaction.commit().await?;
     Ok(())
 }

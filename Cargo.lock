@@ -299,6 +299,7 @@ dependencies = [
  "chrono",
  "clap",
  "cocli-api",
+ "cocli-driver-core",
  "cocli-reaper",
  "cocli-server",
  "cocli-store",
@@ -310,6 +311,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "windows-sys 0.61.2",
 ]
 
