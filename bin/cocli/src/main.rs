@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use cocli_api::{EchoRuntimeService, RuntimeService};
 use cocli_server::{LocalRuntimeConfig, LocalRuntimeService, Server, ServerConfig};
+use uuid::Uuid;
 
 mod portable;
 
@@ -56,6 +57,17 @@ enum Command {
         /// Portable bundle directory to validate.
         #[arg(long)]
         input: PathBuf,
+    },
+    /// Bind a Workspace resource handle, not a Git product workflow.
+    ///
+    /// Does not start the HTTP server. Run only while the HTTP server is stopped.
+    Rebind {
+        /// Workspace identifier to bind on this installation.
+        #[arg(long)]
+        workspace_id: Uuid,
+        /// Absolute local locator for the resource handle.
+        #[arg(long)]
+        local_locator: PathBuf,
     },
 }
 
@@ -168,6 +180,19 @@ async fn run_state_command(command: Command, data_dir: &std::path::Path) -> Resu
                 "{}",
                 serde_json::to_string_pretty(&preflight)
                     .context("failed to print portable preflight result")?
+            );
+            Ok(())
+        }
+        Command::Rebind {
+            workspace_id,
+            local_locator,
+        } => {
+            let binding =
+                portable::rebind_workspace(data_dir, workspace_id, &local_locator).await?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&binding)
+                    .context("failed to print workspace resource handle binding")?
             );
             Ok(())
         }
@@ -430,5 +455,69 @@ mod tests {
                 .expect("current state remains"),
             current
         );
+    }
+
+    #[test]
+    fn rebind_help_describes_resource_handle_not_git_product_workflow() {
+        use clap::CommandFactory;
+        let cmd = Args::command();
+        let rebind = cmd.find_subcommand("rebind").expect("rebind subcommand");
+        let about = rebind
+            .get_about()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        let long_about = rebind
+            .get_long_about()
+            .map(std::string::ToString::to_string)
+            .unwrap_or_default();
+        let help = format!("{about}\n{long_about}");
+        assert!(
+            help.contains("resource handle"),
+            "rebind help must say this binds a resource handle: {help}"
+        );
+        assert!(
+            help.contains("not a Git product workflow"),
+            "rebind help must say this is not a Git product workflow: {help}"
+        );
+        assert!(
+            help.contains("Does not start the HTTP server"),
+            "rebind help must say it does not start the HTTP server: {help}"
+        );
+        assert!(
+            help.contains("Run only while the HTTP server is stopped"),
+            "rebind help must say it runs only while the HTTP server is stopped: {help}"
+        );
+    }
+
+    #[test]
+    fn rebind_parses_workspace_id_and_local_locator() {
+        let args = Args::try_parse_from([
+            "cocli",
+            "--data-dir",
+            "/tmp/cocli-data",
+            "rebind",
+            "--workspace-id",
+            "ffffffff-ffff-4fff-8fff-ffffffffffff",
+            "--local-locator",
+            "/tmp/moved-checkout",
+        ])
+        .expect("rebind should parse");
+        assert_eq!(
+            args.data_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/cocli-data"))
+        );
+        match args.command {
+            Some(Command::Rebind {
+                workspace_id,
+                local_locator,
+            }) => {
+                assert_eq!(
+                    workspace_id,
+                    Uuid::parse_str("ffffffff-ffff-4fff-8fff-ffffffffffff").unwrap()
+                );
+                assert_eq!(local_locator, PathBuf::from("/tmp/moved-checkout"));
+            }
+            other => panic!("expected rebind command, got {other:?}"),
+        }
     }
 }

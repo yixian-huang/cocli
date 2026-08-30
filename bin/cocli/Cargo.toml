@@ -24,6 +24,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
+uuid = { workspace = true }
 cocli-api = { path = "../../crates/cocli-api" }
 cocli-reaper = { path = "../../crates/cocli-reaper" }
 cocli-server = { path = "../../crates/cocli-server" }
@@ -34,3 +35,4 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+cocli-driver-core = { path = "../../crates/cocli-driver-core" }

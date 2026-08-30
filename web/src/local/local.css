@@ -252,15 +252,36 @@ textarea:focus-visible {
   padding: 0.45rem 0.75rem;
 }
 
-.local-secondary-nav button.nav-secondary-tool {
-  opacity: 0.82;
-  font-weight: 500;
+.local-secondary-nav .nav-secondary-disclosure {
+  display: inline-flex;
 }
 
-.local-secondary-nav button.active {
+.local-secondary-nav .nav-secondary-disclosure > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-muted);
+  padding: 0.45rem 0.75rem;
+  opacity: 0.82;
+  font-weight: 500;
+  cursor: pointer;
+  list-style: none;
+}
+
+.local-secondary-nav .nav-secondary-disclosure > summary::-webkit-details-marker {
+  display: none;
+}
+
+.local-secondary-nav button.active,
+.local-secondary-nav .nav-secondary-disclosure.active > summary,
+.local-secondary-nav .nav-secondary-disclosure[open] > summary {
   border-color: var(--accent);
   background: var(--accent-soft);
   color: var(--accent);
+  opacity: 1;
 }
 
 .local-settings-workspace {
@@ -858,7 +879,7 @@ textarea:focus-visible {
 .local-grid {
   display: grid;
   min-height: calc(100vh - 60px);
-  grid-template-columns: 252px minmax(360px, 1fr) 304px;
+  grid-template-columns: 252px minmax(360px, 1fr);
 }
 
 .channel-rail,
@@ -876,6 +897,9 @@ textarea:focus-visible {
 
 .agent-panel {
   border-left: 1px solid var(--line);
+  max-width: 42rem;
+  width: 100%;
+  justify-self: start;
 }
 
 .section-heading {
@@ -3339,8 +3363,7 @@ textarea::placeholder {
   }
 
   .agent-panel {
-    grid-column: 1 / -1;
-    border-top: 1px solid var(--line);
+    max-width: none;
     border-left: 0;
   }
 

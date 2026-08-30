@@ -188,4 +188,4 @@ Direct Agent conversation may use a system-managed private Channel underneath, b
 - [x] ~~Define the first stable Workspace provider contract after managed, directory, Git, and external metadata prove the common fields.~~ **Closed (2026-07-20):** no product-level provider contract roadmap. Providers stay thin adapters; do not invest in Git/Workspace product depth. Portable binding fields remain an implementation concern for backup/rebind only.
 - [ ] Define plugin packaging and permission contracts before reintroducing Wiki or other optional knowledge products.
 - [ ] Decide whether Agent execution profiles are editable snapshots or separately reusable named resources after the identity/membership migration lands.
-- [ ] How far to demote Task UI in the local client (hidden by default vs secondary tab) without breaking Agent Bridge coordination flows.
+- [x] ~~How far to demote Task UI in the local client (hidden by default vs secondary tab) without breaking Agent Bridge coordination flows.~~ **Closed (2026-08-30):** hidden as a Channel peer tab; available as optional coordination disclosure; Bridge Task APIs unchanged.

@@ -4,10 +4,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
 use chrono::{SecondsFormat, Utc};
-use cocli_store::{PortableInventory, Store, CURRENT_SCHEMA_VERSION};
+use cocli_store::{PortableInventory, Store, WorkspaceBinding, CURRENT_SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
+use uuid::Uuid;
 
 const BUNDLE_FORMAT: &str = "cocli-portable-backup";
 const BUNDLE_VERSION: u32 = 1;
@@ -220,6 +221,60 @@ pub(crate) async fn preflight_bundle(input: &Path) -> Result<BundlePreflight> {
     })
 }
 
+pub(crate) async fn rebind_workspace(
+    data_dir: &Path,
+    workspace_id: Uuid,
+    local_locator: &Path,
+) -> Result<WorkspaceBinding> {
+    let db_path = data_dir.join("cocli.sqlite3");
+    if !db_path.exists() {
+        bail!(
+            "local state does not exist: {}; rebind must run only while the HTTP server is stopped",
+            db_path.display()
+        );
+    }
+    let locator = local_locator
+        .to_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .with_context(|| {
+            format!(
+                "workspace local locator must be a non-empty UTF-8 path: {}",
+                local_locator.display()
+            )
+        })?;
+    let store = match Store::open(&db_path).await {
+        Ok(store) => store,
+        Err(error) if sqlite_is_locked(&error) => {
+            return Err(error).context(
+                "rebind must run only while the HTTP server is stopped (SQLite is locked)",
+            );
+        }
+        Err(error) => return Err(error).context("failed to open local state"),
+    };
+    let binding = match store.bind_workspace(workspace_id, locator, None).await {
+        Ok(binding) => binding,
+        Err(error) => {
+            store.close().await;
+            return Err(error).context("failed to bind workspace resource handle");
+        }
+    };
+    store.close().await;
+    Ok(binding)
+}
+
+fn sqlite_is_locked(error: &cocli_store::StoreError) -> bool {
+    let mut current: Option<&dyn std::error::Error> = Some(error);
+    while let Some(err) = current {
+        let message = err.to_string().to_ascii_lowercase();
+        if message.contains("database is locked") || message.contains("database is busy") {
+            return true;
+        }
+        current = err.source();
+    }
+    false
+}
+
 pub(crate) async fn restore_bundle(data_dir: &Path, input: &Path) -> Result<BundleRestore> {
     let preflight = preflight_bundle(input).await?;
     tokio::fs::create_dir_all(data_dir)
@@ -367,13 +422,261 @@ fn nonce() -> u128 {
 
 #[cfg(test)]
 mod tests {
+    use cocli_driver_core::mcp_governance::McpBindingTargetType;
     use cocli_store::{
-        AgentStatus, Store, WorkspaceBindingState, WorkspaceProviderKey, CURRENT_SCHEMA_VERSION,
+        AgentStatus, MemoryNamespace, MessageRole, NewMcpProfile, NewMcpProfileBinding,
+        SkillGovernanceScope, Store, SubjectType, WorkspaceBindingState, WorkspaceProviderKey,
+        CURRENT_SCHEMA_VERSION,
     };
+    use uuid::Uuid;
 
     use super::{
-        create_bundle, preflight_bundle, restore_bundle, sha256_file, verify_staged_state_checksum,
+        create_bundle, preflight_bundle, rebind_workspace, restore_bundle, sha256_file,
+        verify_staged_state_checksum,
     };
+
+    #[tokio::test]
+    async fn bundle_round_trip_preserves_schema19_memory_and_governance_desired_state() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source_data = temp.path().join("source-data");
+        let target_data = temp.path().join("target-data");
+        let source_repository = temp.path().join("source-checkout");
+        let bundle = temp.path().join("schema19.cocli-backup");
+        tokio::fs::create_dir_all(source_repository.join(".git"))
+            .await
+            .expect("source Git metadata");
+        tokio::fs::create_dir_all(&source_data)
+            .await
+            .expect("source data directory");
+
+        let source = Store::open(source_data.join("cocli.sqlite3"))
+            .await
+            .expect("source store");
+        let source_installation_id = source.current_installation_id().to_owned();
+        let channel = source
+            .create_channel("schema19-recovery")
+            .await
+            .expect("channel");
+        let agent = source
+            .create_agent(channel.id, "restorer", "fake", None, AgentStatus::Running)
+            .await
+            .expect("agent");
+        source
+            .ensure_agent_bridge_token(agent.id)
+            .await
+            .expect("source token");
+        let message = source
+            .append_message(channel.id, None, MessageRole::User, "recover schema 19")
+            .await
+            .expect("message");
+        let task = source
+            .create_task(channel.id, "recover schema 19", Some(message.id), None)
+            .await
+            .expect("task");
+        let memory = source
+            .write_memory_topic(
+                MemoryNamespace::Channel(channel.id),
+                "project",
+                "recovery",
+                "Schema 19 recovery note",
+                "Keep this memory across portable restore.",
+                Some("restorer"),
+                None,
+            )
+            .await
+            .expect("memory");
+        let workspace = source
+            .create_workspace(
+                WorkspaceProviderKey::new("git").expect("provider key"),
+                "Recovery workspace",
+                Some("https://example.test/schema19.git"),
+                serde_json::json!({"preferred_ref": "main"}),
+            )
+            .await
+            .expect("workspace");
+        source
+            .attach_existing_workspace(workspace.id, SubjectType::Channel, channel.id, None)
+            .await
+            .expect("channel attachment");
+        source
+            .bind_workspace(
+                workspace.id,
+                source_repository.to_str().expect("source path"),
+                None,
+            )
+            .await
+            .expect("source binding");
+        let skill_profile = source
+            .create_skill_profile(serde_json::json!({
+                "skills": [{"name": "analysis", "policy": {"allow": true}}]
+            }))
+            .await
+            .expect("skill profile");
+        let skill_binding = source
+            .bind_skill_profile(
+                SkillGovernanceScope::Workspace,
+                &workspace.id.to_string(),
+                skill_profile.id,
+            )
+            .await
+            .expect("skill binding");
+        let mcp_profile = source
+            .create_mcp_profile(NewMcpProfile {
+                name: "portable-mcp".to_owned(),
+                description: Some("desired-state MCP profile".to_owned()),
+                servers: Vec::new(),
+            })
+            .await
+            .expect("mcp profile");
+        let mcp_profile_id = Uuid::parse_str(&mcp_profile.id).expect("mcp profile id");
+        let mcp_binding = source
+            .create_mcp_profile_binding(NewMcpProfileBinding {
+                profile_id: mcp_profile_id,
+                target_type: McpBindingTargetType::Agent,
+                target_id: agent.id.to_string(),
+            })
+            .await
+            .expect("mcp binding");
+
+        let manifest = create_bundle(&source, &bundle)
+            .await
+            .expect("bundle should be created");
+        assert_eq!(manifest.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 19);
+        assert_eq!(manifest.inventory.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(manifest.inventory.channels, 1);
+        assert_eq!(manifest.inventory.agents, 1);
+        assert_eq!(manifest.inventory.tasks, 1);
+        assert_eq!(manifest.inventory.workspaces, 1);
+        assert_eq!(manifest.inventory.workspace_attachments, 1);
+        assert_eq!(manifest.inventory.workspace_binding_hints, 1);
+        let preflight = preflight_bundle(&bundle)
+            .await
+            .expect("bundle should pass preflight");
+        assert_eq!(preflight.manifest.schema_version, CURRENT_SCHEMA_VERSION);
+        assert_eq!(preflight.manifest.inventory, manifest.inventory);
+        source.close().await;
+
+        let restored = restore_bundle(&target_data, &bundle)
+            .await
+            .expect("bundle should restore");
+        assert_ne!(restored.installation_id, source_installation_id);
+        assert_eq!(restored.inventory.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let target = Store::open(target_data.join("cocli.sqlite3"))
+            .await
+            .expect("target store");
+        assert_eq!(target.current_installation_id(), restored.installation_id);
+
+        let restored_channel = target
+            .get_channel(channel.id)
+            .await
+            .expect("channel query")
+            .expect("channel should survive");
+        assert_eq!(restored_channel.name, "schema19-recovery");
+        let restored_agent = target
+            .get_agent(agent.id)
+            .await
+            .expect("agent query")
+            .expect("agent should survive");
+        assert_eq!(restored_agent.name, "restorer");
+        assert_eq!(restored_agent.status, AgentStatus::Stopped);
+        let members = target
+            .list_channel_agents(channel.id)
+            .await
+            .expect("membership");
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].id, agent.id);
+        let restored_message = target
+            .get_message(message.id)
+            .await
+            .expect("message query")
+            .expect("message should survive");
+        assert_eq!(restored_message.role, MessageRole::User);
+        let restored_task = target
+            .get_task(channel.id, 1)
+            .await
+            .expect("task query")
+            .expect("task should survive");
+        assert_eq!(restored_task.id, task.id);
+        let restored_memory = target
+            .get_memory_topic(MemoryNamespace::Channel(channel.id), "project", "recovery")
+            .await
+            .expect("memory query")
+            .expect("memory should survive");
+        assert_eq!(restored_memory.path, memory.path);
+        assert!(restored_memory
+            .body
+            .contains("Keep this memory across portable restore."));
+
+        let running_count = target
+            .list_agents()
+            .await
+            .expect("agents")
+            .into_iter()
+            .filter(|listed| listed.status == AgentStatus::Running)
+            .count();
+        assert_eq!(running_count, 0);
+        let mut token_count = 0_i64;
+        for listed in target.list_agents().await.expect("agents") {
+            if target
+                .agent_bridge_token(listed.id)
+                .await
+                .expect("token query")
+                .is_some()
+            {
+                token_count += 1;
+            }
+        }
+        assert_eq!(token_count, 0);
+
+        let restored_skill = target
+            .get_skill_profile(skill_profile.id)
+            .await
+            .expect("skill query")
+            .expect("skill profile should survive");
+        assert_eq!(restored_skill.id, skill_profile.id);
+        let restored_skill_binding = target
+            .get_skill_profile_binding(skill_binding.id)
+            .await
+            .expect("skill binding query")
+            .expect("skill binding should survive");
+        assert_eq!(restored_skill_binding.profile_id, skill_profile.id);
+        assert_eq!(
+            restored_skill_binding.scope,
+            SkillGovernanceScope::Workspace
+        );
+
+        let restored_mcp = target
+            .get_mcp_profile(mcp_profile_id)
+            .await
+            .expect("mcp query")
+            .expect("mcp profile should survive");
+        assert_eq!(restored_mcp.id, mcp_profile.id);
+        let restored_mcp_bindings = target
+            .list_mcp_profile_bindings(Some(mcp_profile_id))
+            .await
+            .expect("mcp bindings");
+        assert!(restored_mcp_bindings.iter().any(|binding| {
+            binding.id == mcp_binding.id && binding.target.target_id == agent.id.to_string()
+        }));
+
+        let unbound = target
+            .current_workspace_binding(workspace.id)
+            .await
+            .expect("binding query")
+            .expect("unbound binding");
+        assert_eq!(unbound.state, WorkspaceBindingState::Unbound);
+        let hints = target
+            .list_workspace_bindings(workspace.id)
+            .await
+            .expect("binding hints");
+        assert!(hints.iter().any(|binding| {
+            binding.installation_id == source_installation_id
+                && binding.local_locator.as_deref() == source_repository.to_str()
+        }));
+        target.close().await;
+    }
 
     #[tokio::test]
     async fn bundle_preflight_inventory_and_moved_git_rebind_round_trip() {
@@ -475,17 +778,12 @@ mod tests {
             binding.installation_id == source_installation_id
                 && binding.local_locator.as_deref() == source_repository.to_str()
         }));
-        let rebound = target
-            .bind_workspace(
-                workspace.id,
-                target_repository.to_str().expect("target path"),
-                None,
-            )
+        target.close().await;
+        let rebound = rebind_workspace(&target_data, workspace.id, &target_repository)
             .await
             .expect("target rebind");
         assert_eq!(rebound.state, WorkspaceBindingState::Ready);
         assert_eq!(rebound.local_locator.as_deref(), target_repository.to_str());
-        target.close().await;
     }
 
     #[tokio::test]

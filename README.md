@@ -12,8 +12,11 @@ runtime session.
 eight Runtime adapters, durable delivery, optional Tasks, Memory, Skills,
 runtime history, live execution events, search, state backup/restore, and
 Skill governance are implemented. The persistent Agent/Channel model in
-[DESIGN.md](DESIGN.md) is landed; installers and release guarantees are still
-evolving toward a public alpha.
+[DESIGN.md](DESIGN.md) is landed. Unsigned user-scoped installers
+(`scripts/install.sh` / `scripts/install.ps1`) exist for a local
+`COCLI_ARTIFACT_DIR` path and the GitHub draft-release workflow; this tree
+has no published GitHub Release and does not ship signed or notarized
+binaries.
 
 **Honest support surface:** see [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md).
 **Official real-Runtime smoke today:** Grok via `scripts/smoke-grok-e2e.sh`.
@@ -94,6 +97,16 @@ migrates and sanitizes the staged database, creates a fresh installation
 identity, and leaves Workspaces unbound until explicitly rebound. It does not
 merge active installations, resume source Runtime Sessions, or create/delete
 Git worktrees.
+
+After a portable restore, bind a Workspace resource handle on this
+installation. `rebind` does not start the HTTP server; run it only while the
+server is stopped. This binds a resource handle, not a Git product workflow:
+
+```bash
+cargo run --bin cocli -- --data-dir ./local-data rebind \
+  --workspace-id <workspace-uuid> \
+  --local-locator /path/to/local/resource
+```
 
 Restore validates and migrates a staged copy before installing it. Existing
 state is copied to `local-data/backups/pre-restore-*.sqlite3`, then the staged

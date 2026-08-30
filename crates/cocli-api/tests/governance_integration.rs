@@ -1010,6 +1010,176 @@ async fn skill_and_mcp_governance_share_store_without_cross_domain_collisions() 
     assert!(all_state.contains("shared-governance"));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn portable_restore_cannot_replay_skill_governance_apply() {
+    let temp = tempdir().expect("temp directory");
+    let source_db = temp.path().join("source.sqlite3");
+    let snapshot = temp.path().join("snapshot.sqlite3");
+    let skill_source = temp.path().join("skill-source");
+    let runtime_root = temp.path().join("runtime-skill-roots");
+    let mcp_config_root = temp.path().join("mcp-config");
+    std::fs::create_dir_all(&skill_source).expect("skill source");
+    std::fs::create_dir_all(&mcp_config_root).expect("mcp config root");
+    std::fs::write(
+        skill_source.join("SKILL.md"),
+        "---\nname: shared-governance\ndisplay-name: Shared Governance\ndescription: restore fixture\n---\n# Shared Governance\n",
+    )
+    .expect("skill manifest");
+    let digests = governance_artifact_digests(&skill_source).expect("artifact digests");
+
+    let store = Store::open(&source_db).await.expect("source store");
+    let source_installation_id = store.current_installation_id().to_owned();
+    let channel = store
+        .create_channel("skill-restore")
+        .await
+        .expect("channel");
+    let agent = store
+        .create_agent(channel.id, "governed", "fake", None, AgentStatus::Stopped)
+        .await
+        .expect("agent");
+    let runtime = Arc::new(UnifiedGovernanceRuntime::new(runtime_root, mcp_config_root));
+    let app = router(store.clone(), runtime.clone());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (profile_status, profile) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/profiles",
+        json!({
+            "schemaVersion": 1,
+            "name": "shared-governance",
+            "skills": [{
+                "logicalIdentity": "shared-governance",
+                "source": {"kind": "local", "location": skill_source.to_string_lossy()},
+                "contentDigest": digests.content_digest,
+                "manifestDigest": digests.manifest_digest,
+                "targetRuntime": "fake",
+                "installScope": "agent",
+                "installationMode": "copy",
+                "enabled": true,
+                "updatePolicy": "pinned",
+                "allowedSources": ["local"],
+                "riskPolicy": "trusted"
+            }]
+        }),
+    )
+    .await;
+    assert_eq!(profile_status, StatusCode::CREATED, "{profile}");
+    let profile_id = profile["id"].as_str().expect("skill profile id");
+    let (binding_status, binding) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/bindings",
+        json!({"profileId": profile_id, "scope": "agent", "scopeId": agent.id}),
+    )
+    .await;
+    assert_eq!(binding_status, StatusCode::CREATED, "{binding}");
+
+    let (plan_status, plan) = json_request(
+        app.clone(),
+        "POST",
+        "/api/skills/governance/plans",
+        json!({
+            "scope": "agent",
+            "scopeId": agent.id,
+            "agentId": agent.id,
+            "force": true
+        }),
+    )
+    .await;
+    assert_eq!(plan_status, StatusCode::CREATED, "{plan}");
+    let plan_id = plan["plan"]["id"]
+        .as_str()
+        .expect("skill plan id")
+        .to_owned();
+    let (approve_status, approved) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/approve"),
+        json!({"expectedVersion": 1}),
+    )
+    .await;
+    assert_eq!(approve_status, StatusCode::OK, "{approved}");
+    let approved_version = approved["plan"]["version"]
+        .as_i64()
+        .expect("skill approved version");
+    let (preview_status, preview) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply/preview"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(preview_status, StatusCode::OK, "{preview}");
+    assert!(preview["staleReasons"]
+        .as_array()
+        .is_some_and(Vec::is_empty));
+    let apply_body = json!({
+        "expectedVersion": approved_version,
+        "idempotencyKey": preview["idempotencyKey"],
+        "confirmationNonce": preview["confirmationNonce"],
+        "confirmHighRisk": preview["highRisk"].as_bool().unwrap_or(false)
+    });
+
+    store
+        .export_portable_snapshot(&snapshot)
+        .await
+        .expect("export sanitized snapshot");
+    let (source_apply_status, source_applied) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        apply_body.clone(),
+    )
+    .await;
+    assert_eq!(source_apply_status, StatusCode::OK, "{source_applied}");
+    assert_eq!(source_applied["run"]["status"], "succeeded");
+    drop(app);
+    store.close().await;
+
+    let staged = Store::open(&snapshot).await.expect("open staged snapshot");
+    let restored_installation_id = staged
+        .prepare_portable_restore()
+        .await
+        .expect("assign restored installation");
+    staged.close().await;
+    assert_ne!(restored_installation_id, source_installation_id);
+
+    let restored = Store::open(&snapshot).await.expect("reopen restored store");
+    let restored_plan_id = uuid::Uuid::parse_str(&plan_id).expect("skill plan id");
+    assert!(restored
+        .get_skill_governance_plan(restored_plan_id)
+        .await
+        .expect("restored skill plan lookup")
+        .is_none());
+    let restored_profile_id = uuid::Uuid::parse_str(profile_id).expect("skill profile id");
+    assert!(restored
+        .get_skill_profile(restored_profile_id)
+        .await
+        .expect("restored skill profile lookup")
+        .is_some());
+    let restored_runtime = Arc::new(UnifiedGovernanceRuntime::new(
+        temp.path().join("restored-runtime-skill-roots"),
+        temp.path().join("restored-mcp-config"),
+    ));
+    let restored_app = router(restored.clone(), restored_runtime);
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let (apply_status, applied) = json_request(
+        restored_app,
+        "POST",
+        &format!("/api/skills/governance/plans/{plan_id}/apply"),
+        apply_body,
+    )
+    .await;
+    assert!(
+        matches!(apply_status, StatusCode::CONFLICT | StatusCode::NOT_FOUND),
+        "restored pre-restore skill approval must fail closed, got {apply_status}: {applied}"
+    );
+    restored.close().await;
+}
+
 async fn json_request(
     app: axum::Router,
     method: &str,
