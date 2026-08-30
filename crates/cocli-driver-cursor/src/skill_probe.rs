@@ -82,10 +82,27 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temp");
         let binary = temp.path().join("cursor-agent");
-        std::fs::write(&binary, script).expect("script");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&binary).expect("create script");
+            file.write_all(script.as_bytes()).expect("write script");
+            file.sync_all().expect("sync script");
+        }
         std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755))
             .expect("permissions");
-        probe_skills_with_timeout(&binary, temp.path(), timeout).await
+        // Linux rejects exec of a file still open for write (ETXTBSY). The
+        // handle above is closed; retry if a sibling test races the inode.
+        let mut last = None;
+        for _ in 0..8 {
+            match probe_skills_with_timeout(&binary, temp.path(), timeout).await {
+                Err(DriverError::Io(error)) if error.raw_os_error() == Some(26) => {
+                    last = Some(DriverError::Io(error));
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                other => return other,
+            }
+        }
+        Err(last.expect("ETXTBSY retry exhausted"))
     }
 
     #[cfg(unix)]
