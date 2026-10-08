@@ -133,7 +133,7 @@ jobs:
             "target/${{ matrix.target }}/release" \
             dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: archive-${{ matrix.target }}
           path: dist/cocli-${{ needs.verify.outputs.version }}-${{ matrix.target }}.${{ matrix.ext }}
@@ -196,7 +196,7 @@ jobs:
             target/aarch64-unknown-linux-gnu/release \
             dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: archive-aarch64-unknown-linux-gnu
           path: dist/cocli-${{ needs.verify.outputs.version }}-aarch64-unknown-linux-gnu.tar.gz
@@ -255,7 +255,7 @@ jobs:
             echo "no darwin archives to sign" >&2
             exit 1
           }
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: ${{ steps.apple.outputs.present == 'true' }}
         with:
           name: signed-archive-apple-darwin
@@ -301,7 +301,7 @@ jobs:
           New-Item -ItemType Directory -Path signed -Force | Out-Null
           $archive = Join-Path 'dist' ("cocli-$env:VERSION-x86_64-pc-windows-msvc.zip")
           ./scripts/sign-windows-archive.ps1 -Version $env:VERSION -Archive $archive -OutDir signed
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: ${{ steps.windows.outputs.present == 'true' }}
         with:
           name: signed-archive-x86_64-pc-windows-msvc
@@ -364,7 +364,7 @@ jobs:
           (cd dist && ../scripts/write-sha256sums.sh . "${files[@]}")
           echo "--- SHA256SUMS ---"
           cat dist/SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: sha256sums
           path: dist/SHA256SUMS
