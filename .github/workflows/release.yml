@@ -225,13 +225,13 @@ jobs:
           fi
       - name: Download aarch64 darwin archive
         if: ${{ steps.apple.outputs.present == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: archive-aarch64-apple-darwin
           path: dist
       - name: Download x86_64 darwin archive
         if: ${{ steps.apple.outputs.present == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: archive-x86_64-apple-darwin
           path: dist
@@ -286,7 +286,7 @@ jobs:
           fi
       - name: Download windows archive
         if: ${{ steps.windows.outputs.present == 'true' }}
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: archive-x86_64-pc-windows-msvc
           path: dist
@@ -316,12 +316,12 @@ jobs:
     if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' && (needs.package-aarch64-linux.result == 'success' || needs.package-aarch64-linux.result == 'skipped') && (needs.sign-macos.result == 'success' || needs.sign-macos.result == 'skipped') && (needs.sign-windows.result == 'success' || needs.sign-windows.result == 'skipped') }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: archive-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           pattern: signed-archive-*
@@ -378,18 +378,18 @@ jobs:
     # Tag pushes only. workflow_dispatch must not create/move/clobber v0.0.0.
     if: ${{ !cancelled() && github.event_name == 'push' && needs.verify.outputs.publish_release == 'true' && needs.verify.result == 'success' && needs.package.result == 'success' && needs.checksums.result == 'success' }}
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           pattern: archive-*
           path: dist
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         continue-on-error: true
         with:
           pattern: signed-archive-*
           path: signed
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: sha256sums
           path: dist
@@ -455,7 +455,7 @@ jobs:
     if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: archive-x86_64-unknown-linux-gnu
           path: dist
@@ -480,7 +480,7 @@ jobs:
     if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: archive-aarch64-apple-darwin
           path: dist
@@ -505,7 +505,7 @@ jobs:
     if: ${{ !cancelled() && needs.verify.result == 'success' && needs.package.result == 'success' }}
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v7
         with:
           name: archive-x86_64-pc-windows-msvc
           path: dist
